@@ -1,0 +1,99 @@
+package features
+
+import (
+	"log/slog"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
+	"github.com/davinakmalyasha/agents-proxy/internal/cache"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+)
+
+// DONE: PRD 6.5 (vertical builder) / STANDARDS A, D, F
+
+// BuilderDeps is the minimal dependency set the builder needs.
+type BuilderDeps struct {
+	Pool  *pgxpool.Pool
+	Cache *cache.Client
+	Auth  *authapi.Auth // staff session resolver (may be nil in tests)
+}
+
+// AllowedVerticals is the single source for the supported business
+// verticals. Mirror of the legacy internal/api list; the builder is
+// the consumer from now on.
+var AllowedVerticals = []string{
+	"fnb", "salon", "laundry", "klinik", "gym", "bimbel",
+	"bengkel", "beauty", "travel", "property", "katering", "photo",
+	"sports",
+}
+
+// IsAllowedVertical reports whether v is one of the allowed verticals.
+func IsAllowedVertical(v string) bool {
+	for _, a := range AllowedVerticals {
+		if a == v {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildVerticalRouter returns a chi router for one vertical. The
+// caller is responsible for /v1/{vertical} prefix.
+//
+// Layout:
+//
+//	/v1/{vertical}/records/...        ← records feature (default-on, no gate)
+//	/v1/{vertical}/{feature}/...      ← each registered feature, gated
+//
+// Each feature's request is gated by RequireFeature(name) which
+// reads the cached *cache.ClientModel from context — zero DB hit.
+func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
+	if !IsAllowedVertical(vertical) {
+		panic("features.BuildVerticalRouter: unknown vertical " + vertical)
+	}
+	recDeps := records.Deps{Pool: deps.Pool, Cache: deps.Cache}
+	r := chi.NewRouter()
+	if deps.Auth != nil {
+		r.Use(records.WithIdentity(records.IdentityDeps{Pool: deps.Pool, Cache: deps.Cache, Auth: deps.Auth}))
+	} else {
+		r.Use(records.WithClientAuth(recDeps))
+	}
+	rec := records.New(recDeps)
+	// records is always available, never gated.
+	r.Mount("/records", rec.Routes(vertical))
+	for _, f := range All() {
+		if f.Name == "records" {
+			continue
+		}
+		if !AllowedForVertical(f.Name, vertical) {
+			continue
+		}
+		gate := RequireFeature(f.Name)
+		if f.Routes != nil {
+			// Custom feature: it brings its own routes (e.g. a
+			// real-table feature with custom handlers). Mount them
+			// gated; the feature is responsible for its own
+			// withTenantTx / RLS discipline.
+			r.Route("/"+f.Name, func(rr chi.Router) {
+				rr.Use(gate)
+				f.Routes(rr, deps)
+			})
+			slog.Info("feature mounted (custom)", "vertical", vertical, "feature", f.Name)
+			continue
+		}
+		adapter := records.NewFeatureAdapter(recDeps, records.FeatureSpec{
+			Name:            f.Name,
+			Kind:            f.Kind,
+			ValidatePayload: f.ValidatePayload,
+		}, vertical)
+		r.Route("/"+f.Name, func(rr chi.Router) {
+			rr.Use(gate)
+			rr.Mount("/", adapter.Routes())
+		})
+		slog.Info("feature mounted", "vertical", vertical, "feature", f.Name)
+	}
+	return r
+}
