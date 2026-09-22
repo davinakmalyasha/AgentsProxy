@@ -1,0 +1,718 @@
+// Package kantin implements the "kantin" feature: a canteen POS with
+// products (cost + stock), sales, and stock movements. The sale is
+// ATOMIC in one WithTenantTx: total is computed server-side from DB
+// prices (never trusted from the client), stock is decremented, and
+// movements are logged. Port of CentrumBadminton's 0005_kantin.
+//
+// DONE: Phase 6 (Centrum migration) / STANDARDS A, D, F
+package kantin
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+)
+
+const featureName = "kantin"
+
+func init() { Register() }
+
+func Register() {
+	features.Register(features.Feature{
+		Name:          featureName,
+		Kind:          "",
+		DefaultOn:     false,
+		VerticalSlugs: []string{"sports"},
+		Routes:        routes,
+	})
+}
+
+func routes(r chi.Router, deps features.BuilderDeps) {
+	h := &handler{pool: deps.Pool}
+	// Products
+	r.Post("/products", h.createProduct)
+	r.Get("/products", h.listProducts)
+	r.Get("/products/{id}", records.WithValidID(h.getProduct))
+	r.Patch("/products/{id}", records.WithValidID(h.patchProduct))
+	r.Delete("/products/{id}", records.WithValidID(h.delProduct))
+	r.Post("/products/{id}/stock", records.WithValidID(h.adjustStock))
+	// Sales
+	r.Post("/sales", h.createSale) // the atomic sale
+	r.Get("/sales", h.listSales)
+	r.Get("/sales/{id}", records.WithValidID(h.getSale))
+	r.Get("/sales/{id}/items", records.WithValidID(h.listSaleItems))
+	r.Post("/sales/{id}/void", records.WithValidID(h.voidSale))
+}
+
+type handler struct {
+	pool *pgxpool.Pool
+}
+
+// ---- products ----
+
+type productResp struct {
+	ID                string  `json:"id"`
+	TenantID          string  `json:"tenant_id"`
+	Name              string  `json:"name"`
+	Category          string  `json:"category"`
+	Price             float64 `json:"price"`
+	CostPrice         float64 `json:"cost_price"`
+	TrackStock        bool    `json:"track_stock"`
+	Stock             int     `json:"stock"`
+	LowStockThreshold int     `json:"low_stock_threshold"`
+	IsActive          bool    `json:"is_active"`
+	CreatedAt         string  `json:"created_at"`
+}
+
+func (h *handler) createProduct(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	var req struct {
+		Name              string  `json:"name"`
+		Category          string  `json:"category"`
+		Price             float64 `json:"price"`
+		CostPrice         float64 `json:"cost_price"`
+		TrackStock        *bool   `json:"track_stock"`
+		Stock             *int    `json:"stock"`
+		LowStockThreshold *int    `json:"low_stock_threshold"`
+		SortOrder         *int    `json:"sort_order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		records.WriteJSONError(w, http.StatusBadRequest, "name required")
+		return
+	}
+	if req.Price < 0 || req.CostPrice < 0 {
+		records.WriteJSONError(w, http.StatusBadRequest, "price/cost must be >= 0")
+		return
+	}
+	track := false
+	if req.TrackStock != nil {
+		track = *req.TrackStock
+	}
+	stock := 0
+	if req.Stock != nil {
+		stock = *req.Stock
+	}
+	thr := 5
+	if req.LowStockThreshold != nil {
+		thr = *req.LowStockThreshold
+	}
+	cat := req.Category
+	if cat == "" {
+		cat = "lainnya"
+	}
+	sortOrder := 0
+	if req.SortOrder != nil {
+		sortOrder = *req.SortOrder
+	}
+	var id string
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`INSERT INTO sports_kantin_products (tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, sort_order)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
+			idn.TenantID(), req.Name, cat, req.Price, req.CostPrice, track, stock, thr, sortOrder).Scan(&id)
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (h *handler) listProducts(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	var out []productResp
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(r.Context(),
+			`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
+			   FROM sports_kantin_products WHERE tenant_id=$1 ORDER BY name LIMIT $2`,
+			idn.TenantID(), limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p productResp
+			var createdAt time.Time
+			if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
+				&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt); err != nil {
+				return err
+			}
+			p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (h *handler) getProduct(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var p productResp
+	var createdAt time.Time
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
+			   FROM sports_kantin_products WHERE id=$1::uuid AND tenant_id=$2`,
+			id, idn.TenantID(),
+		).Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
+			&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt)
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	records.WriteJSON(w, http.StatusOK, p)
+}
+
+func (h *handler) patchProduct(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Name       *string  `json:"name"`
+		Category   *string  `json:"category"`
+		Price      *float64 `json:"price"`
+		CostPrice  *float64 `json:"cost_price"`
+		TrackStock *bool    `json:"track_stock"`
+		LowStock   *int     `json:"low_stock_threshold"`
+		IsActive   *bool    `json:"is_active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	sets := []string{}
+	args := []any{}
+	idx := 1
+	if req.Name != nil {
+		sets = append(sets, "name = $"+strconv.Itoa(idx))
+		args = append(args, *req.Name)
+		idx++
+	}
+	if req.Category != nil {
+		sets = append(sets, "category = $"+strconv.Itoa(idx))
+		args = append(args, *req.Category)
+		idx++
+	}
+	if req.Price != nil {
+		if *req.Price < 0 {
+			records.WriteJSONError(w, http.StatusBadRequest, "price must be >= 0")
+			return
+		}
+		sets = append(sets, "price = $"+strconv.Itoa(idx))
+		args = append(args, *req.Price)
+		idx++
+	}
+	if req.CostPrice != nil {
+		if *req.CostPrice < 0 {
+			records.WriteJSONError(w, http.StatusBadRequest, "cost must be >= 0")
+			return
+		}
+		sets = append(sets, "cost_price = $"+strconv.Itoa(idx))
+		args = append(args, *req.CostPrice)
+		idx++
+	}
+	if req.TrackStock != nil {
+		sets = append(sets, "track_stock = $"+strconv.Itoa(idx))
+		args = append(args, *req.TrackStock)
+		idx++
+	}
+	if req.LowStock != nil {
+		sets = append(sets, "low_stock_threshold = $"+strconv.Itoa(idx))
+		args = append(args, *req.LowStock)
+		idx++
+	}
+	if req.IsActive != nil {
+		sets = append(sets, "is_active = $"+strconv.Itoa(idx))
+		args = append(args, *req.IsActive)
+		idx++
+	}
+	if len(sets) == 0 {
+		records.WriteJSONError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+	args = append(args, id, idn.TenantID())
+	sql := fmt.Sprintf("UPDATE sports_kantin_products SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
+		strings.Join(sets, ", "), idx, idx+1)
+	var affected int64
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(r.Context(), sql, args...)
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if affected == 0 {
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
+}
+
+func (h *handler) delProduct(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var affected int64
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(r.Context(),
+			`DELETE FROM sports_kantin_products WHERE id=$1::uuid AND tenant_id=$2`,
+			id, idn.TenantID())
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if affected == 0 {
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
+}
+
+// adjustStock changes stock directly (restock/waste/correction).
+func (h *handler) adjustStock(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Delta  int    `json:"delta"`
+		Reason string `json:"reason"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Delta == 0 {
+		records.WriteJSONError(w, http.StatusBadRequest, "delta must be non-zero")
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "correction"
+	}
+	var newStock int
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		err := tx.QueryRow(r.Context(), `UPDATE sports_kantin_products SET stock = stock + $1 WHERE id=$2::uuid AND tenant_id=$3 AND stock + $1 >= 0 RETURNING stock`,
+			req.Delta, id, idn.TenantID()).Scan(&newStock)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason, note) VALUES ($1,$2::uuid,$3,$4,$5)`,
+			idn.TenantID(), id, req.Delta, req.Reason, req.Note)
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			records.WriteJSONError(w, http.StatusConflict, "insufficient stock or product not found")
+			return
+		}
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "stock": newStock})
+}
+
+// ---- sales ----
+
+type saleItemReq struct {
+	ProductID string `json:"product_id"`
+	Qty       int    `json:"qty"`
+}
+
+type saleReq struct {
+	Method       string        `json:"method"`
+	CustomerName string        `json:"customer_name"`
+	Note         string        `json:"note"`
+	BookingID    string        `json:"booking_id"`
+	Items        []saleItemReq `json:"items"`
+}
+
+// createSale is the ATOMIC sale. Total is computed from DB prices;
+// stock is decremented; movements logged. One transaction.
+func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	var req saleReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if len(req.Items) == 0 {
+		records.WriteJSONError(w, http.StatusBadRequest, "items required")
+		return
+	}
+	if req.Method == "" {
+		req.Method = "cash"
+	}
+	if req.Method != "cash" && req.Method != "qris" {
+		records.WriteJSONError(w, http.StatusBadRequest, "method must be cash or qris")
+		return
+	}
+
+	var saleID string
+	var total float64
+	recordedBy := idn.UserID
+	var recordedByArg any
+	if recordedBy == "" {
+		recordedByArg = nil
+	} else {
+		recordedByArg = recordedBy
+	}
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Insert the sale header (total computed below).
+		if err := tx.QueryRow(r.Context(),
+			`INSERT INTO sports_kantin_sales (tenant_id, total, method, customer_name, note, booking_id, recorded_by)
+			 VALUES ($1,0,$2,$3,$4,NULLIF($5,'')::uuid,$6) RETURNING id::text`,
+			idn.TenantID(), req.Method, req.CustomerName, req.Note, req.BookingID, recordedByArg).Scan(&saleID); err != nil {
+			return err
+		}
+		for _, it := range req.Items {
+			if it.Qty < 1 || it.Qty > 99 {
+				return errors.New("bad qty")
+			}
+			var name string
+			var price, cost float64
+			var trackStock bool
+			var stock int
+			err := tx.QueryRow(r.Context(),
+				`SELECT name, price, cost_price, track_stock, stock FROM sports_kantin_products
+				  WHERE id=$1::uuid AND tenant_id=$2 AND is_active`,
+				it.ProductID, idn.TenantID()).Scan(&name, &price, &cost, &trackStock, &stock)
+			if err != nil {
+				return fmt.Errorf("product not found: %s", it.ProductID)
+			}
+			if trackStock && stock < it.Qty {
+				return fmt.Errorf("out of stock: %s", name)
+			}
+			total += price * float64(it.Qty)
+			// Sale item (tenant-scoped).
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_id, product_name, qty, unit_price, unit_cost)
+				 VALUES ($1,$2::uuid,$3::uuid,$4,$5,$6,$7)`,
+				idn.TenantID(), saleID, it.ProductID, name, it.Qty, price, cost); err != nil {
+				return err
+			}
+			if trackStock {
+				if _, err := tx.Exec(r.Context(),
+					`UPDATE sports_kantin_products SET stock = stock - $1 WHERE id=$2::uuid AND tenant_id=$3`,
+					it.Qty, it.ProductID, idn.TenantID()); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(r.Context(),
+					`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason) VALUES ($1,$2::uuid,$3,'sale')`,
+					idn.TenantID(), it.ProductID, -it.Qty); err != nil {
+					return err
+				}
+			}
+		}
+		// Set the server-computed total.
+		_, err := tx.Exec(r.Context(),
+			`UPDATE sports_kantin_sales SET total=$1 WHERE id=$2::uuid`, total, saleID)
+		return err
+	})
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "out of stock") || strings.Contains(msg, "product not found") || msg == "bad qty" {
+			records.WriteJSONError(w, http.StatusConflict, msg)
+			return
+		}
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusCreated, map[string]any{"id": saleID, "total": total})
+}
+
+type saleResp struct {
+	ID           string  `json:"id"`
+	TenantID     string  `json:"tenant_id"`
+	Total        float64 `json:"total"`
+	Method       string  `json:"method"`
+	CustomerName string  `json:"customer_name"`
+	Note         string  `json:"note"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	// ?date= single WIB day, or ?from/?to range (to exclusive) on
+	// created_at. ?limit bounds the rows (default 100, max 1000).
+	q := r.URL.Query()
+	date := strings.TrimSpace(q.Get("date"))
+	from, to := strings.TrimSpace(q.Get("from")), strings.TrimSpace(q.Get("to"))
+	for _, d := range []string{date, from, to} {
+		if d != "" {
+			if _, err := time.Parse("2006-01-02", d); err != nil {
+				records.WriteJSONError(w, http.StatusBadRequest, "date/from/to must be YYYY-MM-DD")
+				return
+			}
+		}
+	}
+	if from != "" && to != "" && to <= from {
+		records.WriteJSONError(w, http.StatusBadRequest, "to must be after from")
+		return
+	}
+	limit := 100
+	if l := strings.TrimSpace(q.Get("limit")); l != "" {
+		n, err := strconv.Atoi(l)
+		if err != nil || n < 1 {
+			records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		if n > 1000 {
+			n = 1000
+		}
+		limit = n
+	}
+	var out []saleResp
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		sql := `SELECT id::text, tenant_id, total, method, customer_name, note, created_at FROM sports_kantin_sales WHERE tenant_id=$1`
+		args := []any{idn.TenantID()}
+		idx := 2
+		wib := `(created_at AT TIME ZONE 'Asia/Jakarta')::date`
+		if date != "" {
+			sql += fmt.Sprintf(" AND %s = $%d::date", wib, idx)
+			args = append(args, date)
+			idx++
+		} else {
+			if from != "" {
+				sql += fmt.Sprintf(" AND %s >= $%d::date", wib, idx)
+				args = append(args, from)
+				idx++
+			}
+			if to != "" {
+				sql += fmt.Sprintf(" AND %s < $%d::date", wib, idx)
+				args = append(args, to)
+				idx++
+			}
+		}
+		sql += fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", limit)
+		rows, err := tx.Query(r.Context(), sql, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s saleResp
+			var createdAt time.Time
+			if err := rows.Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note, &createdAt); err != nil {
+				return err
+			}
+			s.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+			out = append(out, s)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func (h *handler) getSale(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var s saleResp
+	var createdAt time.Time
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(),
+			`SELECT id::text, tenant_id, total, method, customer_name, note, created_at FROM sports_kantin_sales WHERE id=$1::uuid AND tenant_id=$2`,
+			id, idn.TenantID(),
+		).Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note, &createdAt)
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	s.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	records.WriteJSON(w, http.StatusOK, s)
+}
+
+type saleItemResp struct {
+	ID          string  `json:"id"`
+	ProductName string  `json:"product_name"`
+	Qty         int     `json:"qty"`
+	UnitPrice   float64 `json:"unit_price"`
+	UnitCost    float64 `json:"unit_cost"`
+}
+
+// errForbidden signals a cross-tenant access attempt inside a tx
+// (mapped to 403 by the caller).
+var errForbidden = errors.New("forbidden")
+
+// listSaleItems returns the line items of one sale (riwayat detail +
+// item-level export). Sale must belong to the caller's tenant.
+func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var out []saleItemResp
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Tenant check via the parent sale (items' tenant_id is nullable backfill).
+		var saleTenant string
+		if err := tx.QueryRow(r.Context(),
+			`SELECT tenant_id FROM sports_kantin_sales WHERE id=$1::uuid`, id).Scan(&saleTenant); err != nil {
+			return err
+		}
+		if saleTenant != idn.TenantID() {
+			return errForbidden
+		}
+		rows, err := tx.Query(r.Context(),
+			`SELECT id::text, product_name, qty, unit_price, unit_cost
+			   FROM sports_kantin_sale_items WHERE sale_id=$1::uuid ORDER BY product_name`, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var it saleItemResp
+			if err := rows.Scan(&it.ID, &it.ProductName, &it.Qty, &it.UnitPrice, &it.UnitCost); err != nil {
+				return err
+			}
+			out = append(out, it)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		if err == errForbidden {
+			records.WriteJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if out == nil {
+		out = []saleItemResp{}
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// voidSale atomically restores stock for tracked items, writes void
+// movements, then deletes the sale (owner-only). Port of Centrum's
+// void_kantin_sale RPC.
+func (h *handler) voidSale(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireOwner(w, r)
+	if idn == nil {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Load the sale's tracked items (product_id + qty).
+		rows, err := tx.Query(r.Context(),
+			`SELECT product_id, qty FROM sports_kantin_sale_items
+			  WHERE sale_id=$1::uuid AND product_id IS NOT NULL`,
+			id)
+		if err != nil {
+			return err
+		}
+		type item struct {
+			productID string
+			qty       int
+		}
+		var items []item
+		for rows.Next() {
+			var it item
+			var pid string
+			if err := rows.Scan(&pid, &it.qty); err != nil {
+				rows.Close()
+				return err
+			}
+			it.productID = pid
+			items = append(items, it)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Restore stock + write void movements.
+		for _, it := range items {
+			if _, err := tx.Exec(r.Context(),
+				`UPDATE sports_kantin_products SET stock = stock + $1 WHERE id=$2::uuid AND tenant_id=$3`,
+				it.qty, it.productID, idn.TenantID()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason, note)
+				 VALUES ($1,$2::uuid,$3,'void', 'void sale')`,
+				idn.TenantID(), it.productID, it.qty); err != nil {
+				return err
+			}
+		}
+		// Delete the sale (cascades to sale_items).
+		_, err = tx.Exec(r.Context(),
+			`DELETE FROM sports_kantin_sales WHERE id=$1::uuid AND tenant_id=$2`,
+			id, idn.TenantID())
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			records.WriteJSONError(w, http.StatusNotFound, "sale not found")
+			return
+		}
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "voided"})
+}
