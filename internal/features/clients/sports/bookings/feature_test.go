@@ -1,0 +1,388 @@
+// Mandatory isolation + CRUD + the double-booking concurrency test
+// for the bookings feature. The double-booking test is the proof
+// that the exclusion constraint works under real concurrency: two
+// requests for the same facility+time can't both win.
+//
+// DONE: Phase 4 (sports vertical) / STANDARDS A, D, F
+package bookings
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/auth"
+	"github.com/davinakmalyasha/agents-proxy/internal/cache"
+	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+)
+
+type harness struct {
+	router    http.Handler
+	pool      *pgxpool.Pool // app role (RLS applies)
+	adminPool *pgxpool.Pool // superuser (seeding bypasses RLS)
+	rdb       *redis.Client
+}
+
+func setup(t *testing.T) *harness {
+	t.Helper()
+	dsn := os.Getenv("DATABASE_URL")
+	rurl := os.Getenv("REDIS_URL")
+	if dsn == "" || rurl == "" {
+		t.Skip("DATABASE_URL / REDIS_URL not set — skipping integration test")
+	}
+	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	if adminDSN == "" {
+		adminDSN = dsn
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	adminPool, err := db.NewPool(ctx, adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(adminPool.Close)
+	bootstrapAppRole(t, ctx, adminPool)
+	if err := db.Migrate(ctx, adminPool); err != nil {
+		t.Fatal(err)
+	}
+	// Clean this test's tenants under an advisory lock so the four
+	// sports packages don't race their DELETE+INSERT on the same
+	// tables (SQLSTATE XX000 "tuple concurrently updated").
+	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
+			 DELETE FROM sports_facilities WHERE tenant_id IN ('bk-a','bk-b');
+			 DELETE FROM clients WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
+			return err
+		}
+		seedClientTx(t, ctx, tx, "bk-a", "bk-a", "tok-bk-a", 1000000, "active", "records", "facilities", "bookings")
+		seedClientTx(t, ctx, tx, "bk-b", "bk-b", "tok-bk-b", 1000000, "active", "records", "facilities", "bookings")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := db.NewPool(ctx, toAppDSN(dsn))
+	if err != nil {
+		t.Fatalf("connect as app: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := adminPool.Exec(ctx,
+		`DELETE FROM sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
+		 DELETE FROM sports_facilities WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
+		t.Fatal(err)
+	}
+
+	rdb, err := redisx.NewClient(ctx, rurl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb.FlushDB(ctx)
+	t.Cleanup(func() { rdb.Close() })
+
+	cli := &cache.Client{DB: pool, RDB: rdb}
+	features.ResetForTest()
+	Register()
+	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
+	return &harness{router: fr, pool: pool, adminPool: adminPool, rdb: rdb}
+}
+
+func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
+	t.Helper()
+	stmts := []string{
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app') THEN
+				CREATE ROLE app LOGIN;
+			ELSE
+				ALTER ROLE app LOGIN;
+			END IF;
+		END $$`,
+		`GRANT USAGE ON SCHEMA public TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON clients TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
+		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
+	}
+	for _, s := range stmts {
+		if _, err := admin.Exec(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func toAppDSN(dsn string) string {
+	i := strings.Index(dsn, "://")
+	if i < 0 {
+		return dsn
+	}
+	rest := dsn[i+3:]
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return dsn
+	}
+	return dsn[:i+3] + "app" + rest[at:]
+}
+
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+	t.Helper()
+	hash := auth.HashToken(token)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		name, tenant, hash, quota, status, feats,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedClientTx is the tx variant used inside the locked setup.
+func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
+	t.Helper()
+	hash := auth.HashToken(token)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		name, tenant, hash, quota, status, feats,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedFacility(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) string {
+	t.Helper()
+	var id string
+	// Locked: seeding a facility INSERTS into sports_facilities while
+	// other sports packages DELETE from it during setup — Postgres can
+	// raise "tuple concurrently updated" (SQLSTATE XX000) at the page
+	// level even for different tenants.
+	err := testutil.LockAndRun(ctx, admin, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour, open_time, close_time)
+			 VALUES ($1,'Court 3','badminton',50000,'06:00','22:00') RETURNING id::text`,
+			tenant,
+		).Scan(&id)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	var req *http.Request
+	if body != "" {
+		req, _ = http.NewRequest(method, srv.URL+path, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req, _ = http.NewRequest(method, srv.URL+path, nil)
+	}
+	if token != "" {
+		req.Header.Set("X-Client-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func readJSON(t *testing.T, resp *http.Response) map[string]any {
+	t.Helper()
+	defer resp.Body.Close()
+	var m map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return m
+}
+
+func readAll(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	b := make([]byte, 4096)
+	n, _ := resp.Body.Read(b)
+	return string(b[:n])
+}
+
+func TestBookings_CRUD(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	// Create
+	body := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"19:00","end_time":"20:00","customer_name":"Alice","customer_phone":"+628123","price":50000}`
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+	if id == "" {
+		t.Fatal("create: no id")
+	}
+	// List by date
+	resp2 := doReq(t, h.router, "GET", "/bookings?date=2026-09-05", "tok-bk-a", "")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("list status=%d", resp2.StatusCode)
+	}
+	m2 := readJSON(t, resp2)
+	items, _ := m2["items"].([]any)
+	if len(items) != 1 {
+		t.Errorf("items=%d want 1", len(items))
+	}
+	// Get one
+	resp3 := doReq(t, h.router, "GET", "/bookings/"+id, "tok-bk-a", "")
+	if resp3.StatusCode != 200 {
+		t.Errorf("get status=%d", resp3.StatusCode)
+	}
+	// Patch → checked_in
+	resp4 := doReq(t, h.router, "PATCH", "/bookings/"+id, "tok-bk-a", `{"status":"checked_in"}`)
+	if resp4.StatusCode != 200 {
+		t.Errorf("patch status=%d", resp4.StatusCode)
+	}
+	// Delete → cancelled
+	resp5 := doReq(t, h.router, "DELETE", "/bookings/"+id, "tok-bk-a", "")
+	if resp5.StatusCode != 200 {
+		t.Errorf("delete status=%d", resp5.StatusCode)
+	}
+}
+
+// TestBookings_DoubleBooking is THE architecture-proving test: two
+// concurrent requests for the same facility + overlapping time →
+// exactly one wins, the other gets 409.
+func TestBookings_DoubleBooking(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	body := func(name string) string {
+		return `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"18:00","end_time":"19:00","customer_name":"` + name + `"}`
+	}
+
+	// Fire both at once (real HTTP concurrency through the whole
+	// stack: auth → gate → handler → exclusion constraint).
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+	for i, name := range []string{"Alice", "Bob"} {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			srv := httptest.NewServer(h.router)
+			defer srv.Close()
+			req, _ := http.NewRequest("POST", srv.URL+"/bookings", bytes.NewReader([]byte(body(name))))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Client-Token", "tok-bk-a")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results[i] = -1
+				return
+			}
+			results[i] = resp.StatusCode
+			resp.Body.Close()
+		}(i, name)
+	}
+	wg.Wait()
+
+	// Sort results so we can compare regardless of which won.
+	sorted := []int{results[0], results[1]}
+	if sorted[0] > sorted[1] {
+		sorted[0], sorted[1] = sorted[1], sorted[0]
+	}
+	if sorted[0] != 201 || sorted[1] != 409 {
+		t.Fatalf("expected [201 409], got %v (raw %v)", sorted, results)
+	}
+
+	// And the DB has exactly one booking for that slot.
+	var n int
+	h.adminPool.QueryRow(ctx,
+		`SELECT count(*) FROM sports_bookings WHERE tenant_id='bk-a' AND facility_id=$1::uuid AND date='2026-09-06'`,
+		fac).Scan(&n)
+	if n != 1 {
+		t.Errorf("DB has %d bookings for slot, want 1", n)
+	}
+}
+
+// TestBookings_TenantIsolation — the mandatory isolation test.
+func TestBookings_TenantIsolation(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	facA := seedFacility(t, ctx, h.adminPool, "bk-a")
+	facB := seedFacility(t, ctx, h.adminPool, "bk-b")
+
+	// A books.
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+		`{"facility_id":"`+facA+`","date":"2026-09-07","start_time":"10:00","end_time":"11:00","customer_name":"A"}`)
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	// B cannot see A's booking.
+	respL := doReq(t, h.router, "GET", "/bookings?date=2026-09-07", "tok-bk-b", "")
+	mL := readJSON(t, respL)
+	items, _ := mL["items"].([]any)
+	if len(items) != 0 {
+		t.Errorf("B saw %d bookings, want 0", len(items))
+	}
+	// B cannot get A's by id.
+	respG := doReq(t, h.router, "GET", "/bookings/"+id, "tok-bk-b", "")
+	if respG.StatusCode != 404 {
+		t.Errorf("B get status=%d want 404", respG.StatusCode)
+	}
+	// B can book the SAME time on B's OWN facility (no cross-tenant interference).
+	respB := doReq(t, h.router, "POST", "/bookings", "tok-bk-b",
+		`{"facility_id":"`+facB+`","date":"2026-09-07","start_time":"10:00","end_time":"11:00","customer_name":"B"}`)
+	if respB.StatusCode != 201 {
+		t.Errorf("B own-facility booking status=%d want 201", respB.StatusCode)
+	}
+}
+
+// TestBookings_Validation: outside facility hours → 400.
+func TestBookings_Validation(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	// Outside open hours (open 06:00, close 22:00).
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+		`{"facility_id":"`+fac+`","date":"2026-09-05","start_time":"23:00","end_time":"23:30","customer_name":"x"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("outside hours status=%d want 400 (body=%s)", resp.StatusCode, readAll(t, resp))
+	}
+	// end before start.
+	resp2 := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+		`{"facility_id":"`+fac+`","date":"2026-09-05","start_time":"20:00","end_time":"19:00","customer_name":"x"}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("end<start status=%d want 400", resp2.StatusCode)
+	}
+	// unknown facility.
+	resp3 := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+		`{"facility_id":"00000000-0000-0000-0000-000000000000","date":"2026-09-05","start_time":"10:00","end_time":"11:00","customer_name":"x"}`)
+	if resp3.StatusCode != 404 {
+		t.Errorf("unknown facility status=%d want 404", resp3.StatusCode)
+	}
+}
