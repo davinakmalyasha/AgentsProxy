@@ -1,0 +1,9 @@
+.git
+.gitignore
+bin/
+.env
+.env.*
+*.log
+*.md
+docs/
+.commandcode/
