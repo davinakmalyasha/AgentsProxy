@@ -1,0 +1,97 @@
+# ci.yml — runs on push and PR. Local quality gate equivalent.
+# Mirrors the STANDARDS §B checklist: tidy → vet → fmt → test -cover → build.
+
+# DONE: PRD §G (CI workflow) / STANDARDS §G
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27"
+
+jobs:
+  lint-build-test:
+    name: lint, build, test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agents_proxy_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
+      REDIS_URL: localhost:6379
+      # Tests skip if these aren't set; provide a dummy so the integration
+      # tests actually run.
+      LLM_API_KEY: test-key
+      ADMIN_API_KEY: test-admin-key
+      LLM_BASE_URL: http://127.0.0.1:18081
+      LLM_MODEL: mock-model
+      MAX_TOKENS_PER_REQUEST: "2048"
+      RATE_LIMIT_PER_MINUTE: "60"
+      ALLOW_ORIGINS: "*"
+      ENV: development
+      GOEXPERIMENT: "noswissmap=off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go mod tidy (check)
+        run: |
+          go mod tidy
+          if [[ -n $(git status --porcelain go.mod go.sum) ]]; then
+            echo "::error::go.mod or go.sum changed after 'go mod tidy'. Run 'go mod tidy' and commit."
+            exit 1
+          fi
+
+      - name: go fmt
+        run: go fmt ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build -v ./...
+
+      - name: go test (with coverage)
+        run: go test ./... -cover -count=1
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "## Coverage" >> $GITHUB_STEP_SUMMARY
+          go test ./... -cover -count=1 2>&1 | grep -E "coverage:|ok " >> $GITHUB_STEP_SUMMARY || true

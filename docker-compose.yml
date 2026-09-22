@@ -1,0 +1,71 @@
+# docker-compose.yml — PROD ONLY (Railway/VPS), NOT for Laragon dev.
+# Local Laragon runs Postgres + Redis directly; this file brings the
+# production-like stack up with one command.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agents_proxy
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--io-threads", "8", "--maxmemory", "75%", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      args:
+        VERSION: dev
+    environment:
+      PORT: "8080"
+      ENV: production
+      DATABASE_URL: postgres://app:app@postgres:5432/agents_proxy?sslmode=disable
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@postgres:5432/agents_proxy?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      MAX_TOKENS_PER_REQUEST: "2048"
+      RATE_LIMIT_PER_MINUTE: "60"
+      ALLOW_ORIGINS: ${ALLOW_ORIGINS:-*}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENV: ${SENTRY_ENV:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      TRACES_SAMPLE_RATE: ${TRACES_SAMPLE_RATE:-0.1}
+      PROFILES_SAMPLE_RATE: ${PROFILES_SAMPLE_RATE:-0.1}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/server", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
