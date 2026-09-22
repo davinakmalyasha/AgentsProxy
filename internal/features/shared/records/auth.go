@@ -1,0 +1,90 @@
+// Package records is the shared "records" feature — the generic CRUD
+// engine over tenant_records. It also provides the per-request auth
+// helper that every other shared feature uses.
+//
+// DONE: PRD 6.5 (records feature) / STANDARDS A, D, F
+package records
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/cache"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
+	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
+)
+
+// Deps is what handlers and the routes builder need.
+type Deps struct {
+	Pool  *pgxpool.Pool
+	Cache *cache.Client
+}
+
+// WithClientAuth is the exported version of the per-request auth
+// middleware. It is the single place every business endpoint
+// resolves X-Client-Token and stashes the *cache.ClientModel.
+func WithClientAuth(deps Deps) func(http.Handler) http.Handler { return withClientAuth(deps) }
+
+// withClientAuth reads X-Client-Token, validates via cache, and
+// stashes the resolved client (and tenant) into the request context.
+// 401 on bad/missing, 403 on paused/blocked, 500 on internal.
+func withClientAuth(deps Deps) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tok := r.Header.Get("X-Client-Token")
+			if tok == "" {
+				writeJSONError(w, http.StatusUnauthorized, "missing X-Client-Token")
+				return
+			}
+			cm, err := deps.Cache.GetByToken(r.Context(), tok)
+			if err != nil {
+				if errors.Is(err, cache.ErrInvalidToken) {
+					writeJSONError(w, http.StatusUnauthorized, "invalid token")
+					return
+				}
+				slog.Error("client auth lookup", "err", err)
+				writeJSONError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			if cm.Status != "active" {
+				writeJSONError(w, http.StatusForbidden, "client "+cm.Status)
+				return
+			}
+			ctx := clientctx.WithClient(r.Context(), cm)
+			ctx = middleware.SetClientID(ctx, cm.ID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// withTenantTx opens a transaction, sets the per-statement GUC
+// `app.tenant_id`, and runs fn inside it. RLS policies use the GUC.
+// The connection is held for the duration of fn — never call this
+// and then return a `pgx.Tx` to a goroutine.
+func withTenantTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(ctx)
+			panic(p)
+		}
+	}()
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("set tenant_id: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return err
+	}
+	return tx.Commit(ctx)
+}
