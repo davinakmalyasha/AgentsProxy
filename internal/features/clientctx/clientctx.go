@@ -44,12 +44,31 @@ func (id *Identity) TenantID() string {
 }
 
 // IsOwner reports whether the identity is an owner or a full-access
-// client token (client tokens keep owner-level access for API/agent).
+// client token (client tokens keep owner-level DATA access for
+// API/agent integrations).
+//
+// This is the business-data tier. It is NOT sufficient for anything
+// that changes who has access - see IsStaffOwner.
 func (id *Identity) IsOwner() bool {
 	if id == nil {
 		return false
 	}
 	return id.Role == RoleOwner || id.Role == RoleClient
+}
+
+// IsStaffOwner reports whether the identity is a real owner SESSION.
+//
+// Narrower than IsOwner on purpose: a client API token is a single
+// static secret (usually embedded in a site or integration), and it
+// must not be able to escalate to persistent human-level access by
+// editing staff roles or a bot's allow_chat_ids. Data writes stay on
+// IsOwner so the API-integration model keeps working; identity and
+// access changes come here.
+func (id *Identity) IsStaffOwner() bool {
+	if id == nil {
+		return false
+	}
+	return id.Role == RoleOwner
 }
 
 type ctxKey struct{}

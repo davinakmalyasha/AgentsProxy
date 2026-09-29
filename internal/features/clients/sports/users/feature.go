@@ -153,12 +153,14 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireIdentity(w, r)
+	// This handler changes STAFF IDENTITY (role, is_active) — it is the
+	// security-administration tier, not the data tier. It previously
+	// checked only RequireIdentity plus IsOwner, which admitted a
+	// client API token, because IsOwner() is deliberately true for
+	// RoleClient. A static integration secret must not be able to
+	// promote a staff account to owner or deactivate one.
+	idn := records.RequireStaffOwner(w, r)
 	if idn == nil {
-		return
-	}
-	if !idn.IsOwner() {
-		records.WriteJSONError(w, http.StatusForbidden, "owner only")
 		return
 	}
 	id := chi.URLParam(r, "id")

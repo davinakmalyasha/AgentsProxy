@@ -56,7 +56,7 @@ type botResp struct {
 }
 
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireOwner(w, r)
+	idn := records.RequireStaffOwner(w, r)
 	if idn == nil {
 		return
 	}
@@ -99,7 +99,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireOwner(w, r)
+	idn := records.RequireStaffOwner(w, r)
 	if idn == nil {
 		return
 	}
@@ -176,7 +176,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireOwner(w, r)
+	idn := records.RequireStaffOwner(w, r)
 	if idn == nil {
 		return
 	}
@@ -283,7 +283,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) del(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireOwner(w, r)
+	idn := records.RequireStaffOwner(w, r)
 	if idn == nil {
 		return
 	}

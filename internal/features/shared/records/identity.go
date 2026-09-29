@@ -116,6 +116,13 @@ func RequireIdentity(w http.ResponseWriter, r *http.Request) *clientctx.Identity
 }
 
 // RequireOwner rejects staff pegawai (owner + client tokens pass).
+//
+// This is the BUSINESS-DATA tier: it answers "may this caller change
+// tenant data?" and deliberately admits a client token, because a
+// client site's backend legitimately writes through X-Client-Token and
+// RLS pins the tenant. Data writes are bounded by quota and auditable.
+//
+// For anything that changes WHO HAS ACCESS, use RequireStaffOwner.
 func RequireOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identity {
 	id := RequireIdentity(w, r)
 	if id == nil {
@@ -123,6 +130,32 @@ func RequireOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identity {
 	}
 	if !id.IsOwner() {
 		writeJSONError(w, http.StatusForbidden, "owner only")
+		return nil
+	}
+	return id
+}
+
+// RequireStaffOwner is the SECURITY-ADMINISTRATION tier and is
+// deliberately narrower than RequireOwner: a real owner session only,
+// never a client token.
+//
+// The split is the threat model, not a role preference. A client token
+// is one static secret, typically embedded in a site or an integration.
+// Business writes are quota-bounded and auditable, so letting that
+// token make them is the platform's API-integration model and stays.
+// But letting the same token rewrite a Telegram bot's allow_chat_ids or
+// promote a staff account would turn a leaked integration secret into
+// persistent human-level access, and no quota limits that.
+//
+// Use this on: staff identity/role changes, the bot registry, and
+// anything else that alters access rather than data.
+func RequireStaffOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identity {
+	id := RequireIdentity(w, r)
+	if id == nil {
+		return nil
+	}
+	if !id.IsStaffOwner() {
+		writeJSONError(w, http.StatusForbidden, "owner session required")
 		return nil
 	}
 	return id
