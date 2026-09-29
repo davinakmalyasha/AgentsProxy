@@ -161,6 +161,19 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 			return answer, nil
 		}
 		// Execute the tool call — isolated per role (same LLM_API_KEY, different allowlist).
+		//
+		// TWO gates, and both must pass:
+		//   1. this allowlist, keyed on the role string passed to
+		//      RunWithRole;
+		//   2. a.Tools.Get below, which only contains what the ToolSet
+		//      was built with (see NewToolSetFor).
+		//
+		// The public landing chat deliberately passes role="client" for
+		// the prompt, off-topic guard and cost caps, but constructs its
+		// ToolSet with "anon" because it has no credential and the
+		// caller picks the tenant. Gate 2 is therefore the one that stops
+		// it reaching tenant rows. If you ever build the ToolSet from a
+		// wider role than gate 1, gate 2 is what holds the line.
 		if role != "owner" {
 			if !allowedToolsFor(role)[call.Tool] {
 				hist = append(hist, llm.Message{Role: "assistant", Content: reply})

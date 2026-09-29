@@ -73,8 +73,13 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Per-IP identity for anon client (not shared "Client" user)
 	userName := "client:" + clientIP(r)
-	// Use client toolset (3 tools, no money) — same LLM key, isolation by allowlist
-	ts := agent.NewToolSetFor(h.Pool, "client")
+	// "anon" toolset, NOT "client": this endpoint carries no credential,
+	// so the tools run against a tenant the CALLER chose. The anon tier
+	// is deliberately read-free of tenant rows (pricing + availability
+	// only); the client tier keeps list_bookings because there the
+	// token pins the tenant via RLS. A public FAQ widget never needed
+	// customer names, so nothing here can leak another tenant's data.
+	ts := agent.NewToolSetFor(h.Pool, "anon")
 	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB})
 	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
 	if err != nil {

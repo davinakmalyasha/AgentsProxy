@@ -64,9 +64,14 @@ func NewToolSet(pool *pgxpool.Pool) *ToolSet {
 	return ts
 }
 
-// NewToolSetFor returns a filtered view for the given role: client, pegawai, owner.
-// Single shared LLM key (AgentsProxy/.env LLM_API_KEY) is reused, isolation is
-// by allowlist — client never sees money tools even if they guess the name.
+// NewToolSetFor returns a filtered view for the given role: anon, client,
+// pegawai, owner. Single shared LLM key (AgentsProxy/.env LLM_API_KEY) is
+// reused, isolation is by allowlist — no role sees a tool it was not
+// granted, even if the model guesses the name.
+//
+// "anon" exists because the public landing chat has no credential but
+// still runs tools against a caller-supplied tenant; "client" is the
+// authenticated API/agent tier and keeps its data tools.
 func NewToolSetFor(pool *pgxpool.Pool, role string) *ToolSet {
 	full := NewToolSet(pool)
 	if role == "owner" {
@@ -84,8 +89,27 @@ func NewToolSetFor(pool *pgxpool.Pool, role string) *ToolSet {
 
 func allowedToolsFor(role string) map[string]bool {
 	switch role {
+	case "anon":
+		// PUBLIC LANDING WIDGET — no credential of any kind.
+		//
+		// /v1/agent/client-chat accepts a caller-supplied tenant_id, so
+		// this tier must not be able to read tenant data at all: the
+		// caller chooses which tenant the tools run against. Anything
+		// that returns rows is excluded, which is why list_bookings
+		// (customer names, times, statuses) and query_attendance (visit
+		// counts) are NOT here even though the "client" tier has them.
+		//
+		// What a public FAQ widget actually needs: can I book, what does
+		// it cost, and when is it free.
+		return map[string]bool{
+			"get_pricing":      true,
+			"get_availability": true,
+		}
 	case "client":
-		// Landing visitor: FAQ + availability only — no money, no writes
+		// Authenticated API/agent integration (X-Client-Token). RLS
+		// scopes these to the token's own tenant, so listing that
+		// tenant's bookings is legitimate here. This tier is NOT usable
+		// for a public endpoint that lets the caller pick the tenant.
 		return map[string]bool{
 			"check_stock":      true,
 			"query_attendance": true,
