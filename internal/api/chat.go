@@ -25,6 +25,14 @@ type Chat struct {
 	Cache *cache.Client
 	LLM   *llm.Client
 	RDB   *redis.Client
+	// rateLimitPerMinute is the per-client request budget, applied once
+	// the body token resolves. 0 disables it.
+	rateLimitPerMinute int
+}
+
+// NewChat builds the chat handler with the per-client request budget.
+func NewChat(pool *pgxpool.Pool, cache *cache.Client, l *llm.Client, rdb *redis.Client, perMinute int) *Chat {
+	return &Chat{Pool: pool, Cache: cache, LLM: l, RDB: rdb, rateLimitPerMinute: perMinute}
 }
 
 type chatRequest struct {
@@ -126,6 +134,19 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Make client_id visible to logging + rate-limit middleware.
 	r = r.WithContext(middleware.SetClientID(r.Context(), clientModel.ID))
+
+	// Per-account request budget. The outer /v1 limiter runs before the
+	// token in the body is resolved, so it can only key by IP; this is
+	// where the client id finally exists. The monthly quota below is
+	// the spend ceiling, but a rate limit keeps a single noisy caller
+	// from monopolising the shared LLM connection pool.
+	if ok, retryAfter := middleware.AllowClient(r.Context(), h.RDB, h.rateLimitPerMinute, "chat", clientModel.ID); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "rate limit exceeded"})
+		return
+	}
 
 	if _, _, qerr := quota.Check(r.Context(), h.Pool, h.RDB, clientModel.ID, clientModel.MonthlyQuotaTokens); qerr != nil {
 		if quota.IsExceeded(qerr) {

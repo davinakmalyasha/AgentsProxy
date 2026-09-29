@@ -6,10 +6,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 )
 
 // DONE: PRD 6.5 (vertical builder) / STANDARDS A, D, F
@@ -19,6 +21,12 @@ type BuilderDeps struct {
 	Pool  *pgxpool.Pool
 	Cache *cache.Client
 	Auth  *authapi.Auth // staff session resolver (may be nil in tests)
+	// Redis + RateLimitPerMinute drive the per-account limiter, which
+	// can only run AFTER the identity middleware resolves a client.
+	// Both may be zero: a nil Redis leaves the limiter unmounted, which
+	// is what the unit-test harnesses rely on.
+	Redis              *redis.Client
+	RateLimitPerMinute int
 }
 
 // AllowedVerticals is the single source for the supported business
@@ -60,6 +68,14 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 		r.Use(records.WithIdentity(records.IdentityDeps{Pool: deps.Pool, Cache: deps.Cache, Auth: deps.Auth}))
 	} else {
 		r.Use(records.WithClientAuth(recDeps))
+	}
+	// Per-account limiter, mounted AFTER the identity middleware so
+	// CtxClientID is populated. The outer /v1 limiter already bounds by
+	// IP; this restores the per-client budget that IP bucketing would
+	// otherwise merge for everyone behind one NAT. Scope is namespaced
+	// per vertical so one tenant's traffic cannot consume another's.
+	if deps.Redis != nil && deps.RateLimitPerMinute > 0 {
+		r.Use(middleware.RateLimitClient(deps.Redis, deps.RateLimitPerMinute, "client:"+vertical))
 	}
 	rec := records.New(recDeps)
 	// records is always available, never gated.

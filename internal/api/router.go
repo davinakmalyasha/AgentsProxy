@@ -60,12 +60,7 @@ func NewRouter(d Deps) http.Handler {
 		// Global per-client/IP rate limit (default 180). Chat gets stricter sub-limit below.
 		r.Use(middleware.RateLimit(d.Redis, d.Cfg.RateLimitPerMinute))
 
-		chatH := &Chat{
-			Pool:  d.Pool,
-			Cache: d.Cache,
-			LLM:   d.LLM,
-			RDB:   d.Redis,
-		}
+		chatH := NewChat(d.Pool, d.Cache, d.LLM, d.Redis, d.Cfg.RateLimitPerMinute)
 		r.Post("/chat", chatH.ServeHTTP)
 
 		// Agent chat — single shared LLM_API_KEY, 1 bot shared, 3 doors (client/pegawai/owner)
@@ -106,7 +101,13 @@ func NewRouter(d Deps) http.Handler {
 		// Per-vertical feature platform. One builder call per
 		// vertical; the builder mounts the records feature plus
 		// every registered shared feature, each gated.
-		bDeps := features.BuilderDeps{Pool: d.Pool, Cache: d.Cache, Auth: d.Auth}
+		bDeps := features.BuilderDeps{
+			Pool:               d.Pool,
+			Cache:              d.Cache,
+			Auth:               d.Auth,
+			Redis:              d.Redis,
+			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
+		}
 		for _, v := range features.AllowedVerticals {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
