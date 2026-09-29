@@ -5,6 +5,7 @@ package reminder
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type fakeSender struct {
@@ -33,6 +35,27 @@ func (f *fakeSender) count() int {
 	return len(f.sent)
 }
 
+// scrubReminders removes every test-scoped row. Tick() runs on the
+// admin pool and deliberately delivers across ALL tenants, so one
+// test's leftover row (or a row from a previous aborted run) gets
+// picked up by the next test and breaks its send count. Tests share
+// one Postgres, so isolation is the test's job.
+func scrubReminders(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM agent_reminders
+		  WHERE text LIKE 'TEST-%' OR tenant_id LIKE 'rem-%'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM agent_reminders
+			  WHERE text LIKE 'TEST-%' OR tenant_id LIKE 'rem-%'`)
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM clients WHERE tenant_id LIKE 'rem-%'`)
+	})
+}
+
 func TestScheduler_SendsDue(t *testing.T) {
 	dsn := os.Getenv("DATABASE_ADMIN_URL")
 	if dsn == "" {
@@ -48,6 +71,7 @@ func TestScheduler_SendsDue(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	scrubReminders(t, ctx, pool)
 
 	// Seed a client + a due + a future reminder (admin pool, RLS off).
 	for _, stmt := range []string{
@@ -139,6 +163,7 @@ func TestScheduler_DeliversConcurrently(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	scrubReminders(t, ctx, pool)
 
 	for _, stmt := range []string{
 		`DELETE FROM agent_reminders WHERE tenant_id='rem-par'`,
@@ -191,4 +216,102 @@ func TestScheduler_DeliversConcurrently(t *testing.T) {
 		return err
 	})
 	_, _ = pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id='rem-par'`)
+}
+
+// Two drivers (the Go ticker on a long-running host, the Supabase
+// pg_cron driver on serverless) must never deliver the same row twice.
+// This is the invariant the whole claim design exists to provide, so it
+// is asserted directly: fire two Ticks concurrently and require that
+// the senders together saw each row exactly once.
+func TestScheduler_TwoDriversDeliverEachRowOnce(t *testing.T) {
+	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	scrubReminders(t, ctx, pool)
+
+	for _, stmt := range []string{
+		`DELETE FROM agent_reminders WHERE tenant_id='rem-two'`,
+		`DELETE FROM clients WHERE tenant_id='rem-two'`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM agent_reminders WHERE tenant_id='rem-two'`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM clients WHERE tenant_id='rem-two'`)
+	})
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
+		 VALUES ('rem-two','rem-two','hash-remt',1000,'active','sports',ARRAY['records','telegram'])`); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	for i := 0; i < n; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO agent_reminders (tenant_id, chat_id, text, remind_at)
+			 VALUES ('rem-two','12345', $1, now() - interval '1 minute')`,
+			fmt.Sprintf("row %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// One shared counter across both drivers: if a row were delivered
+	// twice it would show up as 2 and the total would exceed n.
+	shared := &fakeSender{}
+	drivers := []*Scheduler{New(pool, shared.Send), New(pool, shared.Send)}
+	var wg sync.WaitGroup
+	for _, d := range drivers {
+		wg.Add(1)
+		go func(d *Scheduler) {
+			defer wg.Done()
+			d.Tick()
+		}(d)
+	}
+	wg.Wait()
+
+	if shared.count() != n {
+		t.Fatalf("total sends=%d want %d (a row was delivered more than once)", shared.count(), n)
+	}
+	seen := map[string]int{}
+	for _, s := range shared.sent {
+		seen[s]++
+	}
+	if len(seen) != n {
+		t.Fatalf("distinct reminders delivered=%d want %d", len(seen), n)
+	}
+	for text, count := range seen {
+		if count != 1 {
+			t.Errorf("reminder %q sent %d times, want 1", text, count)
+		}
+	}
+
+	// Every row terminal, none left claimed.
+	var sent, stuck int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_reminders WHERE tenant_id='rem-two' AND status='sent'`).Scan(&sent); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_reminders WHERE tenant_id='rem-two' AND status='sending'`).Scan(&stuck); err != nil {
+		t.Fatal(err)
+	}
+	if sent != n {
+		t.Errorf("sent rows=%d want %d", sent, n)
+	}
+	if stuck != 0 {
+		t.Errorf("rows still claimed=%d want 0 (a driver crashed mid-send)", stuck)
+	}
 }

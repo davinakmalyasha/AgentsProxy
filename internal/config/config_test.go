@@ -112,17 +112,16 @@ func TestLoad_ScalingKnobDefaults(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "x")
 	t.Setenv("ADMIN_API_KEY", "x")
 	t.Setenv("AGENT_RATE_LIMIT_PER_MINUTE", "")
-	t.Setenv("NOTIFY_QUEUE_SIZE", "")
 	t.Setenv("TELEGRAM_CONCURRENCY", "")
 	c, _ := Load()
 	if c.AgentRateLimitPerMinute != 20 {
 		t.Errorf("AgentRateLimit default = %d want 20", c.AgentRateLimitPerMinute)
 	}
-	if c.NotifyQueueSize != 64 {
-		t.Errorf("NotifyQueueSize default = %d want 64", c.NotifyQueueSize)
-	}
 	if c.TelegramConcurrency != 32 {
 		t.Errorf("TelegramConcurrency default = %d want 32", c.TelegramConcurrency)
+	}
+	if !c.BackgroundTickers {
+		t.Error("BackgroundTickers default should be true (long-running hosts own delivery)")
 	}
 }
 
@@ -131,16 +130,16 @@ func TestLoad_ScalingKnobOverrides(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "x")
 	t.Setenv("ADMIN_API_KEY", "x")
 	t.Setenv("AGENT_RATE_LIMIT_PER_MINUTE", "40")
-	t.Setenv("NOTIFY_QUEUE_SIZE", "128")
 	t.Setenv("TELEGRAM_CONCURRENCY", "8")
+	t.Setenv("BACKGROUND_TICKERS", "false")
 	c, _ := Load()
 	if c.AgentRateLimitPerMinute != 40 {
 		t.Errorf("AgentRateLimit = %d want 40", c.AgentRateLimitPerMinute)
 	}
-	if c.NotifyQueueSize != 128 {
-		t.Errorf("NotifyQueueSize = %d want 128", c.NotifyQueueSize)
-	}
 	if c.TelegramConcurrency != 8 {
 		t.Errorf("TelegramConcurrency = %d want 8", c.TelegramConcurrency)
+	}
+	if c.BackgroundTickers {
+		t.Error("BACKGROUND_TICKERS=false should disable the ticker (serverless)")
 	}
 }

@@ -129,17 +129,26 @@ func main() {
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
 
-	// Notification queue (Phase 4 sports vertical). WaMeSender is the
-	// zero-credential default: it logs a wa.me deep link. Swap in a
-	// real provider sender (Meta/Twilio) later — the Sender interface
-	// isolates the change. Booking handlers enqueue; the worker sends
-	// asynchronously so WhatsApp latency/downtime never blocks a
-	// booking request.
-	notifyQ := notify.New(cfg.NotifyQueueSize)
-	notifyQ.Start(notify.WaMeSender{})
+	// Notification queue (Phase 4 sports vertical). Durable in
+	// notify_jobs (migration 029) rather than an in-process channel, so
+	// a job survives a serverless invocation being destroyed
+	// mid-request.
+	//
+	// Enqueue goes through adminPool: the call happens after the
+	// booking transaction is built but before it commits, so there is no
+	// app.tenant_id GUC set, and notify_jobs is FORCE RLS.
+	notifyQ := notify.New(adminPool)
+	if cfg.BackgroundTickers {
+		notifyQ.Start(notify.WaMeSender{})
+	} else {
+		slog.Info("notify drain disabled; Supabase webhook + pg_cron own delivery")
+	}
 	defer notifyQ.Stop()
-	bookings.NotifyFunc = func(to, text string) {
-		notifyQ.Enqueue(notify.Job{To: to, Text: text})
+	bookings.NotifyFunc = func(tenantID, to, text string) {
+		// Never let a queue hiccup fail the booking.
+		if err := notifyQ.Enqueue(context.Background(), tenantID, to, text); err != nil {
+			slog.Warn("notify enqueue", "tenant", tenantID, "to", to, "err", err)
+		}
 	}
 
 	// ---- Multi-bot Telegram (T3): bots live in telegram_bots, tokens
@@ -181,8 +190,18 @@ func main() {
 		// Reminder scheduler (admin pool so it can see all tenants'
 		// due reminders; per-tenant UPDATEs are RLS-scoped; delivery
 		// goes through each reminder's owning bot).
+		//
+		// BACKGROUND_TICKERS=off on serverless: the function is destroyed
+		// between requests so the 60s ticker would never tick, and
+		// Supabase pg_cron + the deliver-reminders Edge Function owns
+		// delivery instead. Both drivers claim rows (migration 030) so
+		// enabling both is safe, but only one should be active.
 		remSched := reminder.NewWithKey(adminPool, nil, tgVaultKey)
-		remSched.Start()
+		if cfg.BackgroundTickers {
+			remSched.Start()
+		} else {
+			slog.Info("reminder ticker disabled; delivery owned by Supabase pg_cron")
+		}
 		oldStop := reminderStop
 		reminderStop = func() { oldStop(); remSched.Stop(); tgMgr.Close() }
 	}

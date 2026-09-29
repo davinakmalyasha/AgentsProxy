@@ -33,8 +33,10 @@ func init() { Register() }
 
 // NotifyFunc is called after a booking is created/updated. The
 // sports feature wires this to the notify queue in main.go; tests
-// can leave it nil.
-var NotifyFunc func(to, text string)
+// can leave it nil. The tenant is passed explicitly because the
+// enqueue happens outside this request's transaction, so there is no
+// ambient tenant context to read.
+var NotifyFunc func(tenantID, to, text string)
 
 // Register registers the bookings feature. Safe to call from tests
 // after features.ResetForTest().
@@ -243,7 +245,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if NotifyFunc != nil && status == "confirmed" {
-		NotifyFunc(req.CustomerPhone, fmt.Sprintf(
+		NotifyFunc(idn.TenantID(), req.CustomerPhone, fmt.Sprintf(
 			"Booking confirmed: %s at %s, %s %s-%s",
 			req.CustomerName, facility, date.Format("Mon Jan 2"), req.StartTime, req.EndTime))
 	}

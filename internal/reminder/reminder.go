@@ -4,6 +4,15 @@
 //
 // The sender is a func so tests can inject a fake.
 //
+// TWO DRIVERS, ONE CLAIM. This ticker is the driver for long-running
+// hosts (Laragon, VPS, Railway). On serverless (Vercel) it is disabled
+// via REMINDER_TICKER=off and a Supabase Edge Function driven by
+// pg_cron delivers instead. Every path claims a row by atomically
+// flipping status to 'sending' and stamping claimed_at; drivers only
+// read status='pending', so the other driver can never see a claimed
+// row. private.reap_stale_claims() hands back rows orphaned by a crash.
+// See migrations 030_reminder_claim.sql and 031_delivery_roles.sql.
+//
 // DONE: Phase 5 (telegram agentic) / STANDARDS A, E
 package reminder
 
@@ -79,6 +88,7 @@ func (s *Scheduler) loop() {
 type dueReminder struct {
 	id, tenant, chat, text string
 	botTokenEnc            []byte // nil for legacy rows (use Send fallback)
+	claimedAt              time.Time
 }
 
 // Tick processes one batch of due reminders.
@@ -86,16 +96,37 @@ func (s *Scheduler) Tick() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Find due, pending reminders. The scheduler is internal infra
-	// (not a client endpoint), so it is constructed with the admin
-	// pool: the SELECT must see every tenant's due rows, which RLS
-	// would hide for the runtime role (no tenant GUC). The per-tenant
-	// UPDATE still scopes by tenant_id inside WithTenantTx.
+	// CLAIM due, pending reminders. The UPDATE in the same statement
+	// flips status to 'sending' and stamps claimed_at, so the claim is
+	// atomic with the read and the other driver cannot see these rows.
+	// FOR UPDATE SKIP LOCKED keeps two concurrent ticks (or a tick
+	// racing the Supabase driver) from colliding.
+	//
+	// The scheduler is internal infra (not a client endpoint), so it is
+	// constructed with the admin pool: the SELECT must see every
+	// tenant's due rows, which FORCE ROW LEVEL SECURITY would hide for
+	// the runtime role (no tenant GUC). The per-row completion UPDATEs
+	// still scope by claimed_at so a stale send cannot clobber a row
+	// the reaper handed back.
+	//
 	// Bot token joins inline so each reminder goes out its owning bot.
 	rows, err := s.Pool.Query(ctx,
-		`SELECT r.id::text, r.tenant_id, r.chat_id, r.text, b.token_enc
-		   FROM agent_reminders r LEFT JOIN telegram_bots b ON b.id = r.bot_id
-		  WHERE r.status='pending' AND r.remind_at <= now() LIMIT 50`)
+		`WITH due AS (
+			SELECT r.id FROM agent_reminders r
+			 WHERE r.status = 'pending' AND r.remind_at <= now()
+			 ORDER BY r.remind_at
+			 LIMIT $1
+			 FOR UPDATE SKIP LOCKED
+		), claimed AS (
+			UPDATE agent_reminders r
+			   SET status = 'sending', claimed_at = clock_timestamp()
+			  FROM due WHERE r.id = due.id
+			RETURNING r.id, r.tenant_id, r.chat_id, r.text, r.attempts,
+			          r.claimed_at, r.bot_id
+		)
+		SELECT c.id::text, c.tenant_id, c.chat_id, c.text, c.claimed_at, b.token_enc
+		  FROM claimed c
+		  LEFT JOIN telegram_bots b ON b.id = c.bot_id`, 50)
 	if err != nil {
 		slog.Warn("reminder query", "err", err)
 		return
@@ -104,7 +135,7 @@ func (s *Scheduler) Tick() {
 	var batch []dueReminder
 	for rows.Next() {
 		var d dueReminder
-		if err := rows.Scan(&d.id, &d.tenant, &d.chat, &d.text, &d.botTokenEnc); err != nil {
+		if err := rows.Scan(&d.id, &d.tenant, &d.chat, &d.text, &d.claimedAt, &d.botTokenEnc); err != nil {
 			slog.Warn("reminder scan", "err", err)
 			return
 		}
@@ -156,14 +187,25 @@ func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
 		s.bumpAttempts(ctx, d)
 		return
 	}
-	// Mark sent inside a tenant tx (RLS lets us update our own row).
-	err = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE agent_reminders SET status='sent' WHERE id=$1::uuid AND tenant_id=$2`, d.id, d.tenant)
-		return err
+	// Mark sent. Scoped by claimed_at: if the reaper already handed
+	// this row back to another driver, the update matches nothing and we
+	// must NOT report success.
+	//
+	// Tenant-scoped via WithTenantTx, matching the rest of the package:
+	// the per-row writes set app.tenant_id so RLS admits them, which
+	// keeps this working on a runtime pool as well as the admin one.
+	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE agent_reminders SET status='sent', claimed_at=NULL
+			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			slog.Warn("reminder claim lost before mark sent", "id", d.id)
+		}
+		return nil
 	})
-	if err != nil {
-		slog.Warn("reminder mark sent", "id", d.id, "err", err)
-	}
 }
 
 // deliver sends through the owning bot (decrypted per row). Legacy rows
@@ -205,20 +247,45 @@ var errHandledDead = errors.New("reminder dead-lettered")
 // maxAttempts caps send retries; beyond it the row is dead-lettered.
 const maxAttempts = 5
 
+// bumpAttempts records a transient send failure and releases the claim
+// so the row becomes visible to the next tick. Mirrors
+// private.fail_reminder (migration 031) including maxAttempts = 5.
+//
+// The claim design forces one change from the original: the old query
+// left `status` untouched because rows were never claimed. A claimed
+// row must be reset to 'pending' explicitly or it stays invisible to
+// every driver forever.
 func (s *Scheduler) bumpAttempts(ctx context.Context, d dueReminder) {
 	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE agent_reminders SET attempts = attempts + 1,
-			 status = CASE WHEN attempts + 1 >= $3 THEN 'dead' ELSE status END
-			  WHERE id=$1::uuid AND tenant_id=$2`, d.id, d.tenant, maxAttempts)
-		return err
+		tag, err := tx.Exec(ctx,
+			`UPDATE agent_reminders
+			    SET attempts = attempts + 1,
+			        status = CASE WHEN attempts + 1 >= $3 THEN 'dead' ELSE 'pending' END,
+			        claimed_at = NULL
+			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`,
+			d.id, d.claimedAt, maxAttempts)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			slog.Warn("reminder claim lost before bump", "id", d.id)
+		}
+		return nil
 	})
 }
 
 func (s *Scheduler) markDead(ctx context.Context, d dueReminder, reason string) {
 	slog.Warn("reminder dead-lettered", "id", d.id, "reason", reason)
 	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE agent_reminders SET status='dead' WHERE id=$1::uuid AND tenant_id=$2`, d.id, d.tenant)
-		return err
+		tag, err := tx.Exec(ctx,
+			`UPDATE agent_reminders SET status='dead', claimed_at=NULL
+			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			slog.Warn("reminder claim lost before dead-letter", "id", d.id)
+		}
+		return nil
 	})
 }

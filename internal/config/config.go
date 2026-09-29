@@ -35,10 +35,25 @@ type Config struct {
 	TelegramPollDev bool
 	// Agent-chat per-IP sub-limit (router hardcodes 20/min today).
 	AgentRateLimitPerMinute int
-	// WhatsApp/notify worker queue buffer (was hardcoded 64).
-	NotifyQueueSize int
 	// Telegram per-bot update concurrency (was hardcoded 32).
 	TelegramConcurrency int
+	// BackgroundTickers runs this process's own background loops: the
+	// 60s reminder ticker and the notify drain loop. Both mean the same
+	// thing - "am I a long-lived process that can own background work?"
+	//
+	// true  = long-running hosts (Laragon, VPS, Railway). The process
+	//         stays alive between ticks, so the loops actually run.
+	// false = serverless (Vercel), where the function is destroyed
+	//         between requests. The loops would never tick, so
+	//         Supabase owns delivery instead: a pg_cron job calls the
+	//         deliver-reminders Edge Function and a Database Webhook on
+	//         notify_jobs INSERT handles notifications.
+	//
+	// Both drivers claim rows atomically (migration 030) so they can
+	// never double-send; only one should be active per environment.
+	// Leaving it true on serverless is not a correctness bug, but it
+	// spends Active CPU on loops that can never fire.
+	BackgroundTickers bool
 }
 
 func Load() (*Config, error) {
@@ -65,8 +80,8 @@ func Load() (*Config, error) {
 		PublicURL:               strings.TrimRight(getenv("PROXY_PUBLIC_URL", ""), "/"),
 		TelegramPollDev:         strings.EqualFold(getenv("TELEGRAM_POLL_DEV", "false"), "true"),
 		AgentRateLimitPerMinute: getenvInt("AGENT_RATE_LIMIT_PER_MINUTE", 20),
-		NotifyQueueSize:         getenvInt("NOTIFY_QUEUE_SIZE", 64),
 		TelegramConcurrency:     getenvInt("TELEGRAM_CONCURRENCY", 32),
+		BackgroundTickers:       !strings.EqualFold(getenv("BACKGROUND_TICKERS", "true"), "false"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL is required")
@@ -128,11 +143,11 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t BACKGROUND_TICKERS=%t}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
-		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol,
+		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, c.BackgroundTickers,
 	)
 }
 
