@@ -33,9 +33,16 @@ func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	}
 	t.Cleanup(admin.Close)
 	// Ensure grants for the runtime role (idempotent).
+	//
+	// sports_users still gets full DML, but sports_sessions gets SELECT
+	// ONLY. Migration 032 revokes the session DML on purpose: the runtime
+	// reaches sessions through private.create_session / session_user /
+	// delete_session / touch_session, which derive tenant_id server-side.
+	// Re-granting INSERT here would silently reopen the hole that
+	// migration closed, so this is the test that would catch that.
 	for _, g := range []string{
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_users TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_sessions TO app`,
+		`GRANT SELECT ON sports_sessions TO app`,
 	} {
 		if _, err := admin.Exec(ctx, g); err != nil {
 			t.Fatal(err)
@@ -228,11 +235,14 @@ func TestSessionExpiry(t *testing.T) {
 	a, admin, _ := harness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// Insert an already-expired session directly.
+	// Insert an already-expired session directly. tenant_id is NOT NULL as
+	// of migration 032 and there is no column default, so the insert must
+	// name it. This runs on the superuser pool, which is why it bypasses
+	// both the revoked app grant and the RLS policy.
 	raw, hash, _ := GenerateSessionToken()
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_sessions (user_id, token_hash, expires_at)
-		 SELECT id, $1, now() - interval '1 hour' FROM sports_users WHERE tenant_id='auth-t'`,
+		`INSERT INTO sports_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, id, $1, now() - interval '1 hour' FROM sports_users WHERE tenant_id='auth-t'`,
 		hash); err != nil {
 		t.Fatal(err)
 	}
@@ -251,8 +261,8 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 	defer cancel()
 	raw, hash, _ := GenerateSessionToken()
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_sessions (user_id, token_hash, expires_at)
-		 SELECT id, $1, now() + interval '1 hour' FROM sports_users WHERE tenant_id='auth-t'`,
+		`INSERT INTO sports_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, id, $1, now() + interval '1 hour' FROM sports_users WHERE tenant_id='auth-t'`,
 		hash); err != nil {
 		t.Fatal(err)
 	}
@@ -293,5 +303,93 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 	}
 	if !third.After(first) {
 		t.Errorf("last_seen did not bump after backdate: %v -> %v", first, third)
+	}
+}
+
+// TestSessionTenantIsolation is the regression test for migration 032.
+//
+// Before it, sports_sessions carried no tenant_id and its policy was
+// USING (true), so any session token belonging to tenant B could be
+// resolved while acting as tenant A. These assert the two properties
+// that close it: the column exists and is populated, and a session
+// resolves to exactly the tenant of its own user.
+func TestSessionTenantIsolation(t *testing.T) {
+	_, admin, _ := harness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// tenant_id exists and is NOT NULL.
+	var nullable string
+	if err := admin.QueryRow(ctx,
+		`SELECT is_nullable FROM information_schema.columns
+		  WHERE table_name='sports_sessions' AND column_name='tenant_id'`).Scan(&nullable); err != nil {
+		t.Fatal(err)
+	}
+	if nullable != "NO" {
+		t.Errorf("sports_sessions.tenant_id is nullable=%q, want NOT NULL", nullable)
+	}
+
+	// The old open policy must be gone; only the tenant policy remains.
+	var open int
+	if err := admin.QueryRow(ctx,
+		`SELECT count(*) FROM pg_policies
+		  WHERE tablename='sports_sessions' AND policyname='sports_sessions_open'`).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 0 {
+		t.Error("sports_sessions_open (USING true) still present; cross-tenant session read is possible")
+	}
+
+	// create_session stamps the tenant from the user, so a session
+	// cannot be minted into a tenant the user does not belong to.
+	var got string
+	if err := admin.QueryRow(ctx,
+		`SELECT tenant_id FROM sports_sessions s
+		  JOIN sports_users u ON u.id = s.user_id
+		 WHERE u.tenant_id='auth-t' LIMIT 1`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "auth-t" {
+		t.Errorf("session tenant_id=%q, want auth-t", got)
+	}
+}
+
+// TestSessionDMLRevokedFromRuntime pins the privilege half of the
+// migration. If a future grant or migration hands INSERT back to the
+// runtime role, a caller could create a session for an arbitrary user_id
+// and pick the tenant themselves - bypassing the definer entirely. This
+// is the test that makes that regression loud.
+func TestSessionDMLRevokedFromRuntime(t *testing.T) {
+	_, admin, _ := harness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
+		var hasPriv bool
+		if err := admin.QueryRow(ctx,
+			`SELECT has_table_privilege('app', 'sports_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
+			t.Fatal(err)
+		}
+		if hasPriv {
+			t.Errorf("app still holds %s on sports_sessions; the definer boundary is bypassable", priv)
+		}
+	}
+
+	// The functions must stay unreachable from PUBLIC. Postgres grants
+	// EXECUTE to PUBLIC on every new function by default.
+	for _, fn := range []string{
+		"create_session(uuid,text,timestamptz)",
+		"session_user(text)",
+		"delete_session(text)",
+		"touch_session(text,timestamptz)",
+	} {
+		var pub bool
+		if err := admin.QueryRow(ctx,
+			`SELECT has_function_privilege('public', 'private.' || $1, 'EXECUTE')`, fn).Scan(&pub); err != nil {
+			t.Fatal(err)
+		}
+		if pub {
+			t.Errorf("PUBLIC can EXECUTE private.%s; any role reaching the schema can mint sessions", fn)
+		}
 	}
 }

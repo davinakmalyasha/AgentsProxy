@@ -246,13 +246,25 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "token gen")
 		return
 	}
-	if _, err := a.Pool.Exec(r.Context(),
-		`INSERT INTO sports_sessions (user_id, token_hash, expires_at)
-		 VALUES ($1::uuid, $2, now() + $3::interval)`,
+	// Session creation goes through a SECURITY DEFINER function
+	// (migration 032). The runtime role no longer holds INSERT on
+	// sports_sessions, and the function derives tenant_id from
+	// sports_users server-side rather than trusting the caller - which
+	// is what removes the ability to mint a session for a user in an
+	// arbitrary tenant.
+	var sessionID *string
+	if err := a.Pool.QueryRow(r.Context(),
+		`SELECT private.create_session($1::uuid, $2, now() + $3::interval)::text`,
 		id, tokenHash, SessionTTL.String(),
-	); err != nil {
+	).Scan(&sessionID); err != nil {
 		slog.Error("login session insert", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if sessionID == nil {
+		// create_session returns NULL when the user is gone or inactive
+		// between the password check and here.
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
@@ -265,8 +277,10 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 	tok := sessionToken(r)
 	if tok != "" {
+		// Definer function, not a direct DELETE: the runtime role lost
+		// DML on sports_sessions in migration 032.
 		_, _ = a.Pool.Exec(r.Context(),
-			`DELETE FROM sports_sessions WHERE token_hash=$1`, HashToken(tok))
+			`SELECT private.delete_session($1)`, HashToken(tok))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
@@ -287,13 +301,17 @@ func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
 }
 
 // UserByToken resolves a session token to a user, checking expiry.
+//
+// Reads through private.session_user (migration 032). sports_sessions
+// is now tenant-scoped by RLS and this lookup runs with no
+// app.tenant_id set, so a direct read would match nothing. The function
+// is SECURITY DEFINER and returns only these five columns, which also
+// keeps password_hash out of reach of a runtime query.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	var u User
 	err := a.Pool.QueryRow(ctx,
-		`SELECT u.id::text, u.tenant_id, u.email, u.role, u.full_name
-		   FROM sports_sessions s
-		   JOIN sports_users u ON u.id = s.user_id
-		  WHERE s.token_hash=$1 AND s.expires_at > now() AND u.is_active`,
+		`SELECT user_id::text, tenant_id, email, role, full_name
+		   FROM private.session_user($1)`,
 		HashToken(tok),
 	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &u.FullName)
 	if err != nil {
@@ -302,11 +320,10 @@ func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	// Bump last_seen but at most ~once a minute per session: a busy
 	// staff dashboard fires many authed requests and an unconditional
 	// UPDATE here would take a write lock on the session row every
-	// time. The conditional skips the write when a bump already
-	// happened recently.
+	// time. The threshold is passed into the function so the
+	// conditional is evaluated the same way it used to be in SQL.
 	_, _ = a.Pool.Exec(ctx,
-		`UPDATE sports_sessions SET last_seen_at=now()
-		  WHERE token_hash=$1 AND last_seen_at < now() - interval '1 minute'`, HashToken(tok))
+		`SELECT private.touch_session($1, now() - interval '1 minute')`, HashToken(tok))
 	return &u, nil
 }
 

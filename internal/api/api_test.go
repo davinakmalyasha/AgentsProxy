@@ -395,9 +395,12 @@ func seedStaffUser(t *testing.T, h *harness) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// tenant_id is NOT NULL as of migration 032, so name it. This runs on
+	// the test's superuser pool; the runtime role cannot insert here at all.
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO sports_sessions (user_id, token_hash, expires_at)
-		 VALUES ($1,$2, now() + interval '1 hour')`, uid, hash); err != nil {
+		`INSERT INTO sports_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, $1, $2, now() + interval '1 hour' FROM sports_users WHERE id = $1`,
+		uid, hash); err != nil {
 		t.Fatal(err)
 	}
 	return raw
