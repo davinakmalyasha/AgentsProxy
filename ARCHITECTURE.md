@@ -162,7 +162,7 @@ ACL SETUSER proxy_invalidator on >$STRONG ~cache:* ~ck:* +del +unlink +scan rese
 
 ### 4.2 RLS Rules (Miss One = Leak)
 
-1. **Enable on every public table:** `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` + `FORCE` optional. CI check: `SELECT * FROM pg_tables WHERE rowsecurity = false` must be 0. Policy without `ENABLE` = open.
+1. **Enable on every public table:** `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` + `FORCE` optional. CI check: `SELECT * FROM pg_tables WHERE table_schema = 'public' AND rowsecurity = false` must be 0. Policy without `ENABLE` = open. The check is **scoped to `public`** — `pg_catalog` and extension schemas are not ours to secure, and `notify_jobs` (our own table) *is* FORCE'd like the rest.
 2. **Fix grants:** legacy `anon`/`authenticated` auto-granted `select/insert/update/delete` — revoke to needed ops only.
 3. **One policy per operation** (`FOR SELECT/INSERT/UPDATE/DELETE`, no `FOR ALL` in prod) + `TO authenticated`. `USING` = visible rows, `WITH CHECK` = writable rows. `UPDATE` needs both.
 4. **`AS RESTRICTIVE` for tenant boundary:** `CREATE POLICY tenant_boundary ... AS RESTRICTIVE USING (tenant_id IN ...)` — restrictive combines with `AND`, permissive with `OR`. Prevents a later permissive policy leaking via union.
@@ -189,10 +189,11 @@ They compose, not compete. Use **both**:
   - Direct `db.<ref>.supabase.co:5432` → IPv6 only, full parity.
 - For Vercel: `connection_limit=1` per function. Keep `<40%` of `max_connections` if using PostgREST/Auth.
 
-### 4.4 What Else Is New (Use Later)
+### 4.4 What Else Is New (In Use Now)
 
-- **Edge Functions** Deno 2.1 (97% faster cold start via `waitUntil`).
-- **`pg_cron`** (1s granularity) + **`pgmq`** durable queues + `pg_net` async HTTP — compose for embedding pipelines, not needed here but available.
+- **Edge Functions** Deno 2.1 (97% faster cold start via `waitUntil`) — host the reminder and notification **delivery** drivers on serverless (§13).
+- **`pg_cron`** (1s granularity, we use 2 min) + **`pg_net`** async HTTP — the clock for time-driven work. The cron jobs are **gated on an `exists()` probe** so an idle system spends one indexed query per tick and zero Edge Function invocations, which matters against the Supabase free tier's 500k invocations/month.
+- **`pgmq`** was evaluated and **rejected**: it is a Supabase-only extension, and because migrations run in a single transaction (`db/migrate.go`) depending on it would abort the whole chain on Laragon or any VPS. `notify_jobs` reimplements the same model (read counter + visibility timeout) in four statements and works on any Postgres. Do not reintroduce an extension dependency into a migration.
 - **Storage** 14.8x faster deep pages (60M rows), `pgTAP` with `is_empty(another_tenant)`.
 
 ---
@@ -403,3 +404,101 @@ The scheduler polls `agent_reminders` across ALL tenants, so it runs on the admi
 - History lives in Redis (`ag:{tenant_id}`, 24h TTL). Fine for one instance; swap to Postgres if multi-instance.
 
 
+
+---
+
+## 13. The Scheduler Runs On Postgres, Not In The Process ✅
+
+### 13.1 Why the clock moved
+
+Reminders and notification sends are **time-driven** work: nothing
+happens until a deadline passes. On a long-running host the Go process
+owns that with a `time.Ticker` (`internal/reminder`). On serverless it
+cannot — the function is destroyed between requests, so the ticker never
+gets a tick and a reminder set for 8:00 silently never fires.
+
+Time passing is not an event. Nothing emits "it is 8:00". So *something*
+has to be watching the clock, and on a serverless platform the only
+always-on thing is the database. Hence `pg_cron`.
+
+### 13.2 Two drivers, one claim
+
+There are now two independent delivery drivers for the same rows:
+
+| | Long-running host | Serverless |
+|---|---|---|
+| Trigger | Go ticker, 60s | `pg_cron` -> `deliver-reminders` Edge Function |
+| Notify drain | Go ticker, 5s | DB Webhook on INSERT (instant) + cron backstop |
+| Stale-claim reaper | Go boot path | `pg_cron` -> `reap_stale_claims` (pure SQL, no HTTP) |
+
+They are made mutually exclusive by an **atomic claim**, not by a lock:
+
+```sql
+-- migrations 030 / 031
+UPDATE agent_reminders SET status = 'sending', claimed_at = clock_timestamp()
+ WHERE id IN (SELECT id FROM agent_reminders
+               WHERE status = 'pending' AND remind_at <= now()
+               ORDER BY remind_at LIMIT 20 FOR UPDATE SKIP LOCKED)
+```
+
+Drivers only ever read `status = 'pending'`, so a claimed row is invisible
+to the other driver. `claimed_at` doubles as an optimistic-concurrency
+token: completion writes are scoped `AND status = 'sending' AND claimed_at = $2`,
+so a send that outlived the reaper window cannot mark a row the reaper
+already handed back. `private.reap_stale_claims()` returns claims older
+than 10 minutes to `pending`; the window is ~75x the per-row send budget,
+so a slow-but-alive driver is never robbed mid-send.
+
+**Why not `FOR UPDATE` held across the send?** The send is an HTTP call
+to Telegram. Holding a row lock for its duration means a long-running
+transaction on the shared pool. The status flip gets the same mutual
+exclusion with no open transaction.
+
+Asserted directly: `TestScheduler_TwoDriversDeliverEachRowOnce` fires
+two concurrent ticks against a shared sender and requires every row to
+arrive exactly once.
+
+`notify_jobs` needs no claim flag — the same model pgmq uses (a read
+counter plus a visibility timeout) provides it, and a driver that dies
+before delete makes the row reappear rather than lose it.
+
+### 13.3 Why the vault key never enters Postgres
+
+`agent_reminders` is `FORCE ROW LEVEL SECURITY`, and its policy is
+`tenant_id = current_setting('app.tenant_id', true)`. FORCE applies to
+the table owner, so even a `SECURITY DEFINER` function owned by
+`postgres` cannot read across tenants — a cross-tenant sweeper has no
+single tenant GUC to set. The Go scheduler solves this with the admin
+pool (a superuser DSN).
+
+The Supabase driver gets a **strictly narrower** path:
+
+| Role | Attributes | Reach |
+|---|---|---|
+| `delivery_worker` | `NOLOGIN BYPASSRLS` | owns the claim functions, so they execute with its rights |
+| `delivery_caller` | `LOGIN NOBYPASSRLS` | `EXECUTE` on the claim functions **and nothing else** — no `USAGE` on `public`, no table grants |
+
+The ownership reassignment in migration 031 is load-bearing: without it
+the functions stay owned by the migration runner and `SECURITY DEFINER`
+executes as a superuser, bypassing every policy with far more authority
+than intended. `BYPASSRLS` skips row *policies* but not *GRANTs*, so
+`delivery_worker` also holds the narrow table grants it needs.
+
+The claim functions return bot tokens as **base64 ciphertext**. Deno
+decrypts them with WebCrypto AES-GCM — the same primitive as Go's
+`crypto/cipher.NewGCM` (`tgvault` wire format `0x01 || nonce(12) || ct`),
+so no re-encryption of existing `telegram_bots` rows is needed, and the
+vault key never has to be stored in Postgres at all. A database dump is
+not enough to impersonate a tenant's bot.
+
+Note `pgcrypto` could not have done this: `pgp_sym_decrypt` expects
+OpenPGP message format and `decrypt_iv` is raw AES-**CBC**. There is no
+raw AES-GCM in pgcrypto, which is what rules out a pure-SQL driver.
+
+### 13.4 The invariant to protect
+
+Anything added to the delivery path must keep this true: **a row is
+delivered exactly once per attempt, by exactly one driver.** The claim
+is the only thing holding that up, so a second delivery path that does
+not claim will double-send. If you add one, route it through
+`private.claim_*` rather than selecting rows directly.

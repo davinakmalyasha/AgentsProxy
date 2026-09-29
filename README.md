@@ -2,7 +2,7 @@
 
 > One deployed binary for all DFD agentic clients. `POST /v1/chat` (quota-metered LLM proxy) + `POST/GET /v1/{vertical}/*` (tenant CRUD, Supabase Postgres RLS) + `POST /v1/admin/*` (create token+quota). Client sites are static (Hostinger) — they call this.
 
-**Stack:** Go **1.27** + `chi/v5` + `pgx/v5/pgxpool` + `go-redis/v9` · **DB:** One Supabase Postgres 17 (tenancy) · **Cache:** Redis 8.10.1 · **Deploy:** Railway/VPS (persistent container) — NOT Vercel (duration limits kill long LLM calls).
+**Stack:** Go **1.27** + `chi/v5` + `pgx/v5/pgxpool` + `go-redis/v9` · **DB:** One Supabase Postgres 17 (tenancy) · **Cache:** Redis 8.10.1 · **Deploy:** Vercel (Go runtime) + Supabase, $0 — or Railway/VPS for a persistent container.
 
 ---
 
@@ -196,8 +196,53 @@ Append the new slug to `AllowedVerticals` in `internal/features/builder.go` and 
 
 ## Deploy
 
-- **Railway:** `railway up`, set env (`DATABASE_URL` = Supabase `6543` TX pooler, `REDIS_URL` = Redis Cloud or Upstash), healthcheck `GET /healthz`.
-- **VPS (Hostinger KVM):** `docker compose up -d` (builds binary ~15MB).
+Two supported shapes, both $0. Pick per environment — the code works
+either way because every background job is claim-based, not
+process-local.
+
+### Vercel + Supabase (serverless)
+
+The Go runtime builds a **native Linux binary** (not Wasm) from
+`cmd/server/main.go`; Vercel sets `GOOS=linux` and downloads the
+toolchain named in `go.mod`. The service is a **separate Vercel project
+from every client frontend** so platform secrets (`LLM_API_KEY`,
+`TELEGRAM_VAULT_KEY`, `DATABASE_URL`) are never in a frontend's env
+namespace.
+
+Serverless destroys the process between requests, so the in-process
+background loops cannot run. Set **`BACKGROUND_TICKERS=false`** and
+Supabase owns the clock: `pg_cron` calls a `deliver-reminders` Edge
+Function, and a Database Webhook on `notify_jobs` INSERT gives booking
+confirmations instant delivery with a cron backstop.
+
+- `ops/RUNBOOK-vercel.md` — env vars, deploy, what the cold start costs
+- `ops/RUNBOOK-delivery.md` — Edge Functions, `pg_cron`, Vault, verification
+
+Two things to get right, both silent when wrong:
+
+- `DB_POOL_MAX=2` (the default 20 is **per instance**; 20 concurrent
+  lambdas would open 400 connections into Supabase)
+- `TRUSTED_PROXY_CIDRS` must include Vercel's egress ranges, or
+  `X-Forwarded-For` is ignored, every client buckets as one IP, and you
+  rate-limit yourself into `429`s
+
+The old note "NOT Vercel (duration limits kill long LLM calls)" is
+**obsolete** — Hobby now allows 300s, well past this service's 60s
+`llm.Client` cap.
+
+### Railway / VPS / Hostinger (persistent container)
+
+- **Railway:** `railway up`, env (`DATABASE_URL` = Supabase `6543` TX
+  pooler, `REDIS_URL` = Redis Cloud or Upstash), healthcheck `GET /healthz`
+- **VPS (Hostinger KVM):** `docker compose up -d`
+- Leave `BACKGROUND_TICKERS` unset — the Go ticker owns delivery here and no
+  Supabase setup is needed
+
+### Docker images
+
+`Dockerfile:14` hardcodes `GOARCH=amd64`. Oracle Cloud's Ampere A1 (the
+free always-on tier) is ARM64 — build with `ARG TARGETARCH` and
+`buildx` if you deploy there.
 
 ## Known Gaps
 
