@@ -263,10 +263,70 @@ func TestBookings_CRUD(t *testing.T) {
 	if resp4.StatusCode != 200 {
 		t.Errorf("patch status=%d", resp4.StatusCode)
 	}
-	// Delete → cancelled
+	// Cancel from checked_in must be REFUSED. This state describes a slot
+	// that was really played; cancelling it would erase the court event
+	// and free an occupied slot. The DELETE used to have no status
+	// condition at all, so it silently succeeded here.
 	resp5 := doReq(t, h.router, "DELETE", "/bookings/"+id, "tok-bk-a", "")
-	if resp5.StatusCode != 200 {
-		t.Errorf("delete status=%d", resp5.StatusCode)
+	if resp5.StatusCode != 409 {
+		t.Errorf("delete from checked_in status=%d, want 409; body=%s", resp5.StatusCode, readAll(t, resp5))
+	}
+	if !strings.Contains(readAll(t, resp5), "cancellable") {
+		t.Errorf("409 body should explain the state is not cancellable, got %s", readAll(t, resp5))
+	}
+
+	// Cancel from a cancellable state must still work. Use a second
+	// booking: `checked_in` can only move to completed/no_show, so the
+	// first one cannot be walked back to a cancellable state.
+	body2 := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"21:00","end_time":"22:00","customer_name":"Alice","price":50000}`
+	resp6 := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body2)
+	if resp6.StatusCode != 201 {
+		t.Fatalf("create second status=%d body=%s", resp6.StatusCode, readAll(t, resp6))
+	}
+	id2, _ := readJSON(t, resp6)["id"].(string)
+	resp7 := doReq(t, h.router, "DELETE", "/bookings/"+id2, "tok-bk-a", "")
+	if resp7.StatusCode != 200 {
+		t.Errorf("delete from confirmed status=%d, want 200; body=%s", resp7.StatusCode, readAll(t, resp7))
+	}
+}
+
+// TestBookings_CancelKeepsTheRow pins that DELETE is a SOFT cancel. A
+// hard delete would cascade into sports_payments and destroy the ledger
+// entry the reports read, so the row must survive.
+func TestBookings_CancelKeepsTheRow(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	body := `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"19:00","end_time":"20:00","customer_name":"Bob","price":50000}`
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	id, _ := readJSON(t, resp)["id"].(string)
+
+	if r := doReq(t, h.router, "DELETE", "/bookings/"+id, "tok-bk-a", ""); r.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", r.StatusCode, readAll(t, r))
+	}
+
+	// Still readable, and its status is 'cancelled' — not gone.
+	resp2 := doReq(t, h.router, "GET", "/bookings/"+id, "tok-bk-a", "")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("booking vanished after cancel: status=%d", resp2.StatusCode)
+	}
+	if got, _ := readJSON(t, resp2)["status"].(string); got != "cancelled" {
+		t.Errorf("status after cancel = %q, want \"cancelled\"", got)
+	}
+
+	// Cancelling twice is a conflict, not a silent success.
+	if r := doReq(t, h.router, "DELETE", "/bookings/"+id, "tok-bk-a", ""); r.StatusCode != 409 {
+		t.Errorf("second cancel status=%d, want 409", r.StatusCode)
+	}
+
+	// An unknown id is a 404, distinct from the 409 above.
+	if r := doReq(t, h.router, "DELETE", "/bookings/00000000-0000-0000-0000-000000000000", "tok-bk-a", ""); r.StatusCode != 404 {
+		t.Errorf("delete unknown status=%d, want 404", r.StatusCode)
 	}
 }
 

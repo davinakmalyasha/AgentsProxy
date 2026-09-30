@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -102,9 +103,82 @@ var validBookingStatuses = map[string]bool{
 	"completed": true, "cancelled": true, "no_show": true,
 }
 
+// validTransitions is the authoritative state machine for a booking.
+// Hoisted to package scope so the PATCH handler and cancellableFrom
+// below are driven by the same table — previously it was a local, which
+// is how DELETE ended up able to cancel states PATCH would refuse.
+var validTransitions = map[string][]string{
+	"pending":    {"confirmed", "cancelled"},
+	"confirmed":  {"checked_in", "cancelled", "no_show"},
+	"checked_in": {"completed", "no_show"},
+}
+
+// buildUpdateSQL assembles the booking UPDATE for the PATCH handler.
+//
+// It is a function rather than an inline fmt.Sprintf so the compare-and-set
+// predicate can be asserted without a database. `idArg` is the position of
+// the id parameter; `guard` adds the status predicate at the position
+// after it and reports how many extra args the caller must append.
+//
+// The guard is the whole point: the handler reads the current status to
+// validate the transition, then writes. Building the statement before the
+// read left a window in which a second writer could move the row, and this
+// UPDATE matched on id alone — so the write landed on a state nobody
+// validated. `AND status = $n` makes it one atomic compare-and-set: if
+// anyone else got there first, zero rows match and the caller reports a
+// conflict instead of silently overwriting.
+func buildUpdateSQL(sets []string, idArg int, guard bool) (sql string, extraArgs int) {
+	sql = fmt.Sprintf("UPDATE sports_bookings SET %s WHERE id = $%d::uuid AND tenant_id = $%d",
+		strings.Join(sets, ", "), idArg, idArg+1)
+	if guard {
+		sql += fmt.Sprintf(" AND status = $%d", idArg+2)
+		return sql, 1
+	}
+	return sql, 0
+}
+
 // errOutsideHours is returned when a booking falls outside the
 // facility's open/close window; mapped to 400 (not 500).
 var errOutsideHours = errors.New("booking outside facility hours")
+
+
+// errNotCancellable is returned when a cancel is attempted from a state
+// that is not cancellable. Mapped to 409 so the UI can say "already
+// completed" instead of a generic failure.
+var errNotCancellable = errors.New("booking is not in a cancellable state")
+
+// cancellableFrom is the set of states a cancel may be applied from.
+//
+// It is derived from validTransitions rather than restated, so DELETE
+// and the PATCH transition rule can never disagree about what "cancel"
+// means. pending and confirmed have a 'cancelled' target; completed and
+// cancelled are terminal; checked_in and no_show describe a slot that
+// was really used, so cancelling them would erase a real court event
+// and re-open an occupied slot.
+var cancellableFrom = buildCancellableFrom()
+
+func buildCancellableFrom() map[string]bool {
+	m := map[string]bool{}
+	for from, targets := range validTransitions {
+		for _, to := range targets {
+			if to == "cancelled" {
+				m[from] = true
+			}
+		}
+	}
+	return m
+}
+
+// cancellableFromSQL is the same set as a SQL literal, for the DELETE
+// predicate. Sorted so the generated SQL is stable and diffable.
+var cancellableFromSQL = func() string {
+	allowed := make([]string, 0, len(cancellableFrom))
+	for s := range cancellableFrom {
+		allowed = append(allowed, s)
+	}
+	sort.Strings(allowed)
+	return "'" + strings.Join(allowed, "','") + "'"
+}()
 
 // create validates and inserts a booking. The exclusion constraint
 // rejects overlaps; we map that to a clean 409.
@@ -464,11 +538,6 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Status transition validation (Centrum parity)
-	validTransitions := map[string][]string{
-		"pending":    {"confirmed", "cancelled"},
-		"confirmed":  {"checked_in", "cancelled", "no_show"},
-		"checked_in": {"completed", "no_show"},
-	}
 	needsStatusCheck := req.Status != nil
 	var currentStatus string
 	if needsStatusCheck {
@@ -541,8 +610,6 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_bookings SET %s WHERE id = $%d::uuid AND tenant_id = $%d",
-		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	var transitionErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -582,16 +649,26 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 				return transitionErr
 			}
 		}
-		tag, err := tx.Exec(r.Context(), sql, args...)
+		// Built here, after the current status is known, so the
+		// compare-and-set predicate can be appended. See buildUpdateSQL.
+		sql, extra := buildUpdateSQL(sets, idx, needsStatusCheck)
+		runArgs := args
+		if extra > 0 {
+			runArgs = append(append([]any{}, args...), currentStatus)
+		}
+		tag, err := tx.Exec(r.Context(), sql, runArgs...)
 		if err != nil {
 			return err
 		}
 		affected = tag.RowsAffected()
 		if affected == 0 {
-			// Should not happen - log for debug
-			// If status check was needed, treat as concurrent modification
+			// With a status guard this means another writer moved the row
+			// between the SELECT above and here, so the transition this
+			// request was validated against never happened. Without one
+			// (a price/notes edit) it just means no such row, and the
+			// caller gets a 404 from the check after the transaction.
 			if needsStatusCheck {
-				transitionErr = fmt.Errorf("status already changed by another staff (affected 0) id=%s tenant=%s current=%s", id, idn.TenantID(), currentStatus)
+				transitionErr = fmt.Errorf("status already changed by another staff (booking %s is no longer %s)", id, currentStatus)
 				return transitionErr
 			}
 		}
@@ -630,30 +707,70 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
 
+// del cancels a booking.
+//
+// Two things about this handler are load-bearing.
+//
+// First, it is a SOFT cancel, and it has to stay one. The row survives
+// with status='cancelled' so the payment ledger, the no-show history and
+// the audit trail remain readable. A hard DELETE would cascade into
+// sports_payments (ON DELETE CASCADE, migration 014) and destroy the
+// financial record that the payment_status trigger and every report read.
+// Losing that on a revenue dispute is far worse than keeping a row.
+//
+// Second, the state is now checked, in the same UPDATE that writes it.
+// It used to be `WHERE id = ... AND tenant_id = ...` with no status
+// condition at all, so a booking that was already completed could be
+// dragged back to 'cancelled' — erasing a real court event and freeing
+// a slot that was actually played. Only pending and confirmed are
+// cancellable; completed and cancelled are terminal, and checked_in /
+// no_show describe a slot that was really used. Matching on the status
+// inside the UPDATE makes this a compare-and-set, so two staff members
+// pressing cancel at once cannot both win against different states.
+//
+// Any authenticated staff role may cancel: the PATCH transition already
+// allows both owner and pegawai to reach 'cancelled' from these states,
+// so restricting DELETE would be a UI-only distinction, not a boundary.
 func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireIdentity(w, r)
 	if idn == nil {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	var affected int64
+	var currentStatus string
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(r.Context(),
 			`UPDATE sports_bookings SET status = 'cancelled', updated_at = now()
-			  WHERE id = $1::uuid AND tenant_id = $2`,
+			  WHERE id = $1::uuid AND tenant_id = $2 AND status IN (`+cancellableFromSQL+`)`,
 			id, idn.TenantID())
 		if err != nil {
 			return err
 		}
-		affected = tag.RowsAffected()
-		return nil
+		if tag.RowsAffected() > 0 {
+			return nil
+		}
+		// Nothing matched. Distinguish "no such booking in this tenant"
+		// (404) from "exists but is not cancellable" (409) so the UI can
+		// tell the user which happened.
+		err = tx.QueryRow(r.Context(),
+			`SELECT status FROM sports_bookings WHERE id = $1::uuid AND tenant_id = $2`,
+			id, idn.TenantID()).Scan(&currentStatus)
+		if err != nil {
+			return err // pgx.ErrNoRows -> 404
+		}
+		return fmt.Errorf("%w: current status is %s", errNotCancellable, currentStatus)
 	})
-	if err != nil {
-		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+	if errors.Is(err, pgx.ErrNoRows) {
+		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if affected == 0 {
-		records.WriteJSONError(w, http.StatusNotFound, "not found")
+	if errors.Is(err, errNotCancellable) {
+		records.WriteJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		slog.Error("booking cancel", "err", err)
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "cancelled"})
