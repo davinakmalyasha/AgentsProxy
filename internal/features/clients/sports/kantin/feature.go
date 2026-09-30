@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -672,12 +673,31 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	// recorded_by scopes the result to one staff member's own sales, for
+	// the same reason as the payments list: the export route lets staff
+	// see their own rows only, and "me" is resolved server-side so nobody
+	// can pass another user's id.
+	recordedBy := strings.TrimSpace(q.Get("recorded_by"))
+	if recordedBy == "me" {
+		recordedBy = idn.UserID
+	}
+	if recordedBy != "" {
+		if _, err := uuid.Parse(recordedBy); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "recorded_by must be \"me\" or a uuid")
+			return
+		}
+	}
 	var out []saleResp
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, total, method, customer_name, note, created_at FROM sports_kantin_sales WHERE tenant_id=$1`
 		args := []any{idn.TenantID()}
 		idx := 2
 		wib := `(created_at AT TIME ZONE 'Asia/Jakarta')::date`
+		if recordedBy != "" {
+			sql += fmt.Sprintf(" AND recorded_by = $%d::uuid", idx)
+			args = append(args, recordedBy)
+			idx++
+		}
 		if date != "" {
 			sql += fmt.Sprintf(" AND %s = $%d::date", wib, idx)
 			args = append(args, date)

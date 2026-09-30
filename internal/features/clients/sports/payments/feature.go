@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -121,10 +122,23 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
 			return overpayErr
 		}
+		// recorded_by is who actually took the money, which is not the same
+		// as who created the booking: staff routinely collect payment for a
+		// booking someone else entered. Without it a staff-scoped ledger
+		// export can only attribute money to the booking's creator, so it
+		// would show up in the wrong person's export and nowhere in the
+		// taker's.
+		recordedBy := idn.UserID
+		var recordedByArg any
+		if recordedBy == "" {
+			recordedByArg = nil
+		} else {
+			recordedByArg = recordedBy
+		}
 		return tx.QueryRow(r.Context(),
-			`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, note)
-			 VALUES ($1,$2,$3,$4,$5) RETURNING id::text`,
-			idn.TenantID(), req.BookingID, req.Amount, req.Method, req.Note,
+			`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, note, recorded_by)
+			 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
+			idn.TenantID(), req.BookingID, req.Amount, req.Method, req.Note, recordedByArg,
 		).Scan(&id)
 	})
 	if overpayErr != nil {
@@ -176,6 +190,22 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	// recorded_by scopes the result to one staff member's own takings. It
+	// is a filter, not an authorisation boundary: the caller still reads
+	// within their own tenant, and "me" is resolved to the session's user
+	// id server-side so a staff member cannot pass someone else's id and
+	// read their rows.
+	recordedBy := strings.TrimSpace(q.Get("recorded_by"))
+	me := recordedBy == "me"
+	if me {
+		recordedBy = idn.UserID
+	}
+	if recordedBy != "" {
+		if _, err := uuid.Parse(recordedBy); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "recorded_by must be \"me\" or a uuid")
+			return
+		}
+	}
 	var out []paymentResp
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
@@ -185,6 +215,11 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		if bookingID != "" {
 			sql += fmt.Sprintf(" AND booking_id = $%d::uuid", idx)
 			args = append(args, bookingID)
+			idx++
+		}
+		if recordedBy != "" {
+			sql += fmt.Sprintf(" AND recorded_by = $%d::uuid", idx)
+			args = append(args, recordedBy)
 			idx++
 		}
 		if from != "" {
