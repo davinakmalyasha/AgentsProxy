@@ -17,9 +17,61 @@ const (
 	chatCompletionsPath = "/chat/completions"
 )
 
+// Message is one turn of the conversation.
+//
+// ToolCalls/ToolCallID are what make a real tool round-trip possible.
+// Without them the only way to return a result to the model is to fake it
+// as a user turn, which teaches the model that tool output is something
+// the user said â€” and leaves no id to correlate, so a model that emits two
+// calls cannot be answered unambiguously.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID is set on role:"tool" messages and names the call this
+	// message answers.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall is one function invocation requested by the model.
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON text, not an object
+}
+
+// ToolDef is an OpenAI-compatible tool declaration. Parameters must be a
+// JSON Schema object.
+type ToolDef struct {
+	Type     string       `json:"type"`
+	Function FunctionSpec `json:"function"`
+}
+
+type FunctionSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ToolChoice forces a specific function. A pointer to a ToolDef means
+// "call exactly this"; nil means let the model decide.
+type ToolChoice struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
+}
+
+// ForceTool builds a ToolChoice that pins the call to one function.
+func ForceTool(name string) *ToolChoice {
+	tc := &ToolChoice{Type: "function"}
+	tc.Function.Name = name
+	return tc
 }
 
 type Client struct {
@@ -41,11 +93,13 @@ func New(baseURL, apiKey, model string, maxTokens int) *Client {
 }
 
 type chatRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	MaxTokens       int       `json:"max_tokens"`
-	ReasoningEffort *string   `json:"reasoning_effort,omitempty"`
-	Thinking        *thinking `json:"thinking,omitempty"`
+	Model           string      `json:"model"`
+	Messages        []Message   `json:"messages"`
+	MaxTokens       int         `json:"max_tokens"`
+	ReasoningEffort *string     `json:"reasoning_effort,omitempty"`
+	Thinking        *thinking   `json:"thinking,omitempty"`
+	Tools           []ToolDef   `json:"tools,omitempty"`
+	ToolChoice      *ToolChoice `json:"tool_choice,omitempty"`
 }
 
 type thinking struct {
@@ -54,7 +108,8 @@ type thinking struct {
 
 type chatResponse struct {
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -66,6 +121,18 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// Completion is one model turn: either tool calls, or prose, or both.
+type Completion struct {
+	Content   string
+	ToolCalls []ToolCall
+	// FinishReason is the provider's own verdict ("stop",
+	// "tool_calls", "length"). Useful for telling "the model ignored the
+	// tool" apart from "the model ran out of tokens".
+	FinishReason  string
+	PromptTokens  int
+	CompletionTok int
+}
+
 // ErrProvider is returned for any non-2xx provider response. The
 // underlying error string is sanitized; do not echo it to clients.
 var ErrProvider = errors.New("provider error")
@@ -73,93 +140,139 @@ var ErrProvider = errors.New("provider error")
 // Chat posts messages to the provider's OpenAI-compatible endpoint and
 // returns the assistant reply and token counts. Never logs prompt or
 // response bodies.
+// Chat posts messages to the provider's OpenAI-compatible endpoint and
+// returns the assistant reply and token counts. Never logs prompt or
+// response bodies.
 func (c *Client) Chat(ctx context.Context, messages []Message, modelOverride string) (string, int, int, error) {
+	comp, err := c.Complete(ctx, messages, nil, nil, modelOverride)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return comp.Content, comp.PromptTokens, comp.CompletionTok, nil
+}
+
+// ChatWithTools is the function-calling entry point.
+//
+// `tools` is the OpenAI-compatible declaration list; `choice` pins the call
+// to one function (see ForceTool) or is nil to let the model choose.
+func (c *Client) ChatWithTools(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDef,
+	choice *ToolChoice,
+	modelOverride string,
+) (*Completion, error) {
+	return c.Complete(ctx, messages, tools, choice, modelOverride)
+}
+
+// Complete performs one model turn and returns whatever it produced: prose,
+// tool calls, or both.
+func (c *Client) Complete(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDef,
+	choice *ToolChoice,
+	modelOverride string,
+) (*Completion, error) {
 	model := c.DefaultModel
 	if modelOverride != "" {
 		model = modelOverride
 	}
-	// Non-thinking for efficiency: client/landing only needs retrieve-and-answer.
-	// Mimo v2.5 and DeepSeek Flash both benefit from low/no reasoning.
-	// Command Code currently rejects "none" for DeepSeek (see #697), so try "none" then fallback to "low".
-	// We send both shapes the provider might honor; server picks one.
-	reasonLow := "low"
-	reasonNone := "none"
 	payload := chatRequest{
-		Model:           model,
-		Messages:        messages,
-		MaxTokens:       c.MaxTokens,
-		ReasoningEffort: &reasonLow,
+		Model:      model,
+		Messages:   messages,
+		MaxTokens:  c.MaxTokens,
+		Tools:      tools,
+		ToolChoice: choice,
 	}
-	// For models that support explicit thinking disable, also send it
-	if strings.Contains(strings.ToLower(model), "mimo") || strings.Contains(strings.ToLower(model), "deepseek") {
+	// Non-thinking for efficiency: the client landing and the agent both
+	// only need retrieve-then-answer.
+	//
+	// This used to send "none" for MiMo/DeepSeek and retry with "low" when
+	// the provider answered 400 "Invalid option" — so on the configured
+	// gateway EVERY call cost two round-trips, and the retry was the only
+	// reason the agent worked at all. That gateway accepts only
+	// low|medium|high|xhigh|max, so "low" goes first now and the retry is
+	// kept purely as a fallback for a provider that wants the other shape.
+	reasonLow := "low"
+	payload.ReasoningEffort = &reasonLow
+	if isReasoningModel(model) {
 		payload.Thinking = &thinking{Type: "disabled"}
-		// Prefer none over low when provider adds support
-		payload.ReasoningEffort = &reasonNone
 	}
+
+	raw, status, err := c.post(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	if status != 0 && strings.Contains(raw, "Invalid option") {
+		// Provider dislikes "low"; try the explicit-thinking shape instead.
+		reasonNone := "none"
+		payload.ReasoningEffort = &reasonNone
+		raw, status, err = c.post(ctx, payload)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if status != 0 {
+		return nil, fmt.Errorf("%w: status %d", ErrProvider, status)
+	}
+
+	var out chatResponse
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("%w: decode", ErrProvider)
+	}
+	if out.Error != nil {
+		return nil, fmt.Errorf("%w: %s", ErrProvider, out.Error.Type)
+	}
+	if len(out.Choices) == 0 {
+		return nil, fmt.Errorf("%w: no choices", ErrProvider)
+	}
+	choice0 := out.Choices[0]
+	comp := &Completion{
+		Content:       choice0.Message.Content,
+		ToolCalls:     choice0.Message.ToolCalls,
+		FinishReason:  choice0.FinishReason,
+		PromptTokens:  out.Usage.PromptTokens,
+		CompletionTok: out.Usage.CompletionTokens,
+	}
+	if comp.PromptTokens == 0 && comp.CompletionTok == 0 {
+		// Fallback estimate when the provider reports no usage.
+		comp.CompletionTok = len(comp.Content)/4 + len(choice0.Message.ToolCalls)*16
+	}
+	return comp, nil
+}
+
+func isReasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "mimo") || strings.Contains(m, "deepseek")
+}
+
+// post sends one payload and returns the body plus a non-2xx status (0 when
+// the request itself failed, in which case err is set).
+func (c *Client) post(ctx context.Context, payload chatRequest) (string, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("marshal: %w", err)
+		return "", 0, fmt.Errorf("marshal: %w", err)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+chatCompletionsPath, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("new request: %w", err)
+		return "", 0, fmt.Errorf("new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("%w: %v", ErrProvider, err)
+		return "", 0, fmt.Errorf("%w: %v", ErrProvider, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("%w: read body", ErrProvider)
+		return "", 0, fmt.Errorf("%w: read body", ErrProvider)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// If we tried "none" and provider says invalid, retry with "low" (see #697)
-		if strings.Contains(string(raw), "Invalid option") && payload.ReasoningEffort != nil && *payload.ReasoningEffort == "none" {
-			low := "low"
-			payload.ReasoningEffort = &low
-			// keep Thinking disabled as well
-			body2, _ := json.Marshal(payload)
-			req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+chatCompletionsPath, bytes.NewReader(body2))
-			req2.Header.Set("Content-Type", "application/json")
-			req2.Header.Set("Authorization", "Bearer "+c.APIKey)
-			if resp2, err2 := c.HTTP.Do(req2); err2 == nil {
-				defer resp2.Body.Close()
-				raw2, _ := io.ReadAll(resp2.Body)
-				if resp2.StatusCode >= 200 && resp2.StatusCode < 300 {
-					raw = raw2
-					resp = resp2
-				} else {
-					// still error, fall through to generic
-					return "", 0, 0, fmt.Errorf("%w: status %d", ErrProvider, resp2.StatusCode)
-				}
-			} else {
-				return "", 0, 0, fmt.Errorf("%w: status %d", ErrProvider, resp.StatusCode)
-			}
-		} else {
-			return "", 0, 0, fmt.Errorf("%w: status %d", ErrProvider, resp.StatusCode)
-		}
+		return string(raw), resp.StatusCode, nil
 	}
-	var out chatResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", 0, 0, fmt.Errorf("%w: decode", ErrProvider)
-	}
-	if out.Error != nil {
-		return "", 0, 0, fmt.Errorf("%w: %s", ErrProvider, out.Error.Type)
-	}
-	if len(out.Choices) == 0 {
-		return "", 0, 0, fmt.Errorf("%w: no choices", ErrProvider)
-	}
-	reply := out.Choices[0].Message.Content
-	inTok := out.Usage.PromptTokens
-	outTok := out.Usage.CompletionTokens
-	if inTok == 0 && outTok == 0 {
-		// Fallback estimate.
-		outTok = len(reply) / 4
-	}
-	return reply, inTok, outTok, nil
+	return string(raw), 0, nil
 }

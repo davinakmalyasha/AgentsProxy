@@ -58,7 +58,7 @@ func agentHarness(t *testing.T, responses []string, realFacilityID *string) (*Ag
 	dsn := os.Getenv("DATABASE_URL")
 	rurl := os.Getenv("REDIS_URL")
 	if dsn == "" || rurl == "" {
-		t.Skip("DATABASE_URL / REDIS_URL not set — skipping integration test")
+		t.Skip("DATABASE_URL / REDIS_URL not set â€” skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -113,14 +113,14 @@ func agentHarness(t *testing.T, responses []string, realFacilityID *string) (*Ag
 
 func TestAgent_BooksSlot(t *testing.T) {
 	var facID string
-	// LLM: first call → tool call (with real facility id); second
-	// call (after tool result) → answer.
+	// LLM: first call â†’ tool call (with real facility id); second
+	// call (after tool result) â†’ answer.
 	a, pool, _ := agentHarness(t, []string{
 		`{"tool":"book_slot","args":{"facility_id":"__FAC__","date":"2026-09-10","start_time":"19:00","end_time":"20:00","customer_name":"Alice"}}`,
 		`{"answer":"Done! Court booked for Alice on 2026-09-10 19:00-20:00."}`,
 	}, &facID)
 	// Seed a facility for tenant 'agt-test' (inside a tenant tx so
-	// RLS allows the insert — the app role has no GUC by default).
+	// RLS allows the insert â€” the app role has no GUC by default).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := records.WithTenantTx(ctx, pool, "agt-test", func(tx pgx.Tx) error {
@@ -156,7 +156,7 @@ func TestAgent_BooksSlot(t *testing.T) {
 
 func TestAgent_DoubleBookErrorPropagates(t *testing.T) {
 	var facID string
-	// LLM: call book_slot → tool returns "slot already booked" error →
+	// LLM: call book_slot â†’ tool returns "slot already booked" error â†’
 	// LLM must see it and answer with the alternative offer.
 	a, pool, _ := agentHarness(t, []string{
 		`{"tool":"book_slot","args":{"facility_id":"__FAC__","date":"2026-09-10","start_time":"19:00","end_time":"20:00","customer_name":"Bob"}}`,
@@ -201,21 +201,5 @@ func TestAgent_DoubleBookErrorPropagates(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("bookings=%d want 1 (double-book must be rejected)", n)
-	}
-}
-
-func TestParseReply(t *testing.T) {
-	call, ans, ok := parseReply(`{"tool":"book_slot","args":{"x":1}}`)
-	if !ok || call.Tool != "book_slot" || ans != "" {
-		t.Errorf("tool parse: %+v %q %v", call, ans, ok)
-	}
-	_, ans2, ok2 := parseReply(`{"answer":"hello"}`)
-	if !ok2 || ans2 != "hello" {
-		t.Errorf("answer parse: %q %v", ans2, ok2)
-	}
-	// Non-JSON → not a structured reply.
-	_, _, ok3 := parseReply("sure, let me check")
-	if ok3 {
-		t.Errorf("plain text should not parse as structured")
 	}
 }

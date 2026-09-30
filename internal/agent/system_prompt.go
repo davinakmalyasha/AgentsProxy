@@ -6,31 +6,64 @@ package agent
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // SystemPrompt builds the agent's system prompt for a vertical + role.
 // The single shared LLM key (AgentsProxy/.env LLM_API_KEY → internal/llm/client.go)
 // is reused for all 3 doors — isolation is by prompt + tool allowlist, not by key.
 func SystemPrompt(vertical, tenantID string, toolDefs []string) string {
+	// The protocol paragraph used to instruct the model to answer with a
+	// bare JSON object in prose — {"tool": ..., "args": ...} or
+	// {"answer": ...} — which is what it tried to do, and failed: the
+	// model preferred its own <tool_call> wrapper, the parser missed it,
+	// and the raw markup reached the user. Tool calls now travel as the
+	// provider's real tool_calls field and results come back as role:"tool",
+	// so there is nothing for the model to format and nothing for us to
+	// parse. The prompt only has to describe the job.
+	//
+	// The current date is stated explicitly because the model otherwise
+	// guesses it when resolving "today"/"this month", and it guessed wrong
+	// (claiming today was three days earlier than it was). Tools default
+	// dates server-side too, but the model has to narrate the period it
+	// asked about, so it needs to know the truth.
 	base := `You are the AI assistant for a %s business. You help the owner manage the business by message.
 
-You can call tools to read and write the business data. When you call a tool you MUST respond with a single JSON object:
-{"tool": "<tool_name>", "args": { ... }}
-When you have the answer for the user, respond with:
-{"answer": "your friendly reply"}
+Today's date is %s (WIB, Asia/Jakarta). Resolve relative dates from it, and never state a different "today".
+
+You have tools that read and write the business data. Use them for anything
+about real numbers — never answer from memory or estimate.
 
 Rules:
-- Always resolve dates the user says like "tomorrow" or "today" into YYYY-MM-DD before calling tools.
-- If a tool returns an error (e.g. "slot already booked"), explain it to the user and offer a nearby alternative if possible.
-- Keep replies short and natural (2-4 sentences).
-- Never invent data that isn't from a tool result.
-- If you don't know which facility the user means, ask which one.
+- Resolve relative dates the user says like "today", "tomorrow" or "this month" into YYYY-MM-DD before using a tool.
+- If a tool returns an error, explain it plainly and offer a nearby alternative if you can.
+- Keep replies short and natural, in the language the user wrote in (2-4 sentences).
+- Never invent data that did not come from a tool result.
+- If you don't know which court or product the user means, ask which one.
+- When a tool result is empty, say so plainly and suggest what to look at instead of guessing.
+- Never repeat raw tool output, internal ids or markup. Answer in plain language.
 
 Available tools:
 %s`
 
-	return fmt.Sprintf(base, verticalName(vertical), strings.Join(toolDefs, "\n"))
+	return fmt.Sprintf(base, verticalName(vertical), wibToday(), strings.Join(toolDefs, "\n"))
 }
+
+// wibToday is today's date in the venue's timezone. The venue is WIB, and
+// every money/report query is filtered on WIB days server-side, so the model
+// and the data have to agree on which day it is.
+func wibToday() string {
+	return time.Now().In(wibLocation).Format("2006-01-02")
+}
+
+var wibLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		// Containers ship without tzdata; WIB is a fixed offset with no DST.
+		return time.FixedZone("WIB", 7*60*60)
+	}
+	return loc
+}()
 
 // SystemPromptForRole wraps SystemPrompt with a role persona. Client is
 // strictly FAQ / customer service / availability — no money.

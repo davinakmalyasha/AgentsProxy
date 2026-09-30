@@ -18,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
@@ -25,9 +27,61 @@ import (
 type Tool struct {
 	Name        string
 	Description string
-	Run         func(ctx context.Context, tenantID string, args json.RawMessage) string
+	// Parameters is a JSON Schema for the tool's arguments. It travels with
+	// the declaration to the provider, so the model has a real contract
+	// instead of an English sentence in Description, and the agent can
+	// reject a bad call before it reaches SQL. nil is treated as "no
+	// arguments".
+	Parameters json.RawMessage
+	Run        func(ctx context.Context, tenantID string, args json.RawMessage) string
 	// Roles that may call this tool. Empty = all (legacy). Used for isolation.
 	Roles []string
+	// Keywords the router matches against, lowercased. Kept separate from
+	// Description so routing does not have to parse prose, and so the words
+	// a user actually types can be curated independently of the wording
+	// shown to the model.
+	Keywords []string
+	// StrongKeywords are decisive: a hit outweighs every ordinary keyword
+	// a competing tool can accumulate. Use for terms with one meaning in
+	// this domain ("laba", "kosong", "excel").
+	StrongKeywords []string
+}
+
+// Defs returns the role-filtered tool set as provider-ready declarations,
+// sorted for a stable request body.
+func (ts *ToolSet) Defs() []llm.ToolDef {
+	names := make([]string, 0, len(ts.tools))
+	for n := range ts.tools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]llm.ToolDef, 0, len(names))
+	for _, n := range names {
+		t := ts.tools[n]
+		params := t.Parameters
+		if len(params) == 0 {
+			params = noArgs()
+		}
+		out = append(out, llm.ToolDef{
+			Type: "function",
+			Function: llm.FunctionSpec{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  params,
+			},
+		})
+	}
+	return out
+}
+
+// Names returns the available tool names, sorted.
+func (ts *ToolSet) Names() []string {
+	names := make([]string, 0, len(ts.tools))
+	for n := range ts.tools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ToolSet holds the tools for one agent instance.
@@ -139,7 +193,7 @@ func allowedToolsFor(role string) map[string]bool {
 	}
 }
 
-func (ts *ToolSet) add(t Tool) { ts.tools[t.Name] = t }
+func (ts *ToolSet) add(t Tool) { ts.tools[t.Name] = applyToolMeta(t) }
 
 // Get returns a tool by name.
 func (ts *ToolSet) Get(name string) (Tool, bool) {

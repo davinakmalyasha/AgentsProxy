@@ -3,13 +3,24 @@
 // the SAME business logic the REST API uses (via WithTenantTx + RLS),
 // then returns a natural-language reply.
 //
-// Tool-calling convention: the LLM returns a JSON object:
+// Tool-calling is the provider's own function-calling protocol, not a
+// convention invented in a prompt:
 //
-//	{"tool": "book_slot", "args": {...}}   → execute, feed result back
-//	{"answer": "Done — Court 3 booked ..."} → final reply
+//  1. route(message) picks a tool in Go, from the role-filtered ToolSet
+//  2. ChatWithTools sends the declarations with tool_choice PINNED to
+//     that tool, which is the only form this gateway honours
+//  3. the tool runs; its result goes back as a real role:"tool" message
+//     carrying the provider's tool_call_id
+//  4. the model narrates the result
 //
-// The loop runs at most maxRounds; if the LLM keeps calling tools
-// past that, we stop and return the last partial reply.
+// This replaced a text protocol where the model was asked to answer with
+// {"tool": ..., "args": ...} in prose. The model preferred its own
+// RLHF'd <tool_call>{function=â€¦} wrapper instead, the hand-rolled
+// parser did not recognise it, and the raw markup was rendered to the user
+// and stored in history. See router.go for why the tool is chosen here
+// rather than by the model.
+//
+// The loop runs at most maxRounds.
 //
 // DONE: Phase 5 (telegram agentic) / STANDARDS A, D, F
 package agent
@@ -107,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, tenantID, vertical, userName, message s
 }
 
 // RunWithRole is the role-aware entry. Same shared LLM key (AgentsProxy/.env LLM_API_KEY)
-// but filtered ToolSet per role — the isolation you asked for client vs pegawai vs owner.
+// but filtered ToolSet per role â€” the isolation you asked for client vs pegawai vs owner.
 func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, role, message string) (string, error) {
 	// Scope lock for client: if message is clearly off-topic/jailbreak, hardcode fallback without LLM
 	if role == "client" && isOffTopic(message) {
@@ -121,7 +132,7 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 	// Build role-filtered prompt. The filtered ToolSet is a pure
-	// function of (pool, role) and pool is fixed for the process —
+	// function of (pool, role) and pool is fixed for the process â€”
 	// cache per role instead of rebuilding ~20 closures + defs every
 	// message. Definitions() output is immutable, so a shared copy is
 	// safe to hand the prompt builder.
@@ -136,148 +147,136 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 	hist = append(hist, llm.Message{Role: "user", Content: userName + ": " + message})
 
 	rounds := 0
+	// Route once, in Go, over the already role-filtered ToolSet. A tool
+	// the role may not call is not in the set, so it cannot be selected.
+	routed := a.Tools.route(message)
+	defs := a.Tools.Defs()
+
 	for {
 		rounds++
 		if rounds > maxRounds {
 			break
 		}
-		reply, _, _, err := a.LLM.Chat(ctx, hist, "")
+
+		// Phase 1: get the tool call. Offer the declarations, pinning the
+		// choice when routing found something. Nothing is executed on the
+		// strength of a guess â€” the pinned name is the only thing that
+		// reaches the provider.
+		var choice *llm.ToolChoice
+		if routed.Tool != "" {
+			choice = llm.ForceTool(routed.Tool)
+		}
+		comp, err := a.LLM.ChatWithTools(ctx, hist, defs, choice, "")
 		if err != nil {
 			return "", err
 		}
-		// Parse the LLM's reply: tool call or final answer.
-		call, answer, ok := parseReply(reply)
-		if !ok {
-			// Not JSON — treat as a final answer (defensive).
-			if a.History != nil {
-				a.History.AppendForRole(tenantID, role, userName, message, reply)
+		if len(comp.ToolCalls) == 0 {
+			// No call. Either the model answered directly, or it ignored a
+			// pinned tool. Both are legitimate; a retry with a different
+			// tool is not, because routing is deterministic and already
+			// had its shot.
+			if routed.Tool != "" {
+				slog.Warn("agent: provider returned no tool call",
+					"tenant", tenantID, "role", role,
+					"pinned", routed.Tool, "score", routed.Score,
+					"finish", comp.FinishReason)
 			}
-			return strings.TrimSpace(reply), nil
+			return a.finish(ctx, tenantID, role, userName, message, sanitiseReply(comp.Content)), nil
 		}
-		if answer != "" {
-			if a.History != nil {
-				a.History.AppendForRole(tenantID, role, userName, message, answer)
-			}
-			return answer, nil
-		}
-		// Execute the tool call — isolated per role (same LLM_API_KEY, different allowlist).
-		//
-		// TWO gates, and both must pass:
-		//   1. this allowlist, keyed on the role string passed to
-		//      RunWithRole;
-		//   2. a.Tools.Get below, which only contains what the ToolSet
-		//      was built with (see NewToolSetFor).
-		//
-		// The public landing chat deliberately passes role="client" for
-		// the prompt, off-topic guard and cost caps, but constructs its
-		// ToolSet with "anon" because it has no credential and the
-		// caller picks the tenant. Gate 2 is therefore the one that stops
-		// it reaching tenant rows. If you ever build the ToolSet from a
-		// wider role than gate 1, gate 2 is what holds the line.
-		if role != "owner" {
-			if !allowedToolsFor(role)[call.Tool] {
-				hist = append(hist, llm.Message{Role: "assistant", Content: reply})
-				hist = append(hist, llm.Message{Role: "user", Content: "Error: you don't have access to tool " + call.Tool + ". This is a client FAQ bot — try availability or booking help."})
+
+		// Phase 2: run the tool. Tool results are recorded against the
+		// provider's own call id so the next turn can be matched to it.
+		for _, call := range comp.ToolCalls {
+			tool, ok := a.Tools.Get(call.Function.Name)
+			if !ok {
+				slog.Warn("agent: model asked for an unavailable tool",
+					"tenant", tenantID, "role", role, "tool", call.Function.Name)
+				hist = append(hist, llm.Message{
+					Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls,
+				})
+				hist = append(hist, llm.Message{
+					Role: "tool", ToolCallID: call.ID,
+					Content: "Error: no such tool " + call.Function.Name,
+				})
 				continue
 			}
+			args := normaliseArguments(call.Function.Arguments)
+			result := tool.Run(ctx, tenantID, args)
+			slog.Info("agent tool", "tenant", tenantID, "role", role,
+				"tool", call.Function.Name, "result", truncate(result, 200))
+			hist = append(hist, llm.Message{
+				Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls,
+			})
+			hist = append(hist, llm.Message{Role: "tool", ToolCallID: call.ID, Content: result})
 		}
-		tool, ok := a.Tools.Get(call.Tool)
-		if !ok {
-			hist = append(hist, llm.Message{Role: "assistant", Content: reply})
-			hist = append(hist, llm.Message{Role: "user", Content: "Error: unknown tool " + call.Tool + ". Pick a valid tool or answer directly."})
-			continue
+		// The next turn narrates: no declarations, so no further calls and
+		// the loop cannot wander.
+		comp, err = a.LLM.Complete(ctx, hist, nil, nil, "")
+		if err != nil {
+			return "", err
 		}
-		result := tool.Run(ctx, tenantID, call.Args)
-		slog.Info("agent tool", "tenant", tenantID, "tool", call.Tool, "result", truncate(result, 200))
-		// Feed the result back to the LLM.
-		hist = append(hist, llm.Message{Role: "assistant", Content: reply})
-		hist = append(hist, llm.Message{Role: "user", Content: "Tool " + call.Tool + " returned:\n" + result + "\nContinue: either answer the user or call another tool."})
+		return a.finish(ctx, tenantID, role, userName, message, sanitiseReply(comp.Content)), nil
 	}
 	// Ran out of rounds.
-	msg := "I hit my processing limit — please rephrase or ask in smaller steps."
+	msg := "I hit my processing limit â€” please rephrase or ask in smaller steps."
 	if a.History != nil {
 		a.History.AppendForRole(tenantID, role, userName, message, msg)
 	}
 	return msg, nil
 }
 
-// reply is the parsed LLM reply.
-type reply struct {
-	Tool   string          `json:"tool"`
-	Args   json.RawMessage `json:"args"`
-	Answer string          `json:"answer"`
+// finish records the exchange and returns the reply.
+func (a *Agent) finish(ctx context.Context, tenantID, role, userName, message, reply string) string {
+	if a.History != nil {
+		a.History.AppendForRole(tenantID, role, userName, message, reply)
+	}
+	return reply
 }
 
-// XML-ish wrappers some models emit around tool calls/answers. Compiled
-// once — parseReply runs on every agent turn, so per-call MustCompile
-// would be pure garbage under load.
-var (
-	reToolCall = regexp.MustCompile(`(?is)<tool_call\b[^>]*>\s*(.*?)\s*</tool_call>`)
-	reAnswer   = regexp.MustCompile(`(?is)<answer\b[^>]*>\s*(.*?)\s*</answer>`)
-	reFuncCall = regexp.MustCompile(`(?is)<function_call\b[^>]*>\s*(.*?)\s*</function_call>`)
-)
+// normaliseArguments guards against a provider sending empty or non-object
+// argument text. A tool's json.Unmarshal into a struct is a no-op for
+// anything that isn't an object, so an empty string would otherwise reach
+// Run and be silently ignored.
+func normaliseArguments(raw string) json.RawMessage {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return json.RawMessage(`{}`)
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		slog.Warn("agent: tool arguments were not a JSON object", "args", truncate(trimmed, 80))
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(trimmed)
+}
 
-// parseReply tries to parse the LLM's reply as a tool call or answer.
-// Tolerates markdown fences and XML-ish wrappers some models emit
-// (e.g. <tool_call>…</tool_call>, <answer>…</answer>, ```json … ```).
-func parseReply(s string) (call reply, answer string, ok bool) {
-	s = strings.TrimSpace(s)
-	// Strip <tool_call> / <answer> style XML wrappers (case-insensitive, multiline)
-	stripTag := func(re *regexp.Regexp) string {
-		if m := re.FindStringSubmatch(s); m != nil {
-			return strings.TrimSpace(m[1])
-		}
-		return s
+// protocolMarkup matches the shapes a model falls back on when it is not
+// given a real tool interface: the Hermes/Qwen plain-text wrappers, and
+// both envelopes the previous prompt-based protocol asked for
+// ({"tool":...,"args":...} and {"answer":...}).
+//
+// This is defence in depth. The primary fix is that a tool call now travels
+// as a real tool_calls field, so the model has no reason to improvise. But
+// the guard is what guarantees a regression cannot put protocol internals
+// in front of a user or into stored history — which is the failure that
+// shipped raw <tool_call>{function=…} markup into the chat and then
+// persisted it, repeating on every later turn of the same conversation.
+var protocolMarkup = regexp.MustCompile(
+	`(?is)<\s*/?\s*tool_call|<\s*/?\s*function_call|<\s*/?\s*parameter|` +
+		`<\s*/?\s*answer|"tool_call"\s*:|"function_call"\s*:|"tool"\s*:\s*"|"args"\s*:`)
+
+// sanitiseReply is the last gate before a model turn becomes a user-visible
+// answer. If the text still contains protocol markup, the caller is told so
+// in plain language rather than being shown the internals.
+func sanitiseReply(text string) string {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return "Saya belum bisa menjawab itu. Coba tanya hal yang lebih spesifik tentang data usaha."
 	}
-	s = stripTag(reToolCall)
-	s = stripTag(reAnswer)
-	s = stripTag(reFuncCall)
-	// Strip code fences if the model wrapped the JSON.
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "{") {
-		// Try to salvage an object embedded after a ":" or newline (e.g. `tool: {"tool":...}`)
-		if i := strings.Index(s, `{"tool"`); i >= 0 {
-			s = s[i:]
-		} else if i := strings.Index(s, `{"answer"`); i >= 0 {
-			s = s[i:]
-		} else {
-			return reply{}, "", false
-		}
+	if protocolMarkup.MatchString(t) {
+		slog.Warn("agent: reply contained protocol markup; suppressed")
+		return "Maaf, jawabannya tidak bisa ditampilkan. Coba ulangi pertanyaannya dengan kalimat lain."
 	}
-	// Trim trailing garbage after the closing brace of the first object.
-	if i := strings.Index(s[1:], "\n{"); i >= 0 {
-		// keep only first object if there's a second — unlikely; leave as-is
-	}
-	var r reply
-	dec := json.NewDecoder(strings.NewReader(s))
-	if err := dec.Decode(&r); err != nil {
-		return reply{}, "", false
-	}
-	if r.Answer != "" {
-		return r, r.Answer, true
-	}
-	if r.Tool != "" {
-		return r, "", true
-	}
-	// Some models nest: {"tool_call": {"name": ..., "arguments": {...}}}
-	if r.Tool == "" {
-		var v map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(s), &v); err == nil {
-			if tc, ok := v["tool_call"]; ok {
-				var inner struct {
-					Name      string          `json:"name"`
-					Arguments json.RawMessage `json:"arguments"`
-				}
-				if err := json.Unmarshal(tc, &inner); err == nil && inner.Name != "" {
-					return reply{Tool: inner.Name, Args: inner.Arguments}, "", true
-				}
-			}
-		}
-	}
-	return reply{}, "", false
+	return t
 }
 
 func truncate(s string, n int) string {
