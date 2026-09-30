@@ -47,6 +47,15 @@ func routes(r chi.Router, deps features.BuilderDeps) {
 	r.Patch("/products/{id}", records.WithValidID(h.patchProduct))
 	r.Delete("/products/{id}", records.WithValidID(h.delProduct))
 	r.Post("/products/{id}/stock", records.WithValidID(h.adjustStock))
+	// Stock movement ledger. The app used to point its
+	// `kantin_stock_movements` table at this feature's products endpoint,
+	// because no movements endpoint existed — so the "Riwayat
+	// Pergerakan" list rendered PRODUCT rows as movements: no delta, no
+	// reason, no note, and the product's creation date as the movement
+	// time. It read like data, so nobody noticed it was fabricated.
+	r.Get("/movements", h.listMovements)
+	// Optional ?product_id=<uuid> filter.
+	r.Get("/products/{id}/movements", records.WithValidID(h.listProductMovements))
 	// Sales
 	r.Post("/sales", h.createSale) // the atomic sale
 	r.Get("/sales", h.listSales)
@@ -330,12 +339,29 @@ func (h *handler) adjustStock(w http.ResponseWriter, r *http.Request) {
 		Delta  int    `json:"delta"`
 		Reason string `json:"reason"`
 		Note   string `json:"note"`
+		// Count is a physical stock-take ("opname"): set the level to what
+		// was actually counted, and let the ledger record the difference.
+		//
+		// Without this, the UI's "= Stok opname" option sent an ordinary
+		// additive delta, so counting 3 units when the system believed 20
+		// produced 23 — and the page's promise that "sistem menghitung
+		// selisihnya otomatis" was false. A pointer distinguishes
+		// "not supplied" from a legitimate count of 0.
+		Count *int `json:"count"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Delta == 0 {
+	if req.Count != nil {
+		if *req.Count < 0 {
+			records.WriteJSONError(w, http.StatusBadRequest, "count must be zero or more")
+			return
+		}
+		if req.Reason == "" {
+			req.Reason = "correction"
+		}
+	} else if req.Delta == 0 {
 		records.WriteJSONError(w, http.StatusBadRequest, "delta must be non-zero")
 		return
 	}
@@ -344,6 +370,33 @@ func (h *handler) adjustStock(w http.ResponseWriter, r *http.Request) {
 	}
 	var newStock int
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if req.Count != nil {
+			// Physical count: read the believed level under a row lock,
+			// set the counted one, and record the signed difference so the
+			// ledger still explains how the number moved.
+			var prev int
+			if err := tx.QueryRow(r.Context(),
+				`SELECT stock FROM sports_kantin_products
+				  WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
+				id, idn.TenantID()).Scan(&prev); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(r.Context(),
+				`UPDATE sports_kantin_products SET stock=$1
+				  WHERE id=$2::uuid AND tenant_id=$3 RETURNING stock`,
+				*req.Count, id, idn.TenantID()).Scan(&newStock); err != nil {
+				return err
+			}
+			if delta := *req.Count - prev; delta != 0 {
+				if _, err := tx.Exec(r.Context(),
+					`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason, note)
+					 VALUES ($1,$2::uuid,$3,$4,$5)`,
+					idn.TenantID(), id, delta, req.Reason, req.Note); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		err := tx.QueryRow(r.Context(), `UPDATE sports_kantin_products SET stock = stock + $1 WHERE id=$2::uuid AND tenant_id=$3 AND stock + $1 >= 0 RETURNING stock`,
 			req.Delta, id, idn.TenantID()).Scan(&newStock)
 		if err != nil {
@@ -362,6 +415,105 @@ func (h *handler) adjustStock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "stock": newStock})
+}
+
+type movementResp struct {
+	ID         string `json:"id"`
+	TenantID   string `json:"tenant_id"`
+	ProductID  string `json:"product_id"`
+	Product    string `json:"product"`
+	Delta      int    `json:"delta"`
+	Reason     string `json:"reason"`
+	Note       string `json:"note"`
+	StockAfter int    `json:"stock_after"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// stock_after is reconstructed from the product's CURRENT stock minus every
+// movement recorded after this one. The ledger is append-only per product,
+// so this is exact. Returning it as a literal 0 would be worse than not
+// returning it at all — a zero on every row reads as "stock hit zero".
+const movementSelect = `SELECT m.id::text, m.tenant_id, m.product_id::text, p.name,
+                                m.delta, m.reason, m.note, m.created_at,
+                                COALESCE(p.stock, 0) - COALESCE((
+                                  SELECT SUM(m2.delta)
+                                    FROM sports_kantin_stock_movements m2
+                                   WHERE m2.tenant_id = m.tenant_id
+                                     AND m2.product_id = m.product_id
+                                     AND (m2.created_at, m2.id) > (m.created_at, m.id)
+                                ), 0)
+                           FROM sports_kantin_stock_movements m
+                           JOIN sports_kantin_products p
+                             ON p.id = m.product_id AND p.tenant_id = m.tenant_id
+                          WHERE m.tenant_id = $1`
+
+// listMovements returns the stock ledger, newest first. `stock_after` is
+// the level each movement left behind, so the ledger can be read on its own.
+func (h *handler) listMovements(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	if pid := strings.TrimSpace(r.URL.Query().Get("product_id")); pid != "" {
+		h.writeMovements(w, r, idn.TenantID(), pid, limit)
+		return
+	}
+	h.writeMovements(w, r, idn.TenantID(), "", limit)
+}
+
+func (h *handler) listProductMovements(w http.ResponseWriter, r *http.Request) {
+	idn := records.RequireIdentity(w, r)
+	if idn == nil {
+		return
+	}
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	h.writeMovements(w, r, idn.TenantID(), chi.URLParam(r, "id"), limit)
+}
+
+func (h *handler) writeMovements(w http.ResponseWriter, r *http.Request, tenant, productID string, limit int) {
+	var out []movementResp
+	err := records.WithTenantTx(r.Context(), h.pool, tenant, func(tx pgx.Tx) error {
+		sql := movementSelect
+		args := []any{tenant}
+		if productID != "" {
+			sql += " AND m.product_id = $2::uuid"
+			args = append(args, productID)
+		}
+		sql += fmt.Sprintf(" ORDER BY m.created_at DESC, m.id DESC LIMIT %d", limit)
+		rows, err := tx.Query(r.Context(), sql, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m movementResp
+			var createdAt time.Time
+			if err := rows.Scan(&m.ID, &m.TenantID, &m.ProductID, &m.Product,
+				&m.Delta, &m.Reason, &m.Note, &createdAt, &m.StockAfter); err != nil {
+				return err
+			}
+			m.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+			out = append(out, m)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if out == nil {
+		out = []movementResp{}
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
 // ---- sales ----
