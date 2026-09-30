@@ -334,12 +334,39 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			args = append(args, dateStr)
 			idx++
 		}
+		// Date RANGE (from/to), for the payments screen: a booking from
+		// three days ago can still be unpaid, and the list only accepted a
+		// single exact date, so the UI had no way to reach it. from is
+		// inclusive, to is EXCLUSIVE (same convention as the payments and
+		// expenses endpoints) so a caller can pass the next day's date.
+		// Defaults to DESC ordering: newest first is what a collections
+		// view wants, and the ASC default combined with LIMIT 500 silently
+		// hid every recent booking once a tenant passed 500 rows.
+		rangeStart := strings.TrimSpace(q.Get("from"))
+		rangeEnd := strings.TrimSpace(q.Get("to"))
+		desc := false
+		if rangeStart != "" {
+			sql += fmt.Sprintf(" AND b.date >= $%d::date", idx)
+			args = append(args, rangeStart)
+			idx++
+			desc = true
+		}
+		if rangeEnd != "" {
+			sql += fmt.Sprintf(" AND b.date < $%d::date", idx)
+			args = append(args, rangeEnd)
+			idx++
+			desc = true
+		}
 		if facilityID != "" {
 			sql += fmt.Sprintf(" AND b.facility_id = $%d::uuid", idx)
 			args = append(args, facilityID)
 			idx++
 		}
-		sql += fmt.Sprintf(" ORDER BY b.date, b.start_time LIMIT %d", limit)
+		order := "b.date, b.start_time"
+		if desc {
+			order = "b.date DESC, b.start_time DESC"
+		}
+		sql += fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit)
 		rows, err := tx.Query(r.Context(), sql, args...)
 		if err != nil {
 			return err
