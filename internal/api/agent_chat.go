@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -56,14 +57,23 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := strings.TrimSpace(req.TenantID)
 	if tenant == "" {
-		tenant = r.URL.Query().Get("tenant_id")
+		// Trim here too: records.tenantFromQuery trims this parameter, and
+		// an untrimmed " centrum " must not become a different tenant than
+		// the same value in the body would.
+		tenant = strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 	}
 	if tenant == "" {
 		tenant = "centrum"
 	}
 	// Tenant arrives from user input: must be a real active client,
 	// never an arbitrary string (history keys, RLS context, tool reads).
-	if !records.KnownTenant(r.Context(), h.Pool, tenant) {
+	known, terr := records.CheckTenant(r.Context(), h.Pool, tenant)
+	if terr != nil {
+		slog.Error("client chat tenant lookup failed", "tenant", tenant, "err", terr)
+		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
+		return
+	}
+	if !known {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return
 	}
@@ -99,6 +109,19 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 	if tenant == "" {
 		tenant = "centrum"
+	}
+	// Same guard as Chat: the tenant prefixes the Redis history keys, so
+	// an unvalidated value lets a caller enumerate or wipe another
+	// tenant's memory. Check it before building any key.
+	known, err := records.CheckTenant(r.Context(), h.Pool, tenant)
+	if err != nil {
+		slog.Error("clear history tenant lookup failed", "tenant", tenant, "err", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
+		return
+	}
+	if !known {
+		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
+		return
 	}
 	hist := &agent.History{RDB: h.RDB}
 	if err := hist.ClearForRole(tenant, "client", "client:"+clientIP(r)); err != nil {

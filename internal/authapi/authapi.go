@@ -59,7 +59,7 @@ func (a *Auth) Routes() http.Handler {
 // register creates a staff account. Owner session ONLY — client tokens
 // can never mint users (a leaked API token must not become an interactive
 // owner login). First owner on a fresh tenant is bootstrapped via psql
-// (see scripts/provision-owner.mjs fallback), never via API token.
+// against DATABASE_ADMIN_URL, never via API token.
 func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 	// Resolve the caller's tenant from the owner session.
 	sess := strings.TrimSpace(r.Header.Get("X-Session-Token"))

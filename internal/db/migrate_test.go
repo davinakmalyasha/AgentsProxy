@@ -2,10 +2,46 @@ package db
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"testing"
 	"time"
 )
+
+// localDBHosts are the only databases this package may ever DROP. Laragon
+// runs Postgres directly on loopback; docker-compose.yml names its service
+// "postgres". Anything else is remote, and a remote database is not ours
+// to wipe.
+var localDBHosts = map[string]bool{
+	"localhost": true,
+	"127.0.0.1": true,
+	"::1":       true,
+	"postgres":  true, // docker-compose service
+}
+
+// requireLocalDB skips the test unless the DSN points at a local
+// throwaway database.
+//
+// This exists because DATABASE_ADMIN_URL in .env points at the hosted
+// Supabase project. The wipe below runs
+// `DROP TABLE clients CASCADE`, and CASCADE destroys every foreign key
+// that references clients while leaving the referencing tables and their
+// rows in place — which silently strips the tenancy guarantee from
+// sports_users and friends, and leaves a database that no longer matches
+// what the migration chain would build from scratch. MIGRATE_TEST_DESTRUCTIVE
+// is one env var away, so the host itself has to be checked.
+func requireLocalDB(t *testing.T, dsn string) {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		// Don't echo the DSN — it carries a password.
+		t.Skipf("cannot parse DSN (%v); refusing destructive wipe", err)
+	}
+	if host := u.Hostname(); !localDBHosts[host] {
+		t.Skipf("refusing destructive wipe against non-local database host %q; "+
+			"set MIGRATE_TEST_DESTRUCTIVE only for a local throwaway DB", host)
+	}
+}
 
 func TestMigrate_Real(t *testing.T) {
 	// Migrations need CREATE EXTENSION / ALTER TABLE — use the admin
@@ -24,6 +60,9 @@ func TestMigrate_Real(t *testing.T) {
 	if os.Getenv("MIGRATE_TEST_DESTRUCTIVE") != "true" {
 		t.Skip("MIGRATE_TEST_DESTRUCTIVE not set; skipping destructive wipe (run alone with MIGRATE_TEST_DESTRUCTIVE=true)")
 	}
+	// Belt and braces: the opt-in flag is not authorisation to wipe a
+	// shared or hosted database.
+	requireLocalDB(t, dsn)
 	// 120s, not 30s: against a remote Nano over a pooler, the first
 	// migrate is ~30s of DDL round-trips alone (verified 2026-09-30:
 	// 33 files applied clean, then the second run starved). Local runs

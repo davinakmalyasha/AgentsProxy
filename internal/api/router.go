@@ -113,9 +113,21 @@ func NewRouter(d Deps) http.Handler {
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}
 
+		// The admin surface WRITES to clients (POST /clients), and
+		// 005_rbac.sql grants app_runtime only SELECT on that table. Running
+		// these handlers on the app pool therefore made every write fail with
+		// SQLSTATE 42501, which admin.Create reported as a bare 500
+		// "internal" — leaving no supported way to provision a tenant at all.
+		// Use the admin pool, falling back to the app pool when the caller
+		// doubles them (see Deps.AdminPool).
+		adminPool := d.AdminPool
+		if adminPool == nil {
+			adminPool = d.Pool
+		}
+
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
-			adm := &Admin{Pool: d.Pool, Cache: d.Cache}
+			adm := &Admin{Pool: adminPool, Cache: d.Cache}
 			r.Post("/clients", adm.Create)
 			r.Get("/clients", adm.List)
 			r.Patch("/clients/{id}", records.WithValidID(adm.Patch))

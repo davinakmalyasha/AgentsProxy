@@ -182,9 +182,19 @@ func tenantFromQuery(r *http.Request) string {
 // publicIdentity builds the read-only landing identity, validating the
 // tenant against the clients table. Unknown tenants get a 400 (and nil)
 // instead of becoming RLS contexts or Redis/history key material.
+//
+// A lookup that fails for infrastructure reasons is a 503, not a 400:
+// reporting it as a bad request hides server faults behind "unknown
+// tenant" and points whoever is debugging at the caller.
 func publicIdentity(w http.ResponseWriter, r *http.Request, deps IdentityDeps) *clientctx.Identity {
 	tenant := tenantFromQuery(r)
-	if !KnownTenant(r.Context(), deps.Pool, tenant) {
+	known, err := CheckTenant(r.Context(), deps.Pool, tenant)
+	if err != nil {
+		slog.Error("public tenant lookup failed", "tenant", tenant, "err", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
+		return nil
+	}
+	if !known {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return nil
 	}

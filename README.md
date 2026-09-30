@@ -23,13 +23,24 @@
     go run ./cmd/server
     # Migrations auto-run on boot. Server on :8080.
     ```
-4.  Verify:
+4.  Provision a tenant (no migration seeds one — `003` was retired):
+    ```bash
+    node --env-file=.env scripts/seed-dev.mjs
+    # defaults to tenant "centrum", vertical "sports";
+    # override with TENANT_ID / TENANT_NAME / TENANT_VERTICAL in .env
+    ```
+    Until this runs, `clients` is empty and every public read
+    (`/v1/sports/{availability,facilities,pricing}`) answers
+    `400 {"error":"unknown tenant"}`.
+5.  Verify:
     ```bash
     curl -s http://localhost:8080/healthz
-    # {"status":"ok","version":"dev","db":true,"redis":true}
+    # {"status":"ok","version":"dev","db:true,"redis":true}
+    curl -s "http://localhost:8080/v1/sports/availability/?date=$(date +%F)&tenant_id=centrum&type=badminton"
+    # {"date":"...","facilities":[...]}  — NOT "unknown tenant"
     go vet ./... && go test ./... -cover
     ```
-5.  HeidiSQL → `SELECT * FROM clients;` — `dev` seeded. `redis-cli KEYS "ck:*" "rl:*" "quota:*"`.
+6.  HeidiSQL → `SELECT * FROM clients;` — your tenant is there. `redis-cli KEYS "ck:*" "rl:*" "quota:*"`.
 
 > **Prod only** — `docker compose up --build` (postgres:16 + redis:8 + app) is for Railway/VPS. Not for local.
 
