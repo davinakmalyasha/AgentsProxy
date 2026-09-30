@@ -41,8 +41,8 @@ func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	// Re-granting INSERT here would silently reopen the hole that
 	// migration closed, so this is the test that would catch that.
 	for _, g := range []string{
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_users TO app`,
-		`GRANT SELECT ON sports_sessions TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_users TO app_runtime`,
+		`GRANT SELECT ON sports_sessions TO app_runtime`,
 	} {
 		if _, err := admin.Exec(ctx, g); err != nil {
 			t.Fatal(err)
@@ -341,16 +341,47 @@ func TestSessionTenantIsolation(t *testing.T) {
 	}
 
 	// create_session stamps the tenant from the user, so a session
-	// cannot be minted into a tenant the user does not belong to.
+	// cannot be minted into a tenant the user does not belong to. Mint
+	// one through the definer itself: the harness wipes auth-t rows on
+	// every invocation, so no leftover session can be assumed — and
+	// going through create_session is the stronger assertion anyway,
+	// because it proves the tenant comes from sports_users server-side.
+	//
+	// Two statements, not a CTE+JOIN: this mirrors exactly how
+	// production calls it (authapi login: SELECT the function, use the
+	// returned id). A single-statement CTE that both calls the
+	// data-modifying function and joins its result was observed to
+	// return zero rows through the session pooler even as the insert
+	// demonstrably lands — so the test uses the production shape.
+	var uid string
+	if err := admin.QueryRow(ctx,
+		`SELECT id::text FROM sports_users WHERE tenant_id='auth-t' LIMIT 1`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`DELETE FROM sports_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
+		t.Fatal(err)
+	}
+	var sid string
+	if err := admin.QueryRow(ctx,
+		`SELECT private.create_session($1::uuid, 'hash-test-isolation', now() + interval '1 hour')::text`,
+		uid).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	if sid == "" {
+		t.Fatal("create_session returned NULL for an active user")
+	}
 	var got string
 	if err := admin.QueryRow(ctx,
-		`SELECT tenant_id FROM sports_sessions s
-		  JOIN sports_users u ON u.id = s.user_id
-		 WHERE u.tenant_id='auth-t' LIMIT 1`).Scan(&got); err != nil {
+		`SELECT tenant_id FROM sports_sessions WHERE id = $1::uuid`, sid).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != "auth-t" {
 		t.Errorf("session tenant_id=%q, want auth-t", got)
+	}
+	if _, err := admin.Exec(ctx,
+		`DELETE FROM sports_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -367,11 +398,11 @@ func TestSessionDMLRevokedFromRuntime(t *testing.T) {
 	for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
 		var hasPriv bool
 		if err := admin.QueryRow(ctx,
-			`SELECT has_table_privilege('app', 'sports_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
+			`SELECT has_table_privilege('app_runtime', 'sports_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
 			t.Fatal(err)
 		}
 		if hasPriv {
-			t.Errorf("app still holds %s on sports_sessions; the definer boundary is bypassable", priv)
+			t.Errorf("app_runtime still holds %s on sports_sessions; the definer boundary is bypassable", priv)
 		}
 	}
 

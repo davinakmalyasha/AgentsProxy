@@ -132,16 +132,22 @@ func TestScheduler_SendsDue(t *testing.T) {
 	_, _ = pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id='rem-test'`)
 }
 
-// slowSender simulates a Telegram bot that takes ~150ms per send.
+// slowSender simulates a Telegram bot that takes ~500ms per send.
 // Tick fans out with a semaphore + per-row deadline, so N due rows
-// must complete near-parallel — far under N×150ms serial time.
+// must complete near-parallel — far under N×500ms serial time.
+//
+// 500ms (not 150ms) deliberately: against a remote database the ~10
+// round-trips surrounding the fan-out cost ~450ms of RTT, which swamps
+// a 150ms signal entirely (measured 607ms vs a 500ms bound —
+// ambiguous). At 500ms/send, serial is 2000ms and parallel lands
+// ~950ms, so the bound below separates them with margin to spare.
 type slowSender struct {
 	mu   sync.Mutex
 	sent int
 }
 
 func (f *slowSender) Send(_ context.Context, chatID int64, _ string) error {
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	f.mu.Lock()
 	f.sent++
 	f.mu.Unlock()
@@ -196,10 +202,12 @@ func TestScheduler_DeliversConcurrently(t *testing.T) {
 	if fake.sent != n {
 		t.Fatalf("sent=%d want %d", fake.sent, n)
 	}
-	// Serial would take ~n*150ms = 600ms; parallel (semaphore 8) should
-	// be one sleep + overhead ≈ well under 2x a single send.
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("elapsed=%v want < 500ms (proves fan-out; serial would be ~600ms)", elapsed)
+	// Serial would take ~n*500ms = 2000ms; parallel (semaphore 8) should
+	// be one sleep + overhead ≈ well under serial. Bound at 1500ms:
+	// serial (2000ms+) cannot pass, parallel (~950ms remote) clears it
+	// with ~500ms of RTT headroom.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("elapsed=%v want < 1500ms (proves fan-out; serial would be ~2000ms)", elapsed)
 	}
 	// All marked sent.
 	var sent int

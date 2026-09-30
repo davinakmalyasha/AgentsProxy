@@ -151,5 +151,20 @@ func toRuntimeDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
+	// If DATABASE_URL is already the runtime role (standard Supabase
+	// setup: user `app_runtime` or `app_runtime.<ref>`), return it
+	// unchanged. The pooler routes on the full `user.ref` form and the
+	// password must be preserved — the old rewrite stripped both,
+	// producing an unroutable, passwordless DSN.
+	userinfo := rest[:at]
+	user := userinfo
+	if ci := strings.Index(userinfo, ":"); ci >= 0 {
+		user = userinfo[:ci]
+	}
+	if user == "app_runtime" || strings.HasPrefix(user, "app_runtime.") {
+		return dsn
+	}
+	// Legacy local path (Laragon trust auth): swap the user, drop
+	// credentials.
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
