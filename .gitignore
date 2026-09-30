@@ -31,3 +31,13 @@ Thumbs.db
 
 # Go
 vendor/
+
+# Local tool/session junk — worktree only, never commit
+# (plain *.log / *.rdb already covered above)
+run_proxy_temp.ps1
+run_proxy_mock.ps1
+run_proxy_mock2.ps1
+shots/
+appendonlydir/
+.playwright-mcp/
+.commandcode/

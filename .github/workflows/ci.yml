@@ -57,7 +57,6 @@ jobs:
       RATE_LIMIT_PER_MINUTE: "60"
       ALLOW_ORIGINS: "*"
       ENV: development
-      GOEXPERIMENT: "noswissmap=off"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,8 +77,13 @@ jobs:
             exit 1
           fi
 
-      - name: go fmt
-        run: go fmt ./...
+      - name: gofmt (check, fail on diff)
+        run: |
+          out=$(gofmt -l .)
+          if [[ -n $out ]]; then
+            echo "::error::Unformatted files: $out. Run 'go fmt ./...' and commit."
+            exit 1
+          fi
 
       - name: go vet
         run: go vet ./...
@@ -88,10 +92,12 @@ jobs:
         run: go build -v ./...
 
       - name: go test (with coverage)
-        run: go test ./... -cover -count=1
+        # -p 1: DB-backed packages share one Postgres service; parallel
+        # execution races across packages. Mirrors `make test`.
+        run: go test -p 1 ./... -cover -count=1
 
       - name: Coverage summary
         if: always()
         run: |
           echo "## Coverage" >> $GITHUB_STEP_SUMMARY
-          go test ./... -cover -count=1 2>&1 | grep -E "coverage:|ok " >> $GITHUB_STEP_SUMMARY || true
+          go test -p 1 ./... -cover -count=1 2>&1 | grep -E "coverage:|ok " >> $GITHUB_STEP_SUMMARY || true
