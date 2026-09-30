@@ -65,17 +65,28 @@ type handler struct {
 }
 
 type bookingReq struct {
-	FacilityID    string  `json:"facility_id"`
-	Date          string  `json:"date"` // YYYY-MM-DD
-	StartTime     string  `json:"start_time"`
-	EndTime       string  `json:"end_time"`
-	CustomerName  string  `json:"customer_name"`
-	CustomerPhone string  `json:"customer_phone"`
-	Price         float64 `json:"price"` // 0 → computed from pricing rule
-	Deposit       float64 `json:"deposit"`
-	Status        string  `json:"status"`
-	Source        string  `json:"source"` // whatsapp | walk_in
-	Notes         string  `json:"notes"`
+	FacilityID    string `json:"facility_id"`
+	Date          string `json:"date"` // YYYY-MM-DD
+	StartTime     string `json:"start_time"`
+	EndTime       string `json:"end_time"`
+	CustomerName  string `json:"customer_name"`
+	CustomerPhone string `json:"customer_phone"`
+	// Price is accepted for wire compatibility but NOT used: the price is
+	// always computed from the active pricing rule. Honouring a
+	// client-supplied figure let a stale or hand-typed number commit, and
+	// the "non-owners cannot be trusted" check below only covered the
+	// other half of the branch. Use OverridePrice for a deliberate
+	// adjustment.
+	Price float64 `json:"price"`
+	// OverridePrice was silently dropped on create: this struct had no
+	// such field and the INSERT did not name the column, so the booking
+	// form's adjusted price was accepted and then discarded, leaving the
+	// computed price in place. Owner-only, same as PATCH.
+	OverridePrice *float64 `json:"override_price"`
+	Deposit       float64  `json:"deposit"`
+	Status        string   `json:"status"`
+	Source        string   `json:"source"` // whatsapp | walk_in
+	Notes         string   `json:"notes"`
 }
 
 type bookingResp struct {
@@ -141,11 +152,16 @@ func buildUpdateSQL(sets []string, idArg int, guard bool) (sql string, extraArgs
 // facility's open/close window; mapped to 400 (not 500).
 var errOutsideHours = errors.New("booking outside facility hours")
 
-
 // errNotCancellable is returned when a cancel is attempted from a state
 // that is not cancellable. Mapped to 409 so the UI can say "already
 // completed" instead of a generic failure.
 var errNotCancellable = errors.New("booking is not in a cancellable state")
+
+// errOutsideRuleHours is returned when a slot falls outside the active
+// pricing rule's opening window. Separate from errOutsideHours because the
+// remedy is different: the venue hours are a setting, the rule window is
+// the same setting, and the message should name which one refused.
+var errOutsideRuleHours = errors.New("booking outside the pricing rule's opening hours")
 
 // cancellableFrom is the set of states a cancel may be applied from.
 //
@@ -239,6 +255,18 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "price/deposit must be >= 0")
 		return
 	}
+	// override_price is the owner-only channel for a deliberately adjusted
+	// price, on create exactly as on PATCH.
+	if req.OverridePrice != nil {
+		if !idn.IsOwner() {
+			records.WriteJSONError(w, http.StatusForbidden, "owner only")
+			return
+		}
+		if *req.OverridePrice < 0 {
+			records.WriteJSONError(w, http.StatusBadRequest, "override_price must be >= 0")
+			return
+		}
+	}
 
 	var (
 		id       string
@@ -264,14 +292,41 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		if start.Before(open) || end.After(closeT) {
 			return fmt.Errorf("%w: %s-%s", errOutsideHours, openStr, closeStr)
 		}
-		price := req.Price
-		// Non-owners cannot trust client price — always server-compute
-		if !idn.IsOwner() || price == 0 {
-			if computed, err := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, start, end); err == nil {
-				price = computed
-			} else if !idn.IsOwner() {
-				price = 0 // fallback, akan diisi trigger? keep 0 for now
-			}
+		// The price is always the server's number. The old code branched on
+		// role and let an owner's client-supplied `price` through, and —
+		// worse — swallowed every pricing error and fell back to 0:
+		//
+		//   price = 0 // fallback, akan diisi trigger? keep 0 for now
+		//
+		// Nothing ever filled it in. With no pricing rule covering the
+		// date, a booking committed at Rp0: it looked free on the
+		// schedule, counted as a booking in reports, and stayed unpaid
+		// forever because payment_status treats a 0 price as unpaid.
+		// Refusing the booking is the honest outcome — the owner has to
+		// set up pricing before taking money for a slot.
+		price, err := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, start, end)
+		if err != nil {
+			return err
+		}
+		// Also enforce the active rule's opening window. The facility
+		// check above only covered sports_facilities, whose default
+		// (06:00-22:00) is an hour narrower at each end than the pricing
+		// rule's (07:00-23:00) — and the booking form offers slots from
+		// the RULE, so a 22:30 slot could be priced and then refused.
+		// Both are now checked and both come from the same owner setting
+		// (see applyHours), so they only diverge when a court is
+		// deliberately closed early.
+		rule, ruleErr := pricing.RuleFor(r.Context(), tx, idn.TenantID(), date)
+		if ruleErr != nil {
+			return ruleErr
+		}
+		ruleOpen, e1 := time.Parse("15:04", strings.TrimSuffix(rule.OpenTime, ":00"))
+		ruleClose, e2 := time.Parse("15:04", strings.TrimSuffix(rule.CloseTime, ":00"))
+		if e1 != nil || e2 != nil {
+			return fmt.Errorf("rule hours unparseable: %s-%s", rule.OpenTime, rule.CloseTime)
+		}
+		if start.Before(ruleOpen) || end.After(ruleClose) {
+			return fmt.Errorf("%w: %s-%s", errOutsideRuleHours, rule.OpenTime, rule.CloseTime)
 		}
 		// Link a customer by phone (Centrum's upsert pattern) when the
 		// phone matches an existing directory entry.
@@ -291,12 +346,17 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		} else {
 			createdByArg = createdBy
 		}
+		// override_price is stored alongside the computed price, never
+		// instead of it. Everything downstream reads
+		// COALESCE(override_price, price), so keeping both preserves the
+		// rule-based figure for comparison and lets the owner see what
+		// the adjustment was.
 		return tx.QueryRow(r.Context(),
 			`INSERT INTO sports_bookings
-			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, deposit, notes, customer_id, created_by)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id::text`,
-			idn.TenantID(), req.FacilityID, date, start, end, req.CustomerName, req.CustomerPhone, status, source, price, req.Deposit,
-			req.Notes, customerID, createdByArg,
+			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, override_price, deposit, notes, customer_id, created_by)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id::text`,
+			idn.TenantID(), req.FacilityID, date, start, end, req.CustomerName, req.CustomerPhone, status, source, price,
+			req.OverridePrice, req.Deposit, req.Notes, customerID, createdByArg,
 		).Scan(&id)
 	})
 	if err != nil {
@@ -312,6 +372,18 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, errOutsideHours) {
 			records.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, errOutsideRuleHours) {
+			records.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// No pricing rule for that date. A 400 with an actionable message,
+		// not a 500: this is a setup step the owner has to take, and the
+		// old behaviour (commit at Rp0) was worse than refusing.
+		if errors.Is(err, pricing.ErrNoRule) {
+			records.WriteJSONError(w, http.StatusBadRequest,
+				"belum ada aturan harga untuk tanggal ini — set harga di Pengaturan dulu")
 			return
 		}
 		slog.Error("booking create", "err", err)
@@ -600,9 +672,22 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.Deposit)
 		idx++
 	}
+	// repriceArg is the 1-based position of the price argument when an
+	// extension is being applied. The slot is reserved here, before the
+	// id/tenant arguments are appended, because the SET list and argument
+	// order are baked into the statement by the time the transaction
+	// opens; the real value is filled in inside the transaction once the
+	// stored start_time is known. Reserving rather than appending is what
+	// keeps the new price from colliding with the id and tenant_id
+	// parameters.
+	repriceArg := 0
 	if req.EndTime != nil {
 		sets = append(sets, "end_time = $"+strconv.Itoa(idx)+"::time")
 		args = append(args, *req.EndTime)
+		idx++
+		sets = append(sets, "price = $"+strconv.Itoa(idx))
+		args = append(args, nil) // placeholder, replaced inside the tx
+		repriceArg = idx
 		idx++
 	}
 	if len(sets) == 1 {
@@ -613,11 +698,14 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	var affected int64
 	var transitionErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// end_time ordering vs the stored start_time (extend/release).
+		// end_time ordering vs the stored start_time (extend/release), and
+		// the reprice that has to accompany it.
 		if req.EndTime != nil {
-			var start string
+			var start, dateStr string
 			if err := tx.QueryRow(r.Context(),
-				`SELECT start_time::text FROM sports_bookings WHERE id=$1::uuid AND tenant_id=$2`, id, idn.TenantID()).Scan(&start); err != nil {
+				`SELECT start_time::text, date::text FROM sports_bookings
+				  WHERE id=$1::uuid AND tenant_id=$2`,
+				id, idn.TenantID()).Scan(&start, &dateStr); err != nil {
 				return err
 			}
 			endT, _ := time.Parse("15:04", *req.EndTime)
@@ -629,6 +717,27 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 				transitionErr = fmt.Errorf("end_time must be after start_time")
 				return transitionErr
 			}
+			// Extending used to cost the customer nothing: the row kept the
+			// price computed for the ORIGINAL window, so extra court time
+			// was given away and never appeared in revenue. Recompute for
+			// the new window instead.
+			//
+			// This runs for any role on purpose. The figure comes from the
+			// tenant's own pricing rule, never from the request, so it is
+			// not a trust question — and refusing staff would only push
+			// people back to editing the price by hand.
+			date, derr := time.Parse("2006-01-02", dateStr)
+			if derr != nil {
+				return derr
+			}
+			newPrice, perr := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, startT, endT)
+			if perr != nil {
+				return perr
+			}
+			// Fill the slot reserved before the transaction opened. The
+			// SET list and arg order are fixed by then — id and tenant
+			// already occupy the positions after it.
+			args[repriceArg-1] = newPrice
 		}
 		// Validate transition against current status
 		if needsStatusCheck {
@@ -697,6 +806,19 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 			records.WriteJSONError(w, http.StatusConflict, "slot already booked")
 			return
 		}
+		// An extension cannot be repriced without a rule. Say so instead
+		// of a 500 — the old code never reached here because the price was
+		// simply left stale.
+		if errors.Is(err, pricing.ErrNoRule) {
+			records.WriteJSONError(w, http.StatusBadRequest,
+				"belum ada aturan harga untuk tanggal ini — set harga di Pengaturan dulu")
+			return
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			records.WriteJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		slog.Error("booking update", "err", err)
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}

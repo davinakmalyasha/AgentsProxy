@@ -8,7 +8,9 @@ package facilities
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +25,11 @@ import (
 )
 
 const featureName = "facilities"
+
+// errFacilityInUse is returned when a court still has bookings against it.
+// Mapped to 409 with the count so the owner knows what is blocking the
+// delete instead of seeing a 500.
+var errFacilityInUse = errors.New("facility still has bookings")
 
 func init() { Register() }
 
@@ -335,7 +342,27 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	var affected int64
+	var bookings int
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Count the bookings that still point at this court first. The
+		// FK is a plain NO ACTION, so a court with any history cannot be
+		// deleted — including history that is only CANCELLED. That used
+		// to surface as a bare 500 "internal", which is useless to an
+		// owner trying to retire a court: nothing told them the court
+		// still had bookings against it.
+		//
+		// Cancelled bookings count too, deliberately. If they did not,
+		// a court could be deleted once every booking on it was
+		// cancelled, silently taking the schedule and revenue history
+		// with it.
+		if err := tx.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM sports_bookings WHERE facility_id = $1::uuid AND tenant_id = $2`,
+			id, idn.TenantID()).Scan(&bookings); err != nil {
+			return err
+		}
+		if bookings > 0 {
+			return errFacilityInUse
+		}
 		tag, err := tx.Exec(r.Context(),
 			`DELETE FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2`,
 			id, idn.TenantID())
@@ -345,7 +372,13 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		affected = tag.RowsAffected()
 		return nil
 	})
+	if errors.Is(err, errFacilityInUse) {
+		records.WriteJSONError(w, http.StatusConflict,
+			fmt.Sprintf("lapangan masih dipakai oleh %d booking — tidak bisa dihapus", bookings))
+		return
+	}
 	if err != nil {
+		slog.Error("facility delete", "err", err)
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
