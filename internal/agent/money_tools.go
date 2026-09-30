@@ -8,6 +8,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -110,10 +111,79 @@ const HardcodedScopeReply = "Maaf, saya hanya bisa bantu seputar Centrum Badmint
 
 // ---- tools ----
 
+// ---- shared money basis ----
+//
+// The agent used to have three different answers for "how much money is
+// there". query_income and query_net_profit summed
+// COALESCE(override_price, price) over bookings — the value COMMITTED —
+// while query_range_summary and closing_report summed sports_payments —
+// the money actually RECEIVED. The Laporan screen the owner reads is
+// payments-based, so the bot and the screen could disagree about the same
+// day, and neither tool was wrong about its own definition.
+//
+// Both numbers matter, and conflating them is worse than picking one. So
+// every tool loads them together from this one place and reports the
+// basis explicitly: "terima" (received) is the headline, "terpesan"
+// (committed) is shown alongside so the gap is always visible.
+
+// basis is one range's money, both ways.
+type basis struct {
+	Cash   float64 // payments, method=cash
+	QRIS   float64 // payments, method=qris
+	Other  float64 // payments, any other method (transfer/card/...)
+	Booked float64 // COALESCE(override_price, price) over live bookings
+	Kantin float64 // canteen sales
+	Count  int     // payments counted
+}
+
+// Received is money actually taken: payments, plus canteen sales.
+func (b basis) Received() float64 { return b.Cash + b.QRIS + b.Other + b.Kantin }
+
+// loadBasis reads both bases for [from, to). Payment and expense dates are
+// timestamptz and are compared in WIB, matching how they are entered;
+// booking and expense dates are plain dates.
+func loadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (basis, error) {
+	var b basis
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount) FILTER (WHERE method='cash'),0),
+		        COALESCE(SUM(amount) FILTER (WHERE method='qris'),0),
+		        COALESCE(SUM(amount) FILTER (WHERE method NOT IN ('cash','qris')),0),
+		        COUNT(*)
+		   FROM sports_payments
+		  WHERE tenant_id=$1
+		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
+		tenantID, from, to).Scan(&b.Cash, &b.QRIS, &b.Other, &b.Count); err != nil {
+		return b, err
+	}
+	// Committed value, excluding slots that will never be charged.
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(COALESCE(override_price, price)),0)
+		   FROM sports_bookings
+		  WHERE tenant_id=$1 AND date >= $2::date AND date < $3::date
+		    AND status IN ('confirmed','checked_in','completed')`,
+		tenantID, from, to).Scan(&b.Booked); err != nil {
+		return b, err
+	}
+	return b, tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(total),0) FROM sports_kantin_sales
+		  WHERE tenant_id=$1
+		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
+		tenantID, from, to).Scan(&b.Kantin)
+}
+
+// describe renders the basis in one sentence so every tool phrases the
+// same two numbers the same way.
+func (b basis) describe() string {
+	return fmt.Sprintf("terima %.0f (cash %.0f, qris %.0f, kantin %.0f), teresan %.0f",
+		b.Received(), b.Cash, b.QRIS, b.Kantin, b.Booked)
+}
+
 func queryNetProfitTool(pool *pgxpool.Pool) Tool {
 	return Tool{
 		Name:        "query_net_profit",
-		Description: "Net profit over a date range. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Defaults to this month. Revenue (confirmed+paid bookings + kantin) minus expenses.",
+		Description: "Net profit over a date range, on the money actually received. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Defaults to this month. Revenue = payments + kantin, minus expenses. Also reports the committed booking value for comparison.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From string `json:"from"`
@@ -121,25 +191,13 @@ func queryNetProfitTool(pool *pgxpool.Pool) Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			from, to := defaultMonthRange(p.From, p.To)
-			var revenue, expenses float64
+			var b basis
+			var expenses float64
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				// Booking revenue: price of confirmed+checked_in+completed.
-				if err := tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(COALESCE(override_price, price)),0) FROM sports_bookings
-					  WHERE tenant_id=$1 AND date >= $2::date AND date < $3::date
-					    AND status IN ('confirmed','checked_in','completed')`,
-					tenantID, from, to).Scan(&revenue); err != nil {
+				var err error
+				if b, err = loadBasis(ctx, tx, tenantID, from, to); err != nil {
 					return err
 				}
-				// Kantin revenue.
-				var kantin float64
-				if err := tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(total),0) FROM sports_kantin_sales
-				  WHERE tenant_id=$1 AND (created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date AND (created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date`,
-					tenantID, from, to).Scan(&kantin); err != nil {
-					return err
-				}
-				revenue += kantin
 				return tx.QueryRow(ctx,
 					`SELECT COALESCE(SUM(amount),0) FROM sports_expenses
 					  WHERE tenant_id=$1 AND spent_at >= $2::date AND spent_at < $3::date`,
@@ -148,7 +206,12 @@ func queryNetProfitTool(pool *pgxpool.Pool) Tool {
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			return fmt.Sprintf("net profit %.0f (%s to %s): revenue %.0f, expenses %.0f", revenue-expenses, from, to, revenue, expenses)
+			// Revenue is the money in, not the money promised. Summing
+			// bookings here made a venue look profitable while nothing
+			// had been collected.
+			net := b.Received() - expenses
+			return fmt.Sprintf("net profit %.0f (%s to %s): %s, expenses %.0f",
+				net, from, to, b.describe(), expenses)
 		},
 	}
 }
@@ -156,7 +219,7 @@ func queryNetProfitTool(pool *pgxpool.Pool) Tool {
 func queryRangeSummaryTool(pool *pgxpool.Pool) Tool {
 	return Tool{
 		Name:        "query_range_summary",
-		Description: "Range summary. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Revenue cash/qris, expenses, net profit, booking count, best day, peak hours.",
+		Description: "Range summary. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Revenue cash/qris/kantin, expenses, net profit, payment and booking counts, best revenue day, and the busiest booking hours.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From string `json:"from"`
@@ -164,13 +227,15 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			from, to := defaultMonthRange(p.From, p.To)
-			var cash, qris, expenses float64
+			var b basis
+			var expenses float64
 			var bookings int
+			var bestDay string
+			var bestDayAmt float64
+			peak := map[int]int{}
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				if err := tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(amount) FILTER (WHERE method='cash'),0), COALESCE(SUM(amount) FILTER (WHERE method='qris'),0)
-				   FROM sports_payments WHERE tenant_id=$1 AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date`,
-					tenantID, from, to).Scan(&cash, &qris); err != nil {
+				var err error
+				if b, err = loadBasis(ctx, tx, tenantID, from, to); err != nil {
 					return err
 				}
 				if err := tx.QueryRow(ctx,
@@ -179,17 +244,68 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) Tool {
 					tenantID, from, to).Scan(&expenses); err != nil {
 					return err
 				}
-				return tx.QueryRow(ctx,
+				if err := tx.QueryRow(ctx,
 					`SELECT COUNT(*) FROM sports_bookings
 					  WHERE tenant_id=$1 AND date >= $2::date AND date < $3::date
 					    AND status NOT IN ('cancelled','no_show')`,
-					tenantID, from, to).Scan(&bookings)
+					tenantID, from, to).Scan(&bookings); err != nil {
+					return err
+				}
+				// Best day is the day money actually came in, matching the
+				// rest of the tool. Ordering by booking value instead
+				// would crown a day full of unpaid bookings.
+				if err := tx.QueryRow(ctx,
+					`SELECT (paid_at AT TIME ZONE 'Asia/Jakarta')::date::text, SUM(amount)
+					   FROM sports_payments
+					  WHERE tenant_id=$1
+					    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+					    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date
+					  GROUP BY 1 ORDER BY 2 DESC LIMIT 1`,
+					tenantID, from, to).Scan(&bestDay, &bestDayAmt); err != nil &&
+					!errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+				// Peak hours come from when bookings start, which is the
+				// question a court owner actually asks.
+				rows, err := tx.Query(ctx,
+					`SELECT EXTRACT(HOUR FROM start_time)::int, COUNT(*)
+					   FROM sports_bookings
+					  WHERE tenant_id=$1 AND date >= $2::date AND date < $3::date
+					    AND status NOT IN ('cancelled','no_show')
+					  GROUP BY 1 ORDER BY 2 DESC LIMIT 3`,
+					tenantID, from, to)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var h, n int
+					if err := rows.Scan(&h, &n); err != nil {
+						return err
+					}
+					peak[h] = n
+				}
+				return rows.Err()
 			})
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			return fmt.Sprintf("range %s to %s: revenue cash %.0f, qris %.0f, total %.0f, expenses %.0f, net %.0f, bookings %d",
-				from, to, cash, qris, cash+qris, expenses, cash+qris-expenses, bookings)
+			var peakTxt string
+			if len(peak) > 0 {
+				hours := make([]string, 0, len(peak))
+				for h := 0; h < 24; h++ {
+					if n, ok := peak[h]; ok {
+						hours = append(hours, fmt.Sprintf("%02d:00 x%d", h, n))
+					}
+				}
+				peakTxt = ", peak " + strings.Join(hours, ", ")
+			}
+			best := "n/a"
+			if bestDay != "" {
+				best = fmt.Sprintf("%s (%.0f)", bestDay, bestDayAmt)
+			}
+			return fmt.Sprintf("range %s to %s: %s, expenses %.0f, net %.0f, payments %d, bookings %d, best day %s%s",
+				from, to, b.describe(), expenses, b.Received()-expenses, b.Count, bookings, best, peakTxt)
 		},
 	}
 }
@@ -211,16 +327,32 @@ func topCustomersTool(pool *pgxpool.Pool) Tool {
 			}
 			var rows []string
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				// Aggregate visits in one grouped query. The customer
-				// identity is phone (the unique key) — name alone
-				// miscounts on renames/duplicates — so group by name.
+				// Name resolution falls back in this order: the directory
+				// entry, then the name typed on the booking itself, then a
+				// literal. The old query only ever read c.name, so every
+				// walk-in whose phone was not in the customer directory
+				// came back as "?" — the tool filtered on
+				// b.customer_name being present, then ignored it.
+				//
+				// Grouping is by phone, not name: the comment above used
+				// to argue for phone and then group by c.name anyway,
+				// which both merged two different people who share a name
+				// and split one person who appears under a corrected
+				// spelling.
 				r, err := tx.Query(ctx,
-					`SELECT COALESCE(NULLIF(c.name, ''), '?'), COUNT(*) AS visits
+					`SELECT COALESCE(NULLIF(b.customer_phone,''),
+					                 NULLIF(c.name,''),
+					                 NULLIF(b.customer_name,''),
+					                 '?') AS who,
+					        MIN(COALESCE(NULLIF(c.name,''), NULLIF(b.customer_name,''), '?')) AS label,
+					        COUNT(*) AS visits
 					   FROM sports_bookings b
-					   LEFT JOIN sports_customers c ON c.tenant_id = b.tenant_id AND c.phone = b.customer_phone
+					   LEFT JOIN sports_customers c
+					          ON c.tenant_id = b.tenant_id AND c.phone = b.customer_phone
 					  WHERE b.tenant_id=$1 AND b.status IN ('confirmed','checked_in','completed')
-					    AND b.customer_name IS NOT NULL AND b.customer_name <> ''
-					  GROUP BY c.name
+					    AND (b.customer_name IS NOT NULL AND b.customer_name <> ''
+					         OR c.name IS NOT NULL AND c.name <> '')
+					  GROUP BY 1
 					  ORDER BY visits DESC
 					  LIMIT $2`,
 					tenantID, p.Limit)
@@ -229,12 +361,19 @@ func topCustomersTool(pool *pgxpool.Pool) Tool {
 				}
 				defer r.Close()
 				for r.Next() {
-					var name string
+					var who, label string
 					var visits int
-					if err := r.Scan(&name, &visits); err != nil {
+					if err := r.Scan(&who, &label, &visits); err != nil {
 						return err
 					}
-					rows = append(rows, fmt.Sprintf("%s: %d visits", name, visits))
+					// Show the phone as well as the name: two bookings
+					// under "?" are otherwise indistinguishable, and the
+					// whole point of the tool is telling two apart.
+					if who != label {
+						rows = append(rows, fmt.Sprintf("%s (%s): %d visits", label, who, visits))
+					} else {
+						rows = append(rows, fmt.Sprintf("%s: %d visits", label, visits))
+					}
 				}
 				return r.Err()
 			})

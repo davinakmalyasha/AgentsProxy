@@ -412,8 +412,10 @@ func listBookingsTool(pool *pgxpool.Pool) Tool {
 
 func queryIncomeTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "query_income",
-		Description: "Sum booking income. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD), month? (YYYY-MM)}. Defaults to this month.",
+		Name: "query_income",
+		Description: "Income for a period: money actually received from payments plus canteen, " +
+			"with the committed booking value reported alongside. " +
+			"Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD), month? (YYYY-MM)}. Defaults to this month.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From  string `json:"from"`
@@ -432,21 +434,22 @@ func queryIncomeTool(pool *pgxpool.Pool) Tool {
 				from = now.Format("2006-01") + "-01"
 				to = now.AddDate(0, 1, 0).Format("2006-01-02")
 			}
-			var sum float64
-			var n int
+			var b basis
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				// Same money basis as query_net_profit: honor an
-				// override price and include completed bookings so the
-				// two tools can never disagree about "income".
-				return tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(COALESCE(override_price, price)),0), COUNT(*) FROM sports_bookings
-					  WHERE tenant_id=$1 AND status IN ('confirmed','checked_in','completed') AND date >= $2::date AND date < $3::date`,
-					tenantID, from, to).Scan(&sum, &n)
+				var err error
+				b, err = loadBasis(ctx, tx, tenantID, from, to)
+				return err
 			})
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			return fmt.Sprintf("income %.2f across %d bookings (%s to %s)", sum, n, from, to)
+			// "Income" is money in the drawer, not the value of slots that
+			// were reserved. This used to sum booking prices, so a fully
+			// unpaid month reported income while the Laporan screen the
+			// owner reads showed zero. Both figures are returned now, with
+			// the received one first.
+			return fmt.Sprintf("income %s (%s to %s), %d payments",
+				b.describe(), from, to, b.Count)
 		},
 	}
 }

@@ -28,6 +28,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -249,10 +250,13 @@ func normaliseArguments(raw string) json.RawMessage {
 	return json.RawMessage(trimmed)
 }
 
-// protocolMarkup matches the shapes a model falls back on when it is not
-// given a real tool interface: the Hermes/Qwen plain-text wrappers, and
-// both envelopes the previous prompt-based protocol asked for
+// eachPattern holds the shapes a model falls back on when it is not given
+// a real tool interface: the Hermes/Qwen plain-text wrappers, and both
+// envelopes the previous prompt-based protocol asked for
 // ({"tool":...,"args":...} and {"answer":...}).
+//
+// They are kept as separate patterns rather than one alternation so a
+// suppression can name which shape appeared — see firstMarkupHit.
 //
 // This is defence in depth. The primary fix is that a tool call now travels
 // as a real tool_calls field, so the model has no reason to improvise. But
@@ -260,9 +264,16 @@ func normaliseArguments(raw string) json.RawMessage {
 // in front of a user or into stored history — which is the failure that
 // shipped raw <tool_call>{function=…} markup into the chat and then
 // persisted it, repeating on every later turn of the same conversation.
-var protocolMarkup = regexp.MustCompile(
-	`(?is)<\s*/?\s*tool_call|<\s*/?\s*function_call|<\s*/?\s*parameter|` +
-		`<\s*/?\s*answer|"tool_call"\s*:|"function_call"\s*:|"tool"\s*:\s*"|"args"\s*:`)
+var eachPattern = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<\s*/?\s*tool_call`),
+	regexp.MustCompile(`(?is)<\s*/?\s*function_call`),
+	regexp.MustCompile(`(?is)<\s*/?\s*parameter`),
+	regexp.MustCompile(`(?is)<\s*/?\s*answer`),
+	regexp.MustCompile(`(?i)"tool_call"\s*:`),
+	regexp.MustCompile(`(?i)"function_call"\s*:`),
+	regexp.MustCompile(`(?i)"tool"\s*:\s*"`),
+	regexp.MustCompile(`(?i)"args"\s*:`),
+}
 
 // sanitiseReply is the last gate before a model turn becomes a user-visible
 // answer. If the text still contains protocol markup, the caller is told so
@@ -272,11 +283,47 @@ func sanitiseReply(text string) string {
 	if t == "" {
 		return "Saya belum bisa menjawab itu. Coba tanya hal yang lebih spesifik tentang data usaha."
 	}
-	if protocolMarkup.MatchString(t) {
-		slog.Warn("agent: reply contained protocol markup; suppressed")
+	if hit := firstMarkupHit(t); hit != nil {
+		slog.Warn("agent: reply contained protocol markup; suppressed",
+			"pattern", hit.pattern, "at", hit.at, "text", truncate(hit.snippet, 160))
 		return "Maaf, jawabannya tidak bisa ditampilkan. Coba ulangi pertanyaannya dengan kalimat lain."
 	}
 	return t
+}
+
+type markupHit struct {
+	pattern string
+	at      int
+	snippet string
+}
+
+// firstMarkupHit returns the earliest match across all alternatives, so
+// the reported position is the first place the text actually goes wrong
+// rather than whichever pattern happened to be checked first.
+func firstMarkupHit(text string) *markupHit {
+	var best *markupHit
+	for i, re := range eachPattern {
+		loc := re.FindStringIndex(text)
+		if loc == nil {
+			continue
+		}
+		if best == nil || loc[0] < best.at {
+			from := loc[0] - 40
+			if from < 0 {
+				from = 0
+			}
+			to := loc[1] + 40
+			if to > len(text) {
+				to = len(text)
+			}
+			best = &markupHit{
+				pattern: fmt.Sprintf("alt%d", i),
+				at:      loc[0],
+				snippet: text[from:to],
+			}
+		}
+	}
+	return best
 }
 
 func truncate(s string, n int) string {
