@@ -24,7 +24,11 @@ func TestMigrate_Real(t *testing.T) {
 	if os.Getenv("MIGRATE_TEST_DESTRUCTIVE") != "true" {
 		t.Skip("MIGRATE_TEST_DESTRUCTIVE not set; skipping destructive wipe (run alone with MIGRATE_TEST_DESTRUCTIVE=true)")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 120s, not 30s: against a remote Nano over a pooler, the first
+	// migrate is ~30s of DDL round-trips alone (verified 2026-09-30:
+	// 33 files applied clean, then the second run starved). Local runs
+	// finish in seconds; the headroom only matters remotely.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	pool, err := NewPool(ctx, dsn)
 	if err != nil {
@@ -45,12 +49,22 @@ func TestMigrate_Real(t *testing.T) {
 		t.Fatalf("Migrate (second): %v", err)
 	}
 
+	// 003 no longer seeds a dev client (Phase 1.1: the published
+	// dev-token moved to scripts/seed-dev.mjs). Prove the clients write
+	// path directly with a probe row instead of depending on seed data.
+	// The test wipes first (line 36), so this is self-contained.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
+		 VALUES ('probe','probe','hash-probe',1,'active')
+		 ON CONFLICT (tenant_id) DO NOTHING`); err != nil {
+		t.Fatalf("probe insert: %v", err)
+	}
 	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE tenant_id = 'dev'`).Scan(&n); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM clients WHERE tenant_id='probe'`).Scan(&n); err != nil {
 		t.Fatalf("query clients: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("expected 1 dev client, got %d", n)
+		t.Fatalf("expected 1 probe client, got %d", n)
 	}
 
 	var migrations int

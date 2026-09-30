@@ -67,5 +67,5 @@ CREATE POLICY notify_jobs_isolation ON notify_jobs
   USING (tenant_id = current_setting('app.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON notify_jobs TO app_runtime, app;
-GRANT USAGE, SELECT ON SEQUENCE notify_jobs_id_seq TO app_runtime, app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON notify_jobs TO app_runtime;
+GRANT USAGE, SELECT ON SEQUENCE notify_jobs_id_seq TO app_runtime;

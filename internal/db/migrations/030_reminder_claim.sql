@@ -35,4 +35,4 @@ CREATE INDEX IF NOT EXISTS agent_reminders_stale_idx
   ON agent_reminders(claimed_at)
   WHERE status = 'sending';
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON agent_reminders TO app_runtime, app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON agent_reminders TO app_runtime;

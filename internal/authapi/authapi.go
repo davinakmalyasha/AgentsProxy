@@ -221,9 +221,15 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		fullName string
 		active   bool
 	)
+	// Login lookup goes through private.login_user (migration 021), not a
+	// direct SELECT: sports_users is tenant-scoped by RLS and this query
+	// runs with no app.tenant_id set, so a direct read would match
+	// nothing. The function is SECURITY DEFINER and returns only the
+	// five columns login needs, which also keeps password_hash out of
+	// reach of any other runtime query.
 	err := a.Pool.QueryRow(r.Context(),
-		`SELECT id::text, password_hash, role, full_name, is_active
-		   FROM sports_users WHERE tenant_id=$1 AND email=$2`,
+		`SELECT user_id::text, password_hash, role, full_name, is_active
+		   FROM private.login_user($1, $2)`,
 		req.TenantID, req.Email,
 	).Scan(&id, &hash, &role, &fullName, &active)
 	if errors.Is(err, pgx.ErrNoRows) {

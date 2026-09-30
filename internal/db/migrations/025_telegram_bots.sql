@@ -44,14 +44,9 @@ CREATE POLICY telegram_bots_isolation ON telegram_bots
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON telegram_bots TO app_runtime;
 
--- Bindings: scope to the bot. Legacy rows belong to the removed env bot.
-DELETE FROM agent_bindings;
-ALTER TABLE agent_bindings ADD COLUMN IF NOT EXISTS bot_id uuid REFERENCES telegram_bots(id) ON DELETE CASCADE;
--- Backfill guard: no rows remain, so NOT NULL is safe.
-ALTER TABLE agent_bindings ALTER COLUMN bot_id SET NOT NULL;
-ALTER TABLE agent_bindings DROP CONSTRAINT IF EXISTS agent_bindings_pkey;
-ALTER TABLE agent_bindings ADD PRIMARY KEY (bot_id, chat_id);
-CREATE INDEX IF NOT EXISTS agent_bindings_bot_idx ON agent_bindings(bot_id);
+-- (Phase 1.4: the agent_bindings ALTER block lived here. 011 is retired
+-- and the table is never created, so the block was removed — ALTER on a
+-- missing table would abort the chain.)
 
 -- Reminders: remember which bot owns the chat.
 ALTER TABLE agent_reminders

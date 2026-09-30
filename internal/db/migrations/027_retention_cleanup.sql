@@ -1,20 +1,6 @@
--- 027_retention_cleanup.sql — bounded-row janitor queries for tables
--- that otherwise grow forever. Idempotent. The Go janitor calls these
--- on a timer with LIMITs; the DELETE predicates use the existing
--- indexes (sports_sessions_token_idx, agent_reminders_due_idx).
--- DONE: retention hardening / STANDARDS A, E
-
--- Expired sessions: 30-day rows pile up per login; drop rows whose
--- token expired more than 7 days ago (keeps a short audit tail).
-DELETE FROM sports_sessions
- WHERE expires_at < now() - interval '7 days';
-
--- Sent reminders are immutable history; keep 90 days.
-DELETE FROM agent_reminders
- WHERE status = 'sent'
-   AND created_at < now() - interval '90 days';
-
--- Dead-lettered reminders are diagnostics; keep 30 days.
-DELETE FROM agent_reminders
- WHERE status = 'dead'
-   AND created_at < now() - interval '30 days';
+-- 027_retention_cleanup.sql — RETIRED (Phase 1.5).
+--
+-- The three DELETEs below duplicated cmd/server/main.go:243-251
+-- verbatim, minus the LIMITs the header claimed. A migration body runs
+-- once at apply time; the Go janitor owns this on a timer. No-op stub
+-- kept so numbering stays stable. Applies cleanly (no statements).

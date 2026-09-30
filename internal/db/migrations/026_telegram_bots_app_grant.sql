@@ -1,11 +1,6 @@
--- 026_telegram_bots_app_grant.sql — T1 fix: runtime grant for the app role.
--- DONE: T1 (grant parity)
+-- 026_telegram_bots_app_grant.sql — RETIRED (Phase 1.2).
 --
--- Every migration grants to app_runtime, but the runtime connection in
--- this project logs in as role `app` (Laragon local AND the pooler URL
--- in .env.example). Older tables carry direct `app` grants (applied at
--- setup); new tables must repeat them or the API gets
--- "permission denied" despite correct RLS. Keep this pattern for every
--- new table until the dual-role setup is unified.
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON telegram_bots TO app;
+-- This migration granted telegram_bots DML to a second role (`app`) that
+-- no migration creates. Single-role design: the runtime connects as
+-- `app_runtime`, which 025_telegram_bots.sql already grants. No-op stub
+-- kept so numbering stays stable. Applies cleanly (no statements).

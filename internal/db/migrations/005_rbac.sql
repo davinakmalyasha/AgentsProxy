@@ -9,9 +9,11 @@
 -- Admin (migrations, /v1/admin/*) connects as the existing superuser
 -- role via `DATABASE_ADMIN_URL`.
 --
--- The `app` role from earlier (used by the test harness) is kept
--- for the RLS-isolation tests so we can prove the security boundary
--- end-to-end.
+-- Single runtime role by design (Phase 1.2): `app_runtime` is the only
+-- login role the migrations create. There is no `app` role — every
+-- `TO app` grant was removed, because no migration creates that role
+-- and an unguarded GRANT aborts the whole chain on a fresh database
+-- (migrate.go runs all migrations in one transaction).
 
 DO $$
 BEGIN

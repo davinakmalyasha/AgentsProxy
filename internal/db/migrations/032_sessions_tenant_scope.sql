@@ -98,6 +98,7 @@ CREATE INDEX IF NOT EXISTS sports_sessions_expires_idx
 -- 2. Replace the open policy with the standard tenant policy.
 -- ---------------------------------------------------------------------------
 DROP POLICY IF EXISTS sports_sessions_open ON sports_sessions;
+DROP POLICY IF EXISTS sports_sessions_isolation ON sports_sessions;
 
 CREATE POLICY sports_sessions_isolation ON sports_sessions
   FOR ALL
@@ -284,32 +285,16 @@ REVOKE ALL ON FUNCTION
   private.touch_session(text, timestamptz)
 FROM PUBLIC;
 
-DO $$
-DECLARE
-  v_app boolean;
-BEGIN
-  SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') INTO v_app;
+-- Single-role design (Phase 1.2): the runtime connects as `app_runtime`
+-- only. There is no `app` role, so no existence guard is needed. These
+-- four functions are the whole reason this migration exists: session
+-- DML is never reachable through a client token.
+REVOKE INSERT, UPDATE, DELETE ON sports_sessions FROM app_runtime;
 
-  -- Never reachable through a client token: these four are the whole
-  -- reason this migration exists.
-  EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON sports_sessions FROM app_runtime';
-  IF v_app THEN
-    EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON sports_sessions FROM app';
-  END IF;
-
-  EXECUTE 'GRANT USAGE ON SCHEMA private TO app_runtime';
-  EXECUTE 'GRANT EXECUTE ON FUNCTION
-             private.create_session(uuid, text, timestamptz),
-             private.session_user(text),
-             private.delete_session(text),
-             private.touch_session(text, timestamptz) TO app_runtime';
-
-  IF v_app THEN
-    EXECUTE 'GRANT USAGE ON SCHEMA private TO app';
-    EXECUTE 'GRANT EXECUTE ON FUNCTION
-               private.create_session(uuid, text, timestamptz),
-               private.session_user(text),
-               private.delete_session(text),
-               private.touch_session(text, timestamptz) TO app';
-  END IF;
-END $$;
+GRANT USAGE ON SCHEMA private TO app_runtime;
+GRANT EXECUTE ON FUNCTION
+  private.create_session(uuid, text, timestamptz),
+  private.session_user(text),
+  private.delete_session(text),
+  private.touch_session(text, timestamptz)
+TO app_runtime;

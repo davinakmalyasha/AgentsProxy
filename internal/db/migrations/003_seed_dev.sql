@@ -1,6 +1,7 @@
--- 003_seed_dev.sql
--- token = 'dev-token', hash = sha256Hex('dev-token')
--- DONE: PRD 4.3
-INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
-VALUES ('dev', 'dev', encode(digest('dev-token','sha256'),'hex'), 1000000, 'active')
-ON CONFLICT (tenant_id) DO NOTHING;
+-- 003_seed_dev.sql — RETIRED (Phase 1.1).
+--
+-- This migration formerly inserted a live `dev` client (published token
+-- 'dev-token', 1,000,000-token quota) on EVERY environment including
+-- production. That credential is now a dev-only seed managed outside the
+-- chain: see scripts/seed-dev.mjs. This file is kept as a no-op stub so
+-- migration numbering stays stable. Applies cleanly (no statements).

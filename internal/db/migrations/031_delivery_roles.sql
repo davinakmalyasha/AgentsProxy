@@ -45,6 +45,14 @@ END $$;
 GRANT USAGE ON SCHEMA private TO delivery_caller;
 GRANT CONNECT ON DATABASE postgres TO delivery_caller;
 
+-- Ownership transfer (ALTER ... OWNER TO delivery_worker below) requires
+-- postgres to be a MEMBER of delivery_worker, and delivery_worker to
+-- hold CREATE on schema private. Implicit for a local superuser;
+-- explicit grants required on Supabase (postgres is CREATEROLE, not
+-- superuser). Both GRANTs are idempotent.
+GRANT delivery_worker TO postgres;
+GRANT USAGE, CREATE ON SCHEMA private TO delivery_worker;
+
 -- ---------------------------------------------------------------------------
 -- Claim due reminders.
 --
@@ -366,5 +374,5 @@ TO delivery_caller;
 
 -- The Go boot path reaps stale claims on long-running hosts; the admin
 -- pool reaches it directly, no definer required.
-GRANT USAGE ON SCHEMA private TO app_runtime, app;
-GRANT EXECUTE ON FUNCTION private.reap_stale_claims(interval) TO app_runtime, app;
+GRANT USAGE ON SCHEMA private TO app_runtime;
+GRANT EXECUTE ON FUNCTION private.reap_stale_claims(interval) TO app_runtime;
