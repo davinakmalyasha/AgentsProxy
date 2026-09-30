@@ -146,6 +146,55 @@ func TestSanitiseReplyHandlesEmpty(t *testing.T) {
 	}
 }
 
+func TestSanitiseReplyKeepsProseAroundMarkup(t *testing.T) {
+	// The model regularly finishes a correct answer and then, in the same
+	// turn, writes a wrapper to try to chain a second call. The tool had
+	// already run. Discarding the whole reply for a trailing wrapper left
+	// the user with "Maaf, jawabannya tidak bisa ditampilkan" for a
+	// question that had been answered, so the prose is kept and only the
+	// protocol is removed.
+	cases := []struct{ in, want string }{
+		{
+			"Belum ada lapangan aktif.\n<tool_call><function=list_bookings><parameter=date>2026-10-01</parameter></function></tool_call>",
+			"Belum ada lapangan aktif.",
+		},
+		{
+			"Here you go:\n<function_call>{\"name\":\"query_income\"}</function_call>",
+			"Here you go:",
+		},
+	}
+	for _, c := range cases {
+		got := sanitiseReply(c.in)
+		if got != c.want {
+			t.Errorf("sanitiseReply(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSanitiseReplyStripsZeroWidthBypass(t *testing.T) {
+	// A zero-width space between "<" and the tag name is enough to slip
+	// past a guard that only matches literal tag text, and the model does
+	// emit it. If this regresses, protocol internals reach the user again.
+	zwsp := "\u200b"
+	leak := "<" + zwsp + "tool_call>{function=closing_report}</" + zwsp + "tool_call>"
+	got := sanitiseReply(leak)
+	if strings.Contains(got, "tool_call") || strings.Contains(got, "function") {
+		t.Errorf("zero-width markup leaked through: %q -> %q", leak, got)
+	}
+}
+
+func TestSanitiseReplyRefusesWhenNothingReadableRemains(t *testing.T) {
+	// Markup only, with no prose to salvage: the turn really was nothing
+	// but protocol, so the caller must be told rather than shown "".
+	got := sanitiseReply(`<tool_call>{function=closing_report}</tool_call>`)
+	if strings.TrimSpace(got) == "" {
+		t.Error("markup-only reply should not reduce to an empty message")
+	}
+	if strings.Contains(got, "tool_call") || strings.Contains(got, "function") {
+		t.Errorf("markup leaked: %q", got)
+	}
+}
+
 func TestNormaliseArguments(t *testing.T) {
 	cases := map[string]string{
 		``:                             `{}`,
