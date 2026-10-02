@@ -1,4 +1,4 @@
-package agent
+package adkrunner
 
 import (
 	"fmt"
@@ -8,7 +8,12 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
-// Prompt assembly, layered.
+// Package adkrunner is the ADK-backed conversational loop that replaces
+// internal/agent's hand-rolled tool loop. One llmagent per (tenant, role),
+// built from the tenant's four folders, with tools adapted from the
+// agentstools registry and sessions on Postgres.
+//
+// Prompt assembly, layered. (Moved from internal/agent; behaviour unchanged.)
 //
 // It used to be one concatenated string built by fmt.Sprintf, with the
 // venue's WhatsApp number written into the source:
@@ -121,22 +126,6 @@ func writeLayer(b *strings.Builder, title, body string) {
 	b.WriteString("\n\n")
 	b.WriteString(body)
 	b.WriteString("\n")
-}
-
-func (a *Agent) assemblePrompt(l Layers) string {
-	return Assemble(l)
-}
-
-// ProjectFor returns the configured project for a tenant, or nil.
-//
-// Swapped in tests; production reads the embedded map. Kept as a field
-// rather than a package global so two Agents cannot see each other's
-// projects.
-func (a *Agent) ProjectFor(tenantID string) *agentconfig.Project {
-	if a.Projects == nil {
-		return nil
-	}
-	return a.Projects[tenantID]
 }
 
 // roleBase is the platform's non-negotiable behaviour, identical for every

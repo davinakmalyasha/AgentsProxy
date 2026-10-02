@@ -199,7 +199,10 @@ func firstMarkupHit(text string) *markupHit {
 	return best
 }
 
-func isOffTopic(msg string) bool {
+// IsOffTopic is the cheap abuse/jailbreak heuristic for the public tiers.
+// Exported so the agent loop (old and ADK) share one copy instead of
+// drifting apart; kept in sanitize because it is input hygiene, not policy.
+func IsOffTopic(msg string) bool {
 	m := strings.ToLower(msg)
 	// Very cheap heuristic for abuse/jailbreak vs badminton venue
 	offMarkers := []string{

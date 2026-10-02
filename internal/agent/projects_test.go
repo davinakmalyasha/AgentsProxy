@@ -6,6 +6,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
@@ -139,7 +140,7 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	}
 	p := projects["centrum"]
 
-	got := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
+	got := adkrunner.Assemble(adkrunner.Layers{Project: p, Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
 	for _, want := range []string{
 		"Centrum Badminton Arena", // from project.json
 		"project instructions",
@@ -171,7 +172,7 @@ func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 		"berapa pendapatan bulan ini?",
 		"halo",
 	} {
-		got := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports",
+		got := adkrunner.Assemble(adkrunner.Layers{Project: p, Role: "owner", Vertical: "sports",
 			Message: msg, ToolDefs: ts.Definitions()})
 		if !strings.Contains(got, "procedure: Badminton Skills") {
 			t.Errorf("message %q: the skills file was not injected whole", msg)
@@ -183,7 +184,7 @@ func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 // working agent. Config is an addition, not a precondition.
 func TestPromptWithoutProjectStillWorks(t *testing.T) {
 	ts := agentstools.NewToolSet(nil)
-	got := Assemble(Layers{Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
+	got := adkrunner.Assemble(adkrunner.Layers{Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
 	if len(got) < 200 {
 		t.Errorf("a tenant with no project config got a near-empty prompt (%d chars)", len(got))
 	}

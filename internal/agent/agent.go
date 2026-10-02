@@ -30,40 +30,15 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 	"sync"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 )
 
 const maxRounds = 5
-
-func isOffTopic(msg string) bool {
-	m := strings.ToLower(msg)
-	// Very cheap heuristic for abuse/jailbreak vs badminton venue
-	offMarkers := []string{
-		"ignore instructions", "ignore previous", "system prompt", "jailbreak", "dan ", "do anything now",
-		"write code", "python", "javascript", "translate this", "summarize this article",
-		"who are you", "what is your name",
-	}
-	for _, k := range offMarkers {
-		if strings.Contains(m, k) {
-			// Allow if also contains badminton-related words, then not off-topic
-			if strings.Contains(m, "badminton") || strings.Contains(m, "lapangan") || strings.Contains(m, "centrum") || strings.Contains(m, "booking") || strings.Contains(m, "jadwal") || strings.Contains(m, "harga") {
-				continue
-			}
-			return true
-		}
-	}
-	// If message is long and has no badminton keywords at all, treat as off-topic
-	hasBadminton := strings.Contains(m, "badminton") || strings.Contains(m, "lapangan") || strings.Contains(m, "centrum") || strings.Contains(m, "booking") || strings.Contains(m, "jadwal") || strings.Contains(m, "harga") || strings.Contains(m, "fasilitas") || strings.Contains(m, "lokasi") || strings.Contains(m, "whatsapp") || strings.Contains(m, "jam")
-	if !hasBadminton && len(strings.Fields(m)) > 12 {
-		return true
-	}
-	return false
-}
 
 // CtxChatID carries the sender's chat ID (Telegram) through the agent
 // loop into tools. Tools that deliver outside the chat (reminders)
@@ -149,6 +124,16 @@ func (a *Agent) definitionsForRole(role string) []string {
 	return actual.([]string)
 }
 
+// ProjectFor returns the configured project for a tenant, or nil.
+// (Lived in prompt.go before the prompt moved to adkrunner; kept here
+// because it reads the Agent's own map. Deleted with the old loop.)
+func (a *Agent) ProjectFor(tenantID string) *agentconfig.Project {
+	if a.Projects == nil {
+		return nil
+	}
+	return a.Projects[tenantID]
+}
+
 // Run processes one user message for the given tenant and returns
 // the agent's reply. It appends the exchange to history.
 func (a *Agent) Run(ctx context.Context, tenantID, vertical, userName, message string) (string, error) {
@@ -159,7 +144,7 @@ func (a *Agent) Run(ctx context.Context, tenantID, vertical, userName, message s
 // but filtered agentstools.ToolSet per role Ã¢â‚¬â€ the isolation you asked for client vs pegawai vs owner.
 func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, role, message string) (string, error) {
 	// Scope lock for client: if message is clearly off-topic/jailbreak, hardcode fallback without LLM
-	if role == "client" && isOffTopic(message) {
+	if role == "client" && agentstools.IsOffTopic(message) {
 		return agentstools.HardcodedScopeReply, nil
 	}
 	// Per-person RPD (30/80/150) + per-tenant+role cap (20/80/150) for abuse
@@ -182,7 +167,7 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 	// existing.
 	project := a.ProjectFor(tenantID)
 
-	sys := a.assemblePrompt(Layers{
+	sys := adkrunner.Assemble(adkrunner.Layers{
 		Project:  project,
 		Role:     role,
 		ToolDefs: toolDefs,
