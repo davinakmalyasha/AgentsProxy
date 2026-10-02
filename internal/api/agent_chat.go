@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"log/slog"
@@ -9,11 +10,13 @@ import (
 	"strings"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	adksession "google.golang.org/adk/v2/session"
 )
 
 // AgentChat handles role-aware agent calls. Single shared LLM_API_KEY for all roles.
@@ -22,6 +25,10 @@ type AgentChat struct {
 	LLM  *llm.Client
 	RDB  *redis.Client
 	Auth *authapi.Auth
+	// ADK is the cutover loop. ClientChat runs on it; Chat and Telegram
+	// follow one call site at a time. Nil in tests that only exercise
+	// pre-loop rejections, where ClientChat falls back to the old loop.
+	ADK *adkrunner.Runner
 	// Projects is the per-tenant agent configuration from
 	// internal/agentconfig, keyed by tenant id. nil is supported and means
 	// "no tenant has an agent config", in which case agents run on the
@@ -106,9 +113,22 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	// only); the client tier keeps list_bookings because there the
 	// token pins the tenant via RLS. A public FAQ widget never needed
 	// customer names, so nothing here can leak another tenant's data.
-	ts := agentstools.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
-	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
-	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
+	//
+	// Cutover: the ADK loop with the same pairing (anon tools, client
+	// persona). The old loop remains as the fallback for test harnesses
+	// that do not wire ADK; production always has it (boot is fatal
+	// without the session tables).
+	var (
+		reply string
+		err   error
+	)
+	if h.ADK != nil {
+		reply, err = h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
+	} else {
+		ts := agentstools.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
+		ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
+		reply, err = ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
@@ -144,6 +164,17 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	if err := hist.ClearForRole(tenant, "client", "client:"+clientIP(r)); err != nil {
 		writeJSONError(w, http.StatusBadGateway, "clear failed")
 		return
+	}
+	// ADK sessions (Postgres) hold post-cutover conversations under the
+	// same (tenant, role, user) partition; wipe those too. A missing
+	// session is not a failure -- the user may never have talked to the
+	// new loop.
+	if h.ADK != nil {
+		if err := h.ADK.ClearSession(r.Context(), tenant, "client:"+clientIP(r), "client"); err != nil &&
+			!errors.Is(err, adksession.ErrNotFound) {
+			writeJSONError(w, http.StatusBadGateway, "clear failed")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cleared": "client"})
 }

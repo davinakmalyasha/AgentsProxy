@@ -218,6 +218,18 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 	return agentstools.SanitiseReply(last), nil
 }
 
+// ClearSession deletes one conversation: the "Bersihkan riwayat" path.
+// It mirrors the old History.ClearForRole key (tenant, role-as-session,
+// user) so the wipe removes exactly what RunWithRole stored. Quota state
+// lives in Redis under separate keys and is untouched, same as before.
+func (r *Runner) ClearSession(ctx context.Context, tenantID, userID, role string) error {
+	return r.cfg.Sessions.Delete(ctx, &session.DeleteRequest{
+		AppName:   tenantID,
+		UserID:    userID,
+		SessionID: role,
+	})
+}
+
 // refusedNoData is the reply when the run ends with no final text. Named
 // like the old loop's constant and with the same constraint: it must NOT
 // contain "coba lagi", which the frontend renders as a connectivity failure

@@ -17,6 +17,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
@@ -107,6 +108,12 @@ func setup(t *testing.T) *harness {
 		pool.Close()
 		t.Fatal(err)
 	}
+	// ADK conversation sessions from earlier runs (events cascade on
+	// session delete). Same targeted style: only the test tenants.
+	if _, err := adminPool.Exec(ctx, `DELETE FROM sessions WHERE app_name IN ('alpha','bravo','gamma','x','x1','x2','salon-a','klinik-a')`); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
 	rdb, err := redisx.NewClient(ctx, rurl)
 	if err != nil {
 		pool.Close()
@@ -149,6 +156,7 @@ func setup(t *testing.T) *harness {
 		Redis:   rdb,
 		Cache:   cli,
 		LLM:     llmCli,
+		ADK:     testADKRunner(t, pool, mockLLM.URL),
 		Auth:    &authapi.Auth{Pool: pool, Cache: cli},
 		Version: "test",
 	})
@@ -433,6 +441,61 @@ func TestAgentClientChat_LongMessageRejected(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+// testADKRunner wires the cutover loop for API tests: live Postgres
+// sessions (migration 041 applies in setup), mock-LLM model. The mock
+// answers prose with no tool calls, so these tests prove the ADK path
+// serves traffic; tool-calling through the loop is covered in adkrunner
+// and by live verification.
+func testADKRunner(t *testing.T, pool *pgxpool.Pool, llmURL string) *adkrunner.Runner {
+	t.Helper()
+	sessSvc, err := adkrunner.NewSessionService(pool)
+	if err != nil {
+		t.Fatalf("session service: %v", err)
+	}
+	r, err := adkrunner.New(adkrunner.Config{
+		Pool:      pool,
+		BaseURL:   llmURL,
+		APIKey:    "sk-test",
+		Model:     "mock-model",
+		MaxTokens: 1024,
+		Sessions:  sessSvc,
+	})
+	if err != nil {
+		t.Fatalf("adk runner: %v", err)
+	}
+	return r
+}
+
+// TestAgentClientChat_ADKServesReply posts a short greeting through the
+// migrated endpoint and expects the mock model's prose back. This is the
+// first test that executes the ADK loop inside the HTTP stack.
+func TestAgentClientChat_ADKServesReply(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	body := `{"message":"halo, jam berapa buka?","tenant_id":"alpha"}`
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/agent/client-chat", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp := mustReq(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var got struct {
+		Reply string `json:"reply"`
+		Role  string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Role != "client" {
+		t.Errorf("role=%q want client", got.Role)
+	}
+	if got.Reply != "hi back" {
+		t.Errorf("reply=%q want the mock model's prose", got.Reply)
 	}
 }
 

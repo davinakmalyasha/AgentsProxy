@@ -15,6 +15,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -154,6 +155,35 @@ func main() {
 	sort.Strings(names)
 	slog.Info("agent projects loaded", "count", len(projects), "projects", names)
 
+	// ADK agent loop (cutover from internal/agent's hand-rolled loop):
+	// conversation sessions live on Postgres (migration 041), one
+	// llmagent per (tenant, role) built per call from the tenant's four
+	// folders. Missing session tables fail boot, same fail-loud
+	// philosophy as LoadProjects above.
+	if err := adkrunner.VerifySessionTables(bootCtx, pool); err != nil {
+		slog.Error("adk session tables", "err", err)
+		return
+	}
+	sessSvc, err := adkrunner.NewSessionService(pool)
+	if err != nil {
+		slog.Error("adk session service", "err", err)
+		return
+	}
+	adkRunner, err := adkrunner.New(adkrunner.Config{
+		Pool:      pool,
+		Projects:  projects,
+		BaseURL:   cfg.LLMBaseURL,
+		APIKey:    cfg.LLMAPIKey,
+		Model:     cfg.LLMModel,
+		MaxTokens: cfg.MaxTokensPerReq,
+		Sessions:  sessSvc,
+	})
+	if err != nil {
+		slog.Error("adk runner", "err", err)
+		return
+	}
+	slog.Info("adk runner ready", "model", cfg.LLMModel)
+
 	// Notification queue (Phase 4 sports vertical). Durable in
 	// notify_jobs (migration 029) rather than an in-process channel, so
 	// a job survives a serverless invocation being destroyed
@@ -242,6 +272,7 @@ func main() {
 		Redis:     rdb,
 		Cache:     cli,
 		LLM:       llmCli,
+		ADK:       adkRunner,
 		Projects:  projects,
 		Auth:      &authapi.Auth{Pool: pool, Cache: cli},
 		Version:   Version,
