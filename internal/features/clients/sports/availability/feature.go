@@ -59,6 +59,10 @@ type cachedAvail struct {
 // cacheTTL bounds how long a built availability payload is reused.
 const cacheTTL = 3 * time.Second
 
+// jakartaTZ is UTC+7 with no DST. FixedZone keeps this dependency-free
+// on Windows containers, matching the agent's wibLoc().
+var jakartaTZ = time.FixedZone("WIB", 7*3600)
+
 type busyInterval struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
@@ -83,7 +87,12 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	date := r.URL.Query().Get("date")
 	if date == "" {
-		date = time.Now().Format("2006-01-02")
+		// WIB, not the server's local time. The proxy's own prompt says
+		// "today" means today in Jakarta, and every SQL filter in this
+		// codebase already compares in Asia/Jakarta — so a UTC host would
+		// default to yesterday for seven hours a day and the landing board
+		// would quietly show the wrong day's availability.
+		date = time.Now().In(jakartaTZ).Format("2006-01-02")
 	}
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "date must be YYYY-MM-DD")

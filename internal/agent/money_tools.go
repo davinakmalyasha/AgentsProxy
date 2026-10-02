@@ -398,7 +398,7 @@ func closingReportTool(pool *pgxpool.Pool) Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			if p.Date == "" {
-				p.Date = time.Now().Format("2006-01-02")
+				p.Date = wibNow().Format("2006-01-02")
 			}
 			var cash, qris float64
 			var bookings, unpaid int
@@ -437,7 +437,7 @@ func queryKantinSummaryTool(pool *pgxpool.Pool) Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			if p.Date == "" {
-				p.Date = time.Now().Format("2006-01-02")
+				p.Date = wibNow().Format("2006-01-02")
 			}
 			var revenue, cogs float64
 			var items int
@@ -454,7 +454,7 @@ func queryKantinSummaryTool(pool *pgxpool.Pool) Tool {
 				r, err := tx.Query(ctx,
 					`SELECT i.product_name, SUM(i.qty) FROM sports_kantin_sale_items i
 					   JOIN sports_kantin_sales s ON s.id = i.sale_id
-					  WHERE i.tenant_id=$1 AND s.created_at::date = $2::date
+					  WHERE i.tenant_id=$1 AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date
 					  GROUP BY i.product_name ORDER BY 2 DESC LIMIT 5`,
 					tenantID, p.Date)
 				if err != nil {
