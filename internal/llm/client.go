@@ -45,35 +45,6 @@ type FunctionCall struct {
 	Arguments string `json:"arguments"` // JSON text, not an object
 }
 
-// ToolDef is an OpenAI-compatible tool declaration. Parameters must be a
-// JSON Schema object.
-type ToolDef struct {
-	Type     string       `json:"type"`
-	Function FunctionSpec `json:"function"`
-}
-
-type FunctionSpec struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
-}
-
-// ToolChoice forces a specific function. A pointer to a ToolDef means
-// "call exactly this"; nil means let the model decide.
-type ToolChoice struct {
-	Type     string `json:"type"`
-	Function struct {
-		Name string `json:"name"`
-	} `json:"function"`
-}
-
-// ForceTool builds a ToolChoice that pins the call to one function.
-func ForceTool(name string) *ToolChoice {
-	tc := &ToolChoice{Type: "function"}
-	tc.Function.Name = name
-	return tc
-}
-
 type Client struct {
 	BaseURL      string
 	APIKey       string
@@ -93,13 +64,11 @@ func New(baseURL, apiKey, model string, maxTokens int) *Client {
 }
 
 type chatRequest struct {
-	Model           string      `json:"model"`
-	Messages        []Message   `json:"messages"`
-	MaxTokens       int         `json:"max_tokens"`
-	ReasoningEffort *string     `json:"reasoning_effort,omitempty"`
-	Thinking        *thinking   `json:"thinking,omitempty"`
-	Tools           []ToolDef   `json:"tools,omitempty"`
-	ToolChoice      *ToolChoice `json:"tool_choice,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []Message `json:"messages"`
+	MaxTokens       int       `json:"max_tokens"`
+	ReasoningEffort *string   `json:"reasoning_effort,omitempty"`
+	Thinking        *thinking `json:"thinking,omitempty"`
 }
 
 type thinking struct {
@@ -140,29 +109,12 @@ var ErrProvider = errors.New("provider error")
 // Chat posts messages to the provider's OpenAI-compatible endpoint and
 // returns the assistant reply and token counts. Never logs prompt or
 // response bodies.
-// Chat posts messages to the provider's OpenAI-compatible endpoint and
-// returns the assistant reply and token counts. Never logs prompt or
-// response bodies.
 func (c *Client) Chat(ctx context.Context, messages []Message, modelOverride string) (string, int, int, error) {
-	comp, err := c.Complete(ctx, messages, nil, nil, modelOverride)
+	comp, err := c.Complete(ctx, messages, modelOverride)
 	if err != nil {
 		return "", 0, 0, err
 	}
 	return comp.Content, comp.PromptTokens, comp.CompletionTok, nil
-}
-
-// ChatWithTools is the function-calling entry point.
-//
-// `tools` is the OpenAI-compatible declaration list; `choice` pins the call
-// to one function (see ForceTool) or is nil to let the model choose.
-func (c *Client) ChatWithTools(
-	ctx context.Context,
-	messages []Message,
-	tools []ToolDef,
-	choice *ToolChoice,
-	modelOverride string,
-) (*Completion, error) {
-	return c.Complete(ctx, messages, tools, choice, modelOverride)
 }
 
 // Complete performs one model turn and returns whatever it produced: prose,
@@ -170,8 +122,6 @@ func (c *Client) ChatWithTools(
 func (c *Client) Complete(
 	ctx context.Context,
 	messages []Message,
-	tools []ToolDef,
-	choice *ToolChoice,
 	modelOverride string,
 ) (*Completion, error) {
 	model := c.DefaultModel
@@ -179,11 +129,9 @@ func (c *Client) Complete(
 		model = modelOverride
 	}
 	payload := chatRequest{
-		Model:      model,
-		Messages:   messages,
-		MaxTokens:  c.MaxTokens,
-		Tools:      tools,
-		ToolChoice: choice,
+		Model:     model,
+		Messages:  messages,
+		MaxTokens: c.MaxTokens,
 	}
 	// Non-thinking for efficiency: the client landing and the agent both
 	// only need retrieve-then-answer.

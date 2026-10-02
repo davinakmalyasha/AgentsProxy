@@ -248,7 +248,8 @@ func TestEveryRegistrySchemaIsValidJSONObject(t *testing.T) {
 			t.Fatalf("Names() listed %s but Get() does not have it", name)
 		}
 		if len(tool.Parameters) == 0 {
-			continue // noArgs() covers this at Defs() time
+			continue // tools without parameters accept any object; the
+			// adapter defaults their declaration to {"type":"object"}
 		}
 		if !json.Valid(tool.Parameters) {
 			t.Errorf("%s: parameters are not valid JSON: %s", name, tool.Parameters)

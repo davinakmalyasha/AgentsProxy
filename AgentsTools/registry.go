@@ -20,8 +20,6 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 )
 
 // Tool is one agent capability.
@@ -40,15 +38,16 @@ type Tool struct {
 	// Mutating marks a tool that CHANGES state -- creates, cancels,
 	// adjusts, records. Reads are not.
 	//
-	// This is the one property the routing gate is allowed to enforce on
-	// the model's own initiative: an unpinned read is honoured, an unpinned
-	// write is refused. A user asking about revenue should never have a
-	// booking cancelled because the model volunteered it, which is the case
-	// that motivated pinning in the first place.
+	// This is what keeps a tenant config honest: ApplyProject may narrow
+	// a role's tool set but can never reclassify a write as a read, and
+	// boot validation fails a project that tries. A user asking about
+	// revenue must never have a booking cancelled because the model
+	// volunteered it, and the tiers are built so a role that should not
+	// write never sees the tool at all.
 	//
 	// Defaults to false, so a new read-only tool is safe by omission. The
-	// cost of forgetting it on a WRITE tool is the tool being usable when the
-	// model volunteers it, so TestMutatingToolsAreExplicitlyClassified fails
+	// cost of forgetting it on a WRITE tool is the tool being usable where
+	// it should not be, so TestMutatingToolsAreExplicitlyClassified fails
 	// the build if a tool is added to that list without the flag.
 	Mutating bool
 }
@@ -192,33 +191,6 @@ func (ts *ToolSet) Names() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// Defs returns the role-filtered tool set as provider-ready declarations,
-// sorted for a stable request body.
-func (ts *ToolSet) Defs() []llm.ToolDef {
-	names := make([]string, 0, len(ts.tools))
-	for n := range ts.tools {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]llm.ToolDef, 0, len(names))
-	for _, n := range names {
-		t := ts.tools[n]
-		params := t.Parameters
-		if len(params) == 0 {
-			params = noArgs()
-		}
-		out = append(out, llm.ToolDef{
-			Type: "function",
-			Function: llm.FunctionSpec{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  params,
-			},
-		})
-	}
-	return out
 }
 
 // Definitions returns the tool list for the system prompt.

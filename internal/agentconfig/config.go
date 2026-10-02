@@ -41,7 +41,7 @@ type Project struct {
 	// Tools is reserved for per-tenant narrowing and is currently NOT loaded
 	// from files: tool declarations live in AgentsTools/<Tenant>/*.go next
 	// to their implementations, because the schema must travel with the
-	// function it describes. See ApplyProject in internal/agent.
+	// function it describes. See ApplyProject in AgentsTools (projects.go).
 	Tools []ToolSpec
 	// SystemPrompt is the tenant-level persona and house rules.
 	SystemPrompt string

@@ -1,7 +1,13 @@
-// Package adkplatform is the ADK Go foundation for the multi-tenant agent
-// platform. One llmagent per tenant, built from that tenant's four folders,
-// all running in this single binary against the shared Postgres.
-package adkplatform
+// Package adkrunner spike: the ADK Go migration gate, kept next to the
+// engine it proved.
+//
+// These tests need the live gateway (LLM_API_KEY / LLM_BASE_URL) because
+// the question they answer -- do our custom reasoning fields survive
+// ADK's request builder, and does the model actually call tools through
+// the runner -- cannot be answered against a mock. They were the
+// precondition for the whole cutover; they stay as the tripwire for
+// future ADK or gateway upgrades.
+package adkrunner
 
 import (
 	"bytes"
