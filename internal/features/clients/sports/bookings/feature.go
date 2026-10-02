@@ -8,6 +8,7 @@
 package bookings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +164,39 @@ var errNotCancellable = errors.New("booking is not in a cancellable state")
 // remedy is different: the venue hours are a setting, the rule window is
 // the same setting, and the message should name which one refused.
 var errOutsideRuleHours = errors.New("booking outside the pricing rule's opening hours")
+
+// errSlotBlocked is returned when the requested slot overlaps a court block
+// (maintenance, private event). Mapped to 409 so the UI can offer the owner
+// a way through rather than showing a generic failure.
+var errSlotBlocked = errors.New("slot is blocked")
+
+// blockReason returns the reason the slot is blocked, or "" when it is free.
+//
+// The database trigger (migration 037) enforces the same rule, because the
+// agent writes straight to sports_bookings and would otherwise bypass this
+// check entirely. This exists so the caller gets a sentence instead of a
+// raw Postgres exclusion error -- and so the block feature can be extended
+// (an override flag, say) in one place.
+//
+// Overlap is half-open: a block ending at 12:00 does not refuse a booking
+// starting at 12:00.
+func blockReason(ctx context.Context, tx pgx.Tx, tenantID, facilityID string, date time.Time, start, end time.Time) (string, error) {
+	var reason string
+	err := tx.QueryRow(ctx,
+		`SELECT reason FROM sports_court_blocks
+		  WHERE tenant_id=$1 AND block_date=$2::date
+		    AND (facility_id=$3::uuid OR facility_id IS NULL)
+		    AND start_time < $4::time AND end_time > $5::time
+		  LIMIT 1`,
+		tenantID, date, facilityID, end, start).Scan(&reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return reason, nil
+}
 
 // cancellableFrom is the set of states a cancel may be applied from.
 //
@@ -329,6 +363,14 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		if start.Before(ruleOpen) || end.After(ruleClose) {
 			return fmt.Errorf("%w: %s-%s", errOutsideRuleHours, rule.OpenTime, rule.CloseTime)
 		}
+		// A blocked court is not bookable. Checked before the INSERT so the
+		// caller gets the reason; the trigger is the backstop for paths
+		// that write here directly.
+		if reason, err := blockReason(r.Context(), tx, idn.TenantID(), req.FacilityID, date, start, end); err != nil {
+			return err
+		} else if reason != "" {
+			return fmt.Errorf("%w: %s", errSlotBlocked, reason)
+		}
 		// Link a customer by phone (Centrum's upsert pattern) when the
 		// phone matches an existing directory entry.
 		var customerID *string
@@ -377,6 +419,12 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, errOutsideRuleHours) {
 			records.WriteJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// A block is a conflict, not a bad request: the slot is valid in
+		// itself, the court is simply unavailable.
+		if errors.Is(err, errSlotBlocked) {
+			records.WriteJSONError(w, http.StatusConflict, err.Error())
 			return
 		}
 		// No pricing rule for that date. A 400 with an actionable message,

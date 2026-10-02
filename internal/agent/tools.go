@@ -321,6 +321,24 @@ func bookSlotTool(pool *pgxpool.Pool) Tool {
 				if start.Before(ruleOpen) || end.After(ruleClose) {
 					return fmt.Errorf("outside opening hours %s-%s", rule.OpenTime, rule.CloseTime)
 				}
+				// A blocked court is not bookable. Checked here because
+				// this tool INSERTs directly and so never reaches the
+				// bookings handler's own check; the trigger in migration
+				// 037 is the backstop for anything that slips past both.
+				var blockReason string
+				err = tx.QueryRow(ctx,
+					`SELECT reason FROM sports_court_blocks
+					  WHERE tenant_id=$1 AND block_date=$2::date
+					    AND (facility_id=$3::uuid OR facility_id IS NULL)
+					    AND start_time < $4::time AND end_time > $5::time
+					  LIMIT 1`,
+					tenantID, date, p.FacilityID, end, start).Scan(&blockReason)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+				if blockReason != "" {
+					return fmt.Errorf("slot is blocked (%s) — pick another time", blockReason)
+				}
 				_, err = tx.Exec(ctx,
 					`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, price)
 					 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -335,6 +353,11 @@ func bookSlotTool(pool *pgxpool.Pool) Tool {
 				// message the tool Description promises (not raw PG text).
 				if strings.Contains(err.Error(), "exclusion") {
 					return "error: slot already booked"
+				}
+				// The block trigger raises the same SQLSTATE as the
+				// double-booking exclusion, so it lands here too.
+				if strings.Contains(err.Error(), "blocked") {
+					return "error: slot is blocked — pick another time"
 				}
 				return "error: " + err.Error()
 			}

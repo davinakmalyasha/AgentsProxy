@@ -330,6 +330,96 @@ func TestBookings_CancelKeepsTheRow(t *testing.T) {
 	}
 }
 
+// TestBookings_BlockedSlot pins that a court block is enforced on the
+// write path, not just drawn on the grid.
+//
+// A "blokir" used to be purely cosmetic: the availability board greyed the
+// slot out and nothing stopped anyone booking it, by form, by direct URL,
+// or by the chat agent (which INSERTs straight into the table). This
+// covers the three cases that were open.
+func TestBookings_BlockedSlot(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	// A pricing rule, so create gets past the price step and reaches the
+	// block check rather than stopping at ErrNoRule.
+	if _, err := h.adminPool.Exec(ctx,
+		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`); err != nil {
+		t.Fatal(err)
+	}
+
+	book := func(date, start, end, name string) *http.Response {
+		return doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+			`{"facility_id":"`+fac+`","date":"`+date+`","start_time":"`+start+
+				`","end_time":"`+end+`","customer_name":"`+name+`"}`)
+	}
+
+	// Block 19:00-21:00 on one date, and 10:00-12:00 across ALL courts on
+	// another (facility_id NULL).
+	if _, err := h.adminPool.Exec(ctx,
+		`INSERT INTO sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		 VALUES ('bk-a',$1,'2026-09-07','19:00','21:00','maintenance')`, fac); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.adminPool.Exec(ctx,
+		`INSERT INTO sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		 VALUES ('bk-a',NULL,'2026-09-08','10:00','12:00','private event')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refused, with the reason.
+	for _, c := range []struct{ date, start, end, why string }{
+		{"2026-09-07", "19:00", "20:00", "fully inside"},
+		{"2026-09-07", "19:30", "20:30", "straddling the start"},
+		{"2026-09-07", "20:00", "21:00", "straddling the end"},
+		{"2026-09-08", "10:30", "11:30", "inside an all-courts block"},
+	} {
+		resp := book(c.date, c.start, c.end, "Blocked")
+		if resp.StatusCode != 409 {
+			t.Errorf("%s %s-%s (%s): status %d, want 409; body=%s",
+				c.date, c.start, c.end, c.why, resp.StatusCode, readAll(t, resp))
+		}
+	}
+
+	// Adjacent slots are fine: overlap is half-open, so a block ending at
+	// 12:00 must not refuse a booking starting at 12:00. Getting this
+	// wrong would make an evening's last slot unbookable.
+	for _, c := range []struct{ date, start, end, why string }{
+		{"2026-09-07", "18:00", "19:00", "ends as the block starts"},
+		{"2026-09-07", "21:00", "22:00", "starts as the block ends"},
+		{"2026-09-08", "12:00", "13:00", "after an all-courts block"},
+		{"2026-09-08", "08:00", "09:00", "before an all-courts block"},
+	} {
+		resp := book(c.date, c.start, c.end, "Free")
+		if resp.StatusCode != 201 {
+			t.Errorf("%s %s-%s (%s): status %d, want 201; body=%s",
+				c.date, c.start, c.end, c.why, resp.StatusCode, readAll(t, resp))
+		}
+	}
+
+	// The database trigger, which is what protects the paths that bypass
+	// this handler -- the agent's book_slot INSERTs directly.
+	_, err := h.adminPool.Exec(ctx,
+		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 VALUES ('bk-a',$1,'2026-09-07','19:30','20:30','RawInsert','confirmed',50000)`, fac)
+	if err == nil {
+		t.Error("a direct INSERT into a blocked slot should have been refused by the trigger")
+	} else if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("trigger error should mention the block, got: %v", err)
+	}
+
+	// And a direct INSERT into a free slot still works, so the trigger is
+	// not simply refusing everything.
+	if _, err := h.adminPool.Exec(ctx,
+		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 VALUES ('bk-a',$1,'2026-09-07','15:00','16:00','RawFree','confirmed',50000)`, fac); err != nil {
+		t.Errorf("direct INSERT into a free slot was refused: %v", err)
+	}
+}
+
 // TestBookings_DoubleBooking is THE architecture-proving test: two
 // concurrent requests for the same facility + overlapping time →
 // exactly one wins, the other gets 409.
