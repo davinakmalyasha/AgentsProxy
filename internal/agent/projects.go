@@ -75,20 +75,23 @@ func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 //     list_bookings while book_slot only matches the verb.
 //
 // The Mutating flag is deliberately NOT taken from the project. The gate
-// trusts the Go flag; letting a config file decide it would let a project
-// reclassify a write as a read and have unpinned writes honoured.
+// ApplyProject narrows a role tool set to what a tenant's config allows.
 //
-// Roles from the project can only subtract from what the role's tool set
-// already contains, so a config that widens access is a no-op rather than a
-// privilege escalation. Validate rejects it at boot as well, but failing
-// safe here means a future caller cannot introduce one by forgetting.
+// Today the loader populates no per-tool specs -- tool declarations live in
+// AgentsTools/<Tenant>/*.go next to their implementations, because the
+// schema must travel with the function it describes. So in production this
+// is currently a passthrough, and tool selection is structural: a tenant
+// gets the tools its package registers.
+//
+// The narrowing logic stays because it is the enforcement point for the day
+// a per-tenant override file exists again: intersect, never add. A spec that
+// widens access is a no-op here and a boot failure in Validate, so neither
+// path can escalate privilege by forgetting.
 func (ts *ToolSet) ApplyProject(p *agentconfig.Project) *ToolSet {
 	if p == nil || len(p.Tools) == 0 {
 		return ts
 	}
 	enabled := map[string]bool{}
-	keywords := map[string][]string{}
-	strong := map[string][]string{}
 	params := map[string]agentconfig.ToolSpec{}
 	for _, spec := range p.Tools {
 		if !spec.IsEnabled() {
@@ -96,32 +99,12 @@ func (ts *ToolSet) ApplyProject(p *agentconfig.Project) *ToolSet {
 		}
 		enabled[spec.Name] = true
 		params[spec.Name] = spec
-		if len(spec.Keywords) > 0 {
-			keywords[spec.Name] = spec.Keywords
-		}
-		if len(spec.Strong) > 0 {
-			strong[spec.Name] = spec.Strong
-		}
 	}
 
 	out := &ToolSet{Pool: ts.Pool, tools: make(map[string]Tool, len(ts.tools))}
 	for name, tool := range ts.tools {
 		if !enabled[name] {
 			continue
-		}
-		if k, ok := keywords[name]; ok {
-			tool.Keywords = k
-		}
-		if s, ok := strong[name]; ok {
-			tool.StrongKeywords = s
-		}
-		if spec, ok := params[name]; ok {
-			if len(spec.Parameters) > 0 {
-				tool.Parameters = spec.Parameters
-			}
-			if spec.Description != "" {
-				tool.Description = spec.Description
-			}
 		}
 		// Narrowing only: intersect, never add.
 		if len(params[name].Roles) > 0 {

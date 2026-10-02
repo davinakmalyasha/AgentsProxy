@@ -1,0 +1,4 @@
+{
+  "comment": "External MCP servers this project connects to. Empty to start; everything this tenant needs is a first-party tool. Any entry here is THIRD-PARTY code: read_only defaults to true and stays true unless someone writes down why not.",
+  "servers": []
+}

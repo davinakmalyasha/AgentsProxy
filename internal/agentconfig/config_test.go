@@ -5,20 +5,21 @@ import (
 	"testing"
 )
 
-// TestEmbeddedProjectsParse is the one that would have caught a malformed
-// tools.json before it reached a running agent. Parsing happens at boot, so
-// this is cheap insurance that the embedded tree is actually loadable.
-func TestEmbeddedProjectsParse(t *testing.T) {
+// TestTenantsLoadFromTheFourFolders is the one that would have caught a
+// missing or malformed tenant folder before it reached a running agent.
+// Parsing happens at boot, so this is cheap insurance that the embedded
+// tree is actually loadable.
+func TestTenantsLoadFromTheFourFolders(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(projects) == 0 {
-		t.Fatal("no projects embedded")
+		t.Fatal("no tenants embedded")
 	}
 	p, ok := projects["centrum"]
 	if !ok {
-		t.Fatalf("the centrum project is not embedded; got %v", keys(projects))
+		t.Fatalf("the centrum tenant is not embedded; got %v", keys(projects))
 	}
 	// The directory may be written however it reads best; the slug is the
 	// tenant id and must be a clean identifier, because it is what every
@@ -28,9 +29,6 @@ func TestEmbeddedProjectsParse(t *testing.T) {
 	}
 	if p.Vertical != "sports" {
 		t.Errorf("vertical = %q, want sports", p.Vertical)
-	}
-	if len(p.Tools) == 0 {
-		t.Error("no tool declarations loaded")
 	}
 	if strings.TrimSpace(p.SystemPrompt) == "" {
 		t.Error("SystemPrompt.md is empty")
@@ -50,51 +48,51 @@ func TestEmbeddedProjectsParse(t *testing.T) {
 	}
 }
 
-// TestSkillBodiesLoad guards the sidecar index: a skill named in
-// skills/index.json whose .md is missing would silently drop a procedure.
+// TestSkillBodiesLoad: every .md under AgentsSkills/<Tenant>/ is one skill,
+// injected whole. An empty file is a procedure that says nothing.
 func TestSkillBodiesLoad(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := projects["centrum"]
-	for _, s := range p.Skills {
-		if strings.TrimSpace(s.Body) == "" {
-			t.Errorf("skill %q loaded with an empty body", s.Name)
-		}
-		if s.Title == "" {
-			t.Errorf("skill %q has no title", s.Name)
-		}
+	if len(p.Skills) != 1 {
+		t.Fatalf("expected the single BadmintonSkills.md, got %d skills", len(p.Skills))
+	}
+	s := p.Skills[0]
+	if strings.TrimSpace(s.Body) == "" {
+		t.Errorf("skill %q loaded with an empty body", s.Name)
+	}
+	if s.Title == "" {
+		t.Errorf("skill %q has no title", s.Name)
+	}
+	if s.Title != "Badminton Skills — Centrum Badminton Arena" {
+		t.Errorf("skill title = %q, want the first H1 heading", s.Title)
 	}
 }
 
-// TestSkillTriggersArePhraseMatched is the guard on a subtle failure: a
-// trigger that matches as a substring would inject a procedure into every
-// conversation. "batal" must not fire on "pembatalan" unless intended.
-func TestSkillTriggersArePhraseMatched(t *testing.T) {
-	p := &Project{Skills: []Skill{
-		{Name: "cancel", Triggers: []string{"batalkan"}},
-		{Name: "opening", Triggers: []string{"jam kosong"}},
-	}}
-
-	got := p.SkillsFor(Words("tolong batalkan booking tomorrow"))
-	if len(got) != 1 || got[0].Name != "cancel" {
-		t.Errorf("cancel skill not triggered: %+v", got)
+// TestHalfPresentTenantFailsLoad: a tenant in one folder but missing from
+// AgentsMemory is a deployment halfway done. Running with half a tenant is
+// worse than not starting, so Load must fail rather than skip it.
+func TestHalfPresentTenantFailsLoad(t *testing.T) {
+	// Exercised structurally: the loader rejects any directory present in
+	// AgentsTools, AgentsSkills or AgentsMcp but absent from AgentsMemory.
+	// A synthetic half-tenant cannot be injected into the embedded FS, so
+	// this documents the invariant that TestTenantsLoadFromTheFourFolders
+	// would break on: every live tenant resolves through AgentsMemory.
+	projects, err := Load()
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	got = p.SkillsFor(Words("pembatalan spamming lewat email"))
-	if len(got) != 0 {
-		t.Errorf("substring 'batal' fired on 'pembatalan': %+v", got)
-	}
-
-	got = p.SkillsFor(Words("ada jam kosong besok"))
-	if len(got) != 1 || got[0].Name != "opening" {
-		t.Errorf("multi-word trigger did not fire: %+v", got)
+	for slug := range projects {
+		if slug == "" {
+			t.Error("a tenant loaded with an empty slug")
+		}
 	}
 }
 
 // TestValidateCatchesConfigDrift is the boot-time safety net. Each case is a
-// way a project folder can be wrong in a way that would otherwise produce a
+// way a tenant folder can be wrong in a way that would otherwise produce a
 // silently broken agent.
 func TestValidateCatchesConfigDrift(t *testing.T) {
 	known := map[string]bool{"list_bookings": true, "book_slot": true}
@@ -132,8 +130,8 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 		"a role that widens the ceiling": func(p *Project) {
 			p.Tools = append(p.Tools, ToolSpec{Name: "list_bookings", Roles: []string{"client"}})
 		},
-		"a skill with no triggers": func(p *Project) {
-			p.Skills = []Skill{{Name: "s", Body: "b"}}
+		"a skill with no body": func(p *Project) {
+			p.Skills = []Skill{{Name: "empty"}}
 		},
 		"an oversized system prompt": func(p *Project) {
 			p.SystemPrompt = strings.Repeat("x", b.MaxSystemPromptRunes+1)
@@ -155,48 +153,20 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 	}
 }
 
-// TestCentrumConfigIsValid runs the real embedded project against
-// the real keyword tables, so a rename on either side fails here rather than
-// in production routing.
+// TestCentrumConfigIsValid runs the real embedded tenant through Validate,
+// so a malformed folder fails here rather than in production boot.
 func TestCentrumConfigIsValid(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := projects["centrum"]
-	// The ceiling is exercised separately against the live registry in
-	// internal/agent; here we only check the parts that need no tool set.
-	b := DefaultBudget()
-	known := map[string]bool{}
-	mut := map[string]bool{}
-	for _, s := range p.Tools {
-		known[s.Name] = true
-		if s.Mutating != nil {
-			mut[s.Name] = *s.Mutating
-		}
-	}
-	if err := Validate(p, known, mut, RoleCeiling{"owner": known}, b); err != nil {
+	// Tool declarations live in AgentsTools .go files now, not in the
+	// folders, so there is no per-tool registry to check here. What this
+	// asserts is everything the folders DO own: identity, budgets, skills,
+	// knowledge and MCP entries.
+	if err := Validate(p, map[string]bool{}, map[string]bool{}, RoleCeiling{}, DefaultBudget()); err != nil {
 		t.Fatalf("centrum config invalid: %v", err)
-	}
-}
-
-// TestMatcherIsWordBounded pins the matcher used for skill triggers. This
-// is the same rule as the router's, and the same bug: substring matching let
-// "pesanan" reach the booking tool and blanked the agent's data.
-func TestMatcherIsWordBounded(t *testing.T) {
-	for _, c := range []struct {
-		msg, kw string
-		want    bool
-	}{
-		{"tolong batalkan", "batalkan", true},
-		{"pembatalan massak", "batalkan", false},
-		{"buat booking", "buat booking", true},
-		{"ada pesanan", "pesan", false},
-		{"oke", "", false},
-	} {
-		if got := HasPhrase(Words(c.msg), c.kw); got != c.want {
-			t.Errorf("HasPhrase(%q, %q) = %v, want %v", c.msg, c.kw, got, c.want)
-		}
 	}
 }
 

@@ -23,17 +23,16 @@ import (
 // Layers, in the order they are appended:
 //
 //	1. role base        the platform rules, same for every tenant
-//	2. project prompt   projects/<Project>/agents/SystemPrompt.md
+//	2. tenant prompt    AgentsMemory/<Tenant>/SystemPrompt.md
 //	3. knowledge        Information/*.md -- what is TRUE about this venue
-//	4. relevant skills  skills/*.md whose triggers matched -- HOW to do things
+//	4. skills           AgentsSkills/<Tenant>/*.md -- HOW to do things
 //	5. runtime          today's date, the tenant's name, the tools available
 //
-// Layered rather than concatenated because skills are conditional. A skill
-// is a procedure, and a model given four procedures at once will follow the
-// wrong one; injecting only the relevant one is the difference between a
-// usable assistant and a confusing one. RAG later slots in as layer 3b --
-// retrieved chunks, appended just before the runtime context -- without any
-// change above it.
+// Layered rather than concatenated because each layer has a different owner
+// and a different rate of change: platform rules ship with the binary,
+// tenant content ships with the tenant folder, runtime context is per
+// request. RAG later slots in as layer 3b -- retrieved chunks, appended
+// just before the runtime context -- without any change above it.
 
 // Layers are the pieces a system prompt is assembled from.
 type Layers struct {
@@ -41,7 +40,8 @@ type Layers struct {
 	Role    string
 	// ToolDefs is the role-filtered tool list, already narrowed.
 	ToolDefs []string
-	// Message is the user's turn, used to pick skills.
+	// Message is the user's turn. Kept on the struct because a future layer
+	// (retrieval, per-message skills) will need it; today nothing reads it.
 	Message string
 	// Vertical names the domain when the tenant has no project config.
 	Vertical string
@@ -79,7 +79,13 @@ func Assemble(l Layers) string {
 			}
 			writeLayer(&b, "reference: "+d.Name, d.Body)
 		}
-		for _, s := range l.Project.SkillsFor(agentconfig.Words(l.Message)) {
+		// Every skill, whole, every turn. A tenant's skills file is the
+		// procedures it wants followed; injecting a procedure only sometimes
+		// means it is followed only sometimes.
+		for _, s := range l.Project.Skills {
+			if strings.TrimSpace(s.Body) == "" {
+				continue
+			}
 			writeLayer(&b, "procedure: "+s.Title, s.Body)
 		}
 	}

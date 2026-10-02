@@ -36,9 +36,11 @@ func TestCentrumProjectValidatesAgainstTheRegistry(t *testing.T) {
 	}
 }
 
-// TestProjectDrivesKeywords: the project file, not the compiled table, is
-// what routes. This is the whole reason routing vocabulary moved to data.
-func TestProjectDrivesKeywords(t *testing.T) {
+// TestProjectRoutingSurvivesTheMove: tool declarations live in .go files
+// now, not in the tenant folder, so ApplyProject is a passthrough and
+// routing comes from the compiled tables. This pins that the move did not
+// silently change what any question reaches.
+func TestProjectRoutingSurvivesTheMove(t *testing.T) {
 	base := NewToolSet(nil)
 	projects, err := LoadProjects(base)
 	if err != nil {
@@ -46,21 +48,7 @@ func TestProjectDrivesKeywords(t *testing.T) {
 	}
 	applied := base.ApplyProject(projects["centrum"])
 
-	tool, ok := applied.Get("list_bookings")
-	if !ok {
-		t.Fatal("list_bookings missing from the applied tool set")
-	}
-	found := false
-	for _, kw := range tool.Keywords {
-		if kw == "pesanan" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("list_bookings keywords from the project file should include \"pesanan\", got %v", tool.Keywords)
-	}
-
-	// The reported failure, end to end through the project's own routing.
+	// The reported failure, end to end.
 	got := applied.route("hari ini ada pesanan?")
 	if got.Tool != "list_bookings" {
 		t.Errorf("route(%q) = %q, want list_bookings", "hari ini ada pesanan?", got.Tool)
@@ -138,28 +126,6 @@ func TestApplyProjectCannotReclassifyAWrite(t *testing.T) {
 	}
 }
 
-// TestProjectDisablesTools: a venue that does not use reminders can say so in
-// its config rather than by editing Go.
-func TestProjectDisablesTools(t *testing.T) {
-	base := NewToolSet(nil)
-	off := false
-	p := &agentconfig.Project{
-		Slug:     "no-reminders",
-		Vertical: "sports",
-		Tools: []agentconfig.ToolSpec{
-			{Name: "list_bookings", Enabled: boolPtr(true)},
-			{Name: "set_reminder", Enabled: &off},
-		},
-	}
-	applied := base.ApplyProject(p)
-	if _, ok := applied.Get("set_reminder"); ok {
-		t.Error("a tool disabled in the project config is still present")
-	}
-	if _, ok := applied.Get("list_bookings"); !ok {
-		t.Error("an enabled tool went missing")
-	}
-}
-
 // TestPromptLayersUseProjectContent: the prompt must carry the project's own
 // text, and must NOT still be carrying the hardcoded Centrum contact from
 // the old Go source.
@@ -186,10 +152,11 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	}
 }
 
-// TestSkillsAreInjectedConditionally is the reason the prompt is layered
-// rather than concatenated: a model given every procedure at once follows
-// the wrong one.
-func TestSkillsAreInjectedConditionally(t *testing.T) {
+// TestSkillsAreAlwaysInjectedWhole: every skill in AgentsSkills/<Tenant>/ is
+// injected whole, every turn. A tenant's skills file is the procedures it
+// wants followed; injecting a procedure only sometimes means it is followed
+// only sometimes.
+func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 	ts := NewToolSet(nil)
 	projects, err := LoadProjects(ts)
 	if err != nil {
@@ -197,19 +164,16 @@ func TestSkillsAreInjectedConditionally(t *testing.T) {
 	}
 	p := projects["centrum"]
 
-	onTopic := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports",
-		Message: "tolong bantu tutup buku hari ini", ToolDefs: ts.Definitions()})
-	if !strings.Contains(onTopic, "procedure: Closing the day") {
-		t.Error("the closing skill was not injected for a closing request")
-	}
-	if strings.Contains(onTopic, "procedure: Handling a cancellation") {
-		t.Error("an unrelated skill was injected")
-	}
-
-	offTopic := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports",
-		Message: "berapa pendapatan bulan ini?", ToolDefs: ts.Definitions()})
-	if strings.Contains(offTopic, "procedure: Closing the day") {
-		t.Error("a procedure was injected for a question with no procedure in it")
+	for _, msg := range []string{
+		"tolong bantu tutup buku hari ini",
+		"berapa pendapatan bulan ini?",
+		"halo",
+	} {
+		got := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports",
+			Message: msg, ToolDefs: ts.Definitions()})
+		if !strings.Contains(got, "procedure: Badminton Skills") {
+			t.Errorf("message %q: the skills file was not injected whole", msg)
+		}
 	}
 }
 
@@ -227,5 +191,3 @@ func TestPromptWithoutProjectStillWorks(t *testing.T) {
 		}
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }
