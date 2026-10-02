@@ -10,7 +10,7 @@ import (
 
 	mcpsdk "github.com/mark3labs/mcp-go/mcp"
 
-	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 )
 
 func TestMCPBearerAdmin(t *testing.T) {

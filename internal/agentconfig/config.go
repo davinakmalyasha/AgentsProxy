@@ -1,10 +1,11 @@
 // Package agentconfig loads and validates the per-tenant agent
-// configuration that lives in the four top-level folders:
+// configuration that lives in tenants/<slug>/:
 //
-//	AgentsTools/<Tenant>/    tool implementations (Go, compiled)
-//	AgentsSkills/<Tenant>/   procedures (markdown, always injected)
-//	AgentsMcp/<Tenant>/      external MCP servers (JSON)
-//	AgentsMemory/<Tenant>/   prompt, knowledge, identity (markdown + JSON)
+//	tools/    tool implementations (Go, compiled)
+//	skills/   procedures (markdown, always injected)
+//	mcp/      external MCP servers (JSON)
+//	memory/   prompt, knowledge, identity (markdown + JSON)
+//	backend/  the tenant's app backend (Go, compiled)
 //
 // The split this package enforces:
 //
@@ -39,7 +40,7 @@ type Project struct {
 	// Vertical decides which feature set the tenant's tools come from.
 	Vertical string
 	// Tools is reserved for per-tenant narrowing and is currently NOT loaded
-	// from files: tool declarations live in AgentsTools/<Tenant>/*.go next
+	// from files: tool declarations live in tenants/<slug>/tools/*.go next
 	// to their implementations, because the schema must travel with the
 	// function it describes. See ApplyProject in AgentsTools (projects.go).
 	Tools []ToolSpec
@@ -56,7 +57,7 @@ type Project struct {
 }
 
 // ToolSpec is the shape of a per-tenant tool override. It is NOT loaded
-// from files today: tool declarations live in AgentsTools/<Tenant>/*.go
+// from files today: tool declarations live in tenants/<slug>/tools/*.go
 // next to their implementations, so the schema travels with the function.
 // The type stays because the gate and ApplyProject reason about tools in
 // these terms, and a future narrowing file would populate exactly this.

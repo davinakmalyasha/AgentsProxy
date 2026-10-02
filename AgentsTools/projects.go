@@ -63,7 +63,7 @@ func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 // ApplyProject narrows a role tool set to what a tenant's config allows.
 //
 // Today the loader populates no per-tool specs -- tool declarations live in
-// AgentsTools/<Tenant>/*.go next to their implementations, because the
+// tenants/<slug>/tools/*.go next to their implementations, because the
 // schema must travel with the function it describes. So in production this
 // is currently a passthrough, and tool selection is structural: a tenant
 // gets the tools its package registers.

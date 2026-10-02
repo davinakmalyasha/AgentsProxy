@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )

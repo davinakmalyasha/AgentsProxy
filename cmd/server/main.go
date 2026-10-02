@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"

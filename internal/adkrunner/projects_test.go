@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 )
 
 // Role isolation, enforced structurally: each tier's llmagent is built
