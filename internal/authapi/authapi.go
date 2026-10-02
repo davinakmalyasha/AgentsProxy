@@ -43,6 +43,7 @@ type User struct {
 	Email    string `json:"email"`
 	Role     string `json:"role"`
 	FullName string `json:"full_name"`
+	Phone    string `json:"phone,omitempty"`
 }
 
 // Routes returns the /v1/auth chi router (mounted under /v1/auth by
@@ -129,10 +130,14 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Phone was bound into the request struct and then dropped on the floor:
+	// the INSERT below did not name a column for it, so an owner who filled in
+	// a staff member's WhatsApp number got a 201 back with no phone on the
+	// record and no indication that it had been ignored.
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING id::text`,
-		tenantID, req.Email, hash, newRole, req.FullName).Scan(&id)
+		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, phone)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
+		tenantID, req.Email, hash, newRole, req.FullName, req.Phone).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeErr(w, http.StatusConflict, "email already registered")
@@ -147,7 +152,7 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"user": User{ID: id, TenantID: tenantID, Email: req.Email, Role: newRole, FullName: req.FullName},
+		"user": User{ID: id, TenantID: tenantID, Email: req.Email, Role: newRole, FullName: req.FullName, Phone: req.Phone},
 	})
 }
 
@@ -219,19 +224,20 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		hash     string
 		role     string
 		fullName string
+		phone    string
 		active   bool
 	)
-	// Login lookup goes through private.login_user (migration 021), not a
-	// direct SELECT: sports_users is tenant-scoped by RLS and this query
-	// runs with no app.tenant_id set, so a direct read would match
+	// Login lookup goes through private.login_user (migration 021, extended
+	// by 040), not a direct SELECT: sports_users is tenant-scoped by RLS and
+	// this query runs with no app.tenant_id set, so a direct read would match
 	// nothing. The function is SECURITY DEFINER and returns only the
-	// five columns login needs, which also keeps password_hash out of
-	// reach of any other runtime query.
+	// columns login needs, which also keeps password_hash out of reach of any
+	// other runtime query.
 	err := a.Pool.QueryRow(r.Context(),
-		`SELECT user_id::text, password_hash, role, full_name, is_active
+		`SELECT user_id::text, password_hash, role, full_name, phone, is_active
 		   FROM private.login_user($1, $2)`,
 		req.TenantID, req.Email,
-	).Scan(&id, &hash, &role, &fullName, &active)
+	).Scan(&id, &hash, &role, &fullName, &phone, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Uniform error: don't reveal whether the user exists.
 		writeErr(w, http.StatusUnauthorized, "invalid credentials")
@@ -276,7 +282,7 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": raw,
-		"user":  User{ID: id, TenantID: req.TenantID, Email: req.Email, Role: role, FullName: fullName},
+		"user":  User{ID: id, TenantID: req.TenantID, Email: req.Email, Role: role, FullName: fullName, Phone: phone},
 	})
 }
 
@@ -311,15 +317,15 @@ func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
 // Reads through private.session_user (migration 032). sports_sessions
 // is now tenant-scoped by RLS and this lookup runs with no
 // app.tenant_id set, so a direct read would match nothing. The function
-// is SECURITY DEFINER and returns only these five columns, which also
+// is SECURITY DEFINER and returns only these columns, which also
 // keeps password_hash out of reach of a runtime query.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	var u User
 	err := a.Pool.QueryRow(ctx,
-		`SELECT user_id::text, tenant_id, email, role, full_name
+		`SELECT user_id::text, tenant_id, email, role, full_name, phone
 		   FROM private.session_user($1)`,
 		HashToken(tok),
-	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &u.FullName)
+	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &u.FullName, &u.Phone)
 	if err != nil {
 		return nil, err
 	}

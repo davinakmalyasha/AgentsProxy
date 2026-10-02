@@ -214,6 +214,79 @@ func TestRegisterOwnerSession(t *testing.T) {
 	r4.Body.Close()
 }
 
+// TestRegisterKeepsPhone: the register request accepted a `phone` field for
+// a long time and the handler bound it into the request struct -- and then
+// the INSERT did not name a column for it, so the number was discarded. The
+// owner got a 201 and a staff account with no phone on it.
+//
+// Pinned across the whole round trip, because each half can break alone:
+// stored but not returned, returned by register but lost on the next sign-in
+// (login and /auth/me go through SECURITY DEFINER helpers with fixed
+// column lists), and NULL on pre-existing rows failing the scan.
+func TestRegisterKeepsPhone(t *testing.T) {
+	a, pool, _ := harness(t)
+	ctx := context.Background()
+	mux := a.Routes()
+	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"owner12345"}`, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("owner login status=%d", resp.StatusCode)
+	}
+	sess := readJSON(t, resp)["token"].(string)
+
+	r := post(t, mux, "/register",
+		`{"email":"wa@centrum.test","password":"pegawai123","full_name":"WA","phone":"628123456789"}`, sess)
+	if r.StatusCode != 201 {
+		t.Fatalf("register status=%d want 201", r.StatusCode)
+	}
+	got, _ := readJSON(t, r)["user"].(map[string]any)["phone"].(string)
+	if got != "628123456789" {
+		t.Errorf("register response phone = %q, want the submitted number", got)
+	}
+
+	var stored string
+	if err := pool.QueryRow(ctx,
+		`SELECT phone FROM sports_users WHERE email='wa@centrum.test'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "628123456789" {
+		t.Errorf("stored phone = %q, want it persisted", stored)
+	}
+
+	// Still there after a sign-in: login reads through
+	// private.login_user, whose column list has to include phone too.
+	l := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"wa@centrum.test","password":"pegawai123"}`, "")
+	if l.StatusCode != 200 {
+		t.Fatalf("login status=%d", l.StatusCode)
+	}
+	loginUser, _ := readJSON(t, l)["user"].(map[string]any)
+	if p, _ := loginUser["phone"].(string); p != "628123456789" {
+		t.Errorf("login phone = %q, want it to survive the sign-in", p)
+	}
+	tok, _ := loginUser["token"].(string)
+	if tok == "" {
+		tok, _ = readJSON(t, l)["token"].(string)
+	}
+
+	// And through /me, which reads private.session_user.
+	m := get(t, mux, "/me", tok)
+	if m.StatusCode != 200 {
+		t.Fatalf("/me status=%d", m.StatusCode)
+	}
+	me, _ := readJSON(t, m)["user"].(map[string]any)
+	if p, _ := me["phone"].(string); p != "628123456789" {
+		t.Errorf("/me phone = %q, want it to survive the session lookup", p)
+	}
+	m.Body.Close()
+
+	// An account with no phone must still work. Every pre-existing staff row
+	// is NULL here, so an unqualified column would lock all of them out.
+	l2 := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"owner12345"}`, "")
+	if l2.StatusCode != 200 {
+		t.Errorf("owner login with NULL phone status=%d want 200", l2.StatusCode)
+	}
+	l2.Body.Close()
+}
+
 func TestLoginWrongPassword(t *testing.T) {
 	a, _, _ := harness(t)
 	resp := post(t, a.Routes(), "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"wrong"}`, "")

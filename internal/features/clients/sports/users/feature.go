@@ -56,16 +56,22 @@ type userResp struct {
 	Email     string `json:"email"`
 	Role      string `json:"role"`
 	FullName  string `json:"full_name"`
+	Phone     string `json:"phone,omitempty"`
 	IsActive  bool   `json:"is_active"`
 	CreatedAt string `json:"created_at"`
 }
 
-const safeCols = "id::text, email, role, full_name, is_active, created_at"
+// COALESCE(phone, ”) because full_name and phone are both nullable and the
+// scan targets are plain strings; a bare column makes pgx fail the whole
+// query with "cannot scan NULL into *string" on any staff row that has not
+// been given a number yet -- which is all of them, on the day the column
+// is added.
+const safeCols = "id::text, email, role, full_name, COALESCE(phone, ''), is_active, created_at"
 
 func scanUser(rows pgx.Rows) (userResp, time.Time, error) {
 	var u userResp
 	var createdAt time.Time
-	err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.IsActive, &createdAt)
+	err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone, &u.IsActive, &createdAt)
 	return u, createdAt, err
 }
 
@@ -168,6 +174,11 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		IsActive *bool   `json:"is_active"`
 		FullName *string `json:"full_name"`
 		Role     *string `json:"role"`
+		// Phone is editable after the fact because the owner will get it
+		// wrong. It could not be set at all before: register accepted a
+		// phone and threw it away, and this PATCH had no such field, so
+		// there was never a moment when a staff phone could be recorded.
+		Phone *string `json:"phone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid json")
@@ -197,6 +208,13 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		}
 		sets = append(sets, "full_name = $"+strconv.Itoa(idx))
 		args = append(args, name)
+		idx++
+	}
+	// Empty is a legitimate value here: it clears a number that was recorded
+	// in error, which is a different intent from omitting the field.
+	if req.Phone != nil {
+		sets = append(sets, "phone = $"+strconv.Itoa(idx))
+		args = append(args, strings.TrimSpace(*req.Phone))
 		idx++
 	}
 	if req.Role != nil {
