@@ -9,25 +9,19 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
-	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	adksession "google.golang.org/adk/v2/session"
 )
 
 // AgentChat handles role-aware agent calls. Single shared LLM_API_KEY for all roles.
 type AgentChat struct {
 	Pool *pgxpool.Pool
-	LLM  *llm.Client
 	RDB  *redis.Client
 	Auth *authapi.Auth
-	// ADK is the cutover loop. ClientChat runs on it; Chat and Telegram
-	// follow one call site at a time. Nil in tests that only exercise
-	// pre-loop rejections, where ClientChat falls back to the old loop.
+	// ADK is the agent loop. Boot is fatal without it.
 	ADK *adkrunner.Runner
 	// Projects is the per-tenant agent configuration from
 	// internal/agentconfig, keyed by tenant id. nil is supported and means
@@ -114,21 +108,9 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	// token pins the tenant via RLS. A public FAQ widget never needed
 	// customer names, so nothing here can leak another tenant's data.
 	//
-	// Cutover: the ADK loop with the same pairing (anon tools, client
-	// persona). The old loop remains as the fallback for test harnesses
-	// that do not wire ADK; production always has it (boot is fatal
-	// without the session tables).
-	var (
-		reply string
-		err   error
-	)
-	if h.ADK != nil {
-		reply, err = h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
-	} else {
-		ts := agentstools.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
-		ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
-		reply, err = ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
-	}
+	// Cutover complete: the ADK loop with the same pairing (anon tools,
+	// client persona). Boot is fatal without the runner, so no fallback.
+	reply, err := h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
 	if err != nil {
 		slog.Error("client chat run failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
@@ -161,7 +143,7 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return
 	}
-	hist := &agent.History{RDB: h.RDB}
+	hist := &adkrunner.History{RDB: h.RDB}
 	if err := hist.ClearForRole(tenant, "client", "client:"+clientIP(r)); err != nil {
 		writeJSONError(w, http.StatusBadGateway, "clear failed")
 		return
@@ -217,18 +199,10 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	if vertical == "" {
 		vertical = "sports"
 	}
-	// Cutover: the ADK loop, same tier for tools and persona (unlike
-	// ClientChat's anon/client split -- here the session token pins the
-	// tenant, so the role's own tool set is safe). Falls back to the old
-	// loop only when tests do not wire ADK.
-	var reply string
-	if h.ADK != nil {
-		reply, err = h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
-	} else {
-		ts := agentstools.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
-		ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
-		reply, err = ag.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
-	}
+	// Cutover complete: the ADK loop, same tier for tools and persona
+	// (unlike ClientChat's anon/client split -- here the session token
+	// pins the tenant, so the role's own tool set is safe).
+	reply, err := h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
 		slog.Error("agent chat run failed", "tenant", tenant, "role", role, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")

@@ -1,4 +1,4 @@
-package agent
+package adkrunner
 
 import (
 	"strings"
@@ -6,7 +6,6 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
-	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
@@ -39,28 +38,10 @@ func TestCentrumProjectValidatesAgainstTheRegistry(t *testing.T) {
 	}
 }
 
-// TestProjectRoutingSurvivesTheMove: tool declarations live in .go files
-// now, not in the tenant folder, so ApplyProject is a passthrough and
-// routing comes from the compiled tables. This pins that the move did not
-// silently change what any question reaches.
-func TestProjectRoutingSurvivesTheMove(t *testing.T) {
-	base := agentstools.NewToolSet(nil)
-	projects, err := agentstools.LoadProjects(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	applied := base.ApplyProject(projects["centrum"])
-
-	// The reported failure, end to end.
-	got := applied.Route("hari ini ada pesanan?")
-	if got.Tool != "list_bookings" {
-		t.Errorf("route(%q) = %q, want list_bookings", "hari ini ada pesanan?", got.Tool)
-	}
-	// And the write tool must still win when the owner means the verb.
-	if got := applied.Route("pesan lapangan jam 9 besok"); got.Tool != "book_slot" {
-		t.Errorf("route(booking request) = %q, want book_slot", got.Tool)
-	}
-}
+// TestProjectRoutingSurvivesTheMove is deleted with the router: the model
+// chooses tools from Description + schema now, so there is no routing for
+// the move to preserve. The ApplyProject narrowing tests below stay --
+// they pin the platform ceiling, which is unchanged.
 
 // TestApplyProjectCannotWidenAccess is the security property. The project
 // file may remove tools and may remove roles; it may never grant either.
@@ -140,7 +121,7 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	}
 	p := projects["centrum"]
 
-	got := adkrunner.Assemble(adkrunner.Layers{Project: p, Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
+	got := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
 	for _, want := range []string{
 		"Centrum Badminton Arena", // from project.json
 		"project instructions",
@@ -172,7 +153,7 @@ func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 		"berapa pendapatan bulan ini?",
 		"halo",
 	} {
-		got := adkrunner.Assemble(adkrunner.Layers{Project: p, Role: "owner", Vertical: "sports",
+		got := Assemble(Layers{Project: p, Role: "owner", Vertical: "sports",
 			Message: msg, ToolDefs: ts.Definitions()})
 		if !strings.Contains(got, "procedure: Badminton Skills") {
 			t.Errorf("message %q: the skills file was not injected whole", msg)
@@ -184,7 +165,7 @@ func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 // working agent. Config is an addition, not a precondition.
 func TestPromptWithoutProjectStillWorks(t *testing.T) {
 	ts := agentstools.NewToolSet(nil)
-	got := adkrunner.Assemble(adkrunner.Layers{Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
+	got := Assemble(Layers{Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
 	if len(got) < 200 {
 		t.Errorf("a tenant with no project config got a near-empty prompt (%d chars)", len(got))
 	}

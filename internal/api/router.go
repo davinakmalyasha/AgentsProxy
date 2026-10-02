@@ -79,7 +79,6 @@ func NewRouter(d Deps) http.Handler {
 		// Stricter per-IP limit for anon client chat to deter waste (20/min/IP)
 		agentH := &AgentChat{
 			Pool:     d.Pool,
-			LLM:      d.LLM,
 			RDB:      d.Redis,
 			Auth:     d.Auth,
 			Projects: d.Projects,

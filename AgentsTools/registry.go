@@ -37,15 +37,6 @@ type Tool struct {
 	Run        func(ctx context.Context, tenantID string, args json.RawMessage) string
 	// Roles that may call this tool. Empty = all (legacy). Used for isolation.
 	Roles []string
-	// Keywords the router matches against, lowercased. Kept separate from
-	// Description so routing does not have to parse prose, and so the words
-	// a user actually types can be curated independently of the wording
-	// shown to the model.
-	Keywords []string
-	// StrongKeywords are decisive: a hit outweighs every ordinary keyword
-	// a competing tool can accumulate. Use for terms with one meaning in
-	// this domain ("laba", "kosong", "excel").
-	StrongKeywords []string
 	// Mutating marks a tool that CHANGES state -- creates, cancels,
 	// adjusts, records. Reads are not.
 	//

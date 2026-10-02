@@ -12,12 +12,12 @@
 // The fix is a distinct "anon" tier. These tests pin the boundary so a
 // future change to either the allowlist or the ToolSet construction
 // cannot silently reopen it.
-package agent
+package agentstools_test
 
 import (
 	"testing"
 
-	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 )
 
