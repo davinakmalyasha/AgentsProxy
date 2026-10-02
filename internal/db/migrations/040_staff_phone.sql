@@ -48,6 +48,21 @@ AS $function$
    WHERE u.tenant_id = p_tenant AND u.email = p_email;
 $function$;
 
+-- The DROP above threw the ACL away with the function, and these three
+-- statements are what put it back. CREATE FUNCTION grants EXECUTE to PUBLIC
+-- by default, so without them every database role in the project could call
+-- this and read password_hash straight out of the result -- which is the one
+-- thing migration 021 created this function to prevent. Verified with:
+--
+--   select rolname, has_function_privilege(rolname,'private.login_user(text,text)','EXECUTE')
+--     from pg_roles where rolcanlogin;
+--
+-- Expected: true only for app_runtime and postgres. Compare against
+-- private.create_session, which kept its ACL and is the reference.
+ALTER FUNCTION private.login_user(text, text) OWNER TO auth_definer;
+REVOKE ALL ON FUNCTION private.login_user(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.login_user(text, text) TO app_runtime;
+
 -- private.session_user has the same fixed return list, and it backs
 -- /auth/me and every authenticated request's identity. Left alone, a staff
 -- member's phone would come back from register and then vanish on the next
@@ -67,3 +82,10 @@ AS $function$
      AND u.is_active
    LIMIT 1;
 $function$;
+
+-- Same reasoning as login_user. Less severe to expose -- it needs a session
+-- token hash rather than an email -- but it still returns a staff identity
+-- and belongs to the same boundary.
+ALTER FUNCTION private."session_user"(text) OWNER TO auth_definer;
+REVOKE ALL ON FUNCTION private."session_user"(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private."session_user"(text) TO app_runtime;
