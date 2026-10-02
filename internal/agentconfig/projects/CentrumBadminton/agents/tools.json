@@ -1,0 +1,175 @@
+{
+  "comment": "Tool declarations for Centrum Badminton. The implementations live in internal/agenttools and are shared with every tenant - this file says WHICH of them this project uses, how the router recognises a question about them, and any NARROWING of the platform role ceiling. It can never add a role a tool does not already have; that is rejected at boot.",
+  "tools": [
+    {
+      "name": "list_bookings",
+      "description": "List bookings for a day. Args: {date (YYYY-MM-DD, default today)}. Returns customer names, times, courts and status.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"the day to list, defaults to today\"}}}",
+      "enabled": true,
+      "keywords": ["booking", "daftar", "list", "pemesanan", "pesanan", "ada booking", "jadwal hari ini", "booking hari ini"],
+      "strong": ["daftar booking", "list booking"],
+      "mutating": false
+    },
+    {
+      "name": "book_slot",
+      "description": "Book a facility slot. Args: {facility_id, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), customer_name, customer_phone?}. facility_id comes from get_availability.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"facility_id\":{\"type\":\"string\",\"description\":\"the facility (court) id, from get_availability\"},\"date\":{\"type\":\"string\",\"format\":\"date\"},\"start_time\":{\"type\":\"string\",\"description\":\"HH:MM, 24h\"},\"end_time\":{\"type\":\"string\",\"description\":\"HH:MM, 24h\"},\"customer_name\":{\"type\":\"string\"},\"customer_phone\":{\"type\":\"string\"}},\"required\":[\"facility_id\",\"date\",\"start_time\",\"end_time\",\"customer_name\"]}",
+      "enabled": true,
+      "keywords": ["book", "pesan", "reservasi", "reservasikan", "buat booking", "catat booking", "pesan lapangan"],
+      "strong": ["buat booking", "catat booking", "reservasi baru"],
+      "mutating": true
+    },
+    {
+      "name": "cancel_booking",
+      "description": "Cancel a booking by id. Args: {booking_id}. Returns cancelled.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"booking_id\":{\"type\":\"string\",\"description\":\"the booking id\"}}}",
+      "enabled": true,
+      "keywords": ["cancel", "hapus booking"],
+      "strong": ["batal", "batalkan", "pembatalan", "batalkan booking"],
+      "mutating": true
+    },
+    {
+      "name": "get_availability",
+      "description": "Show which court slots are free. Args: {date (YYYY-MM-DD, default today)}. Returns free and booked slots per court.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"the day to check, defaults to today\"}}}",
+      "enabled": true,
+      "keywords": ["slot", "jam", "jadwal", "bisa"],
+      "strong": ["kosong", "tersedia", "bisa booking", "availability", "cek jadwal"],
+      "mutating": false
+    },
+    {
+      "name": "get_pricing",
+      "description": "Current court prices. Args: {}. Returns day and evening rates per facility.",
+      "parameters": "{}",
+      "enabled": true,
+      "keywords": ["harga", "price", "tarif", "biaya", "berapa rupiah"],
+      "strong": ["harga", "harganya", "price", "tarif", "biaya", "berapa rupiah"],
+      "mutating": false
+    },
+    {
+      "name": "query_attendance",
+      "description": "Who is playing right now / on a given day. Args: {date (YYYY-MM-DD, default today)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\",\"format\":\"date\"}}}",
+      "enabled": true,
+      "keywords": ["kehadiran", "attendance", "hadir", "sedang main", "main"],
+      "strong": ["sedang main", "check in", "checkin"],
+      "mutating": false
+    },
+    {
+      "name": "query_income",
+      "description": "Income for a period. Args: {from (YYYY-MM-DD, inclusive, defaults to this month), to (YYYY-MM-DD, EXCLUSIVE, defaults to next month)}. Received payments, with committed booking value shown separately.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"start date, inclusive, defaults to this month\"},\"to\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"end date, EXCLUSIVE, defaults to next month\"}}}",
+      "enabled": true,
+      "keywords": ["pendapatan", "income", "revenue", "pemasukan", "uang masuk", "berapa", "ringkas", "ringkasan"],
+      "mutating": false
+    },
+    {
+      "name": "query_net_profit",
+      "description": "Net profit for a period, court revenue minus expenses. Args: {from, to}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"start date, inclusive\"},\"to\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"end date, EXCLUSIVE\"}}}",
+      "enabled": true,
+      "keywords": ["profit", "modal"],
+      "strong": ["laba", "labanya", "profit", "untung", "keuntungan", "net profit", "laba bersih"],
+      "mutating": false
+    },
+    {
+      "name": "query_range_summary",
+      "description": "Compare two periods. Args: {from, to}. Returns totals, the best day and the busiest slot.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"start date, inclusive\"},\"to\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"end date, EXCLUSIVE\"}}}",
+      "enabled": true,
+      "keywords": ["range", "rentang", "summary", "bandingkan"],
+      "strong": ["vs", "bandingkan", "dibanding", "compare", "perbandingan", "jam tersibuk", "tersibuk", "peak", "paling ramai"],
+      "mutating": false
+    },
+    {
+      "name": "closing_report",
+      "description": "Daily closing report for a day. Args: {date (YYYY-MM-DD, default today)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"the day to close, defaults to today\"}}}",
+      "enabled": true,
+      "keywords": ["daily", "closing", "rekap"],
+      "strong": ["closing", "tutup buku", "tutupbuku", "laporan harian", "rekap harian", "tutup hari"],
+      "mutating": false
+    },
+    {
+      "name": "top_customers",
+      "description": "The most frequent customers. Args: {limit (default 5)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"how many customers, default 5\"}}}",
+      "enabled": true,
+      "keywords": ["top", "loyal", "favorit", "sering datang"],
+      "strong": ["pelanggan paling", "paling sering", "pelanggan", "customer"],
+      "mutating": false
+    },
+    {
+      "name": "export_report_excel",
+      "description": "Build an Excel report and return a download marker. Args: {from, to, type (lapangan|kantin|semua, default semua)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"start date, inclusive\"},\"to\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"end date, EXCLUSIVE\"},\"type\":{\"type\":\"string\",\"enum\":[\"lapangan\",\"kantin\",\"semua\"],\"description\":\"which ledger to export, default semua\"}}}",
+      "enabled": true,
+      "keywords": ["file", "export", "laporan file"],
+      "strong": ["excel", "xlsx", "spreadsheet", "unduh", "unduhan", "download", "ekspor"],
+      "mutating": false
+    },
+    {
+      "name": "check_stock",
+      "description": "Stock level for a canteen item. Args: {name (may be partial)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"product or item name, may be partial\"}}}",
+      "enabled": true,
+      "keywords": ["sisa", "barang", "cek", "habis"],
+      "strong": ["stok", "stoknya", "stock", "sisa stok"],
+      "mutating": false
+    },
+    {
+      "name": "adjust_stock",
+      "description": "Adjust stock. Args: {product_id, name, delta (signed) or count (absolute stock-take)}. Owner and staff use this for deliveries, damage and stock-takes.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"product_id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\",\"description\":\"product name, may be partial\"},\"delta\":{\"type\":\"integer\",\"description\":\"signed change to stock\"},\"count\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"absolute counted level for a stock-take; replaces delta\"}}}",
+      "enabled": true,
+      "keywords": ["tambah", "kurangi", "adjust", "stocktake"],
+      "strong": ["tambah stok", "kurangi stok", "restock", "opname", "stok masuk", "stok berkurang"],
+      "mutating": true
+    },
+    {
+      "name": "query_kantin_summary",
+      "description": "Canteen takings for a period. Args: {from, to}. Excludes voided sales.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"start date, inclusive\"},\"to\":{\"type\":\"string\",\"format\":\"date\",\"description\":\"end date, EXCLUSIVE\"}}}",
+      "enabled": true,
+      "keywords": ["omzet", "snack", "minuman"],
+      "strong": ["kantin"],
+      "mutating": false
+    },
+    {
+      "name": "topup_member",
+      "description": "Add balance to a member. Args: {name, phone, amount}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"phone\":{\"type\":\"string\"},\"amount\":{\"type\":\"integer\",\"minimum\":1}}}",
+      "enabled": true,
+      "keywords": ["topup", "isi", "kredit"],
+      "strong": ["topup", "isi saldo"],
+      "mutating": true
+    },
+    {
+      "name": "record_staff_payment",
+      "description": "Record a staff payment in the ledger. Args: {email, amount, method (cash|qris)}.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"email\":{\"type\":\"string\",\"description\":\"staff email\"},\"amount\":{\"type\":\"integer\",\"minimum\":1},\"method\":{\"type\":\"string\",\"enum\":[\"cash\",\"qris\"]}}}",
+      "enabled": true,
+      "keywords": ["staff", "pegawai", "payment"],
+      "strong": ["bayar staff", "kas staff", "bayar pegawai"],
+      "mutating": true
+    },
+    {
+      "name": "list_staff_payments",
+      "description": "History of staff payments. Args: {}.",
+      "parameters": "{}",
+      "enabled": true,
+      "keywords": ["riwayat", "daftar"],
+      "strong": ["riwayat bayar staff", "daftar bayar staff"],
+      "mutating": false
+    },
+    {
+      "name": "set_reminder",
+      "description": "Set a reminder delivered via Telegram. Args: {text, when}. Only works inside a Telegram chat.",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"what to be reminded about\"},\"when\":{\"type\":\"string\",\"description\":\"when, e.g. tomorrow 09:00\"}}}",
+      "enabled": true,
+      "keywords": ["reminder", "pengingat", "order", "ingatkan"],
+      "strong": ["ingatkan", "pengingat", "reminder"],
+      "mutating": true
+    }
+  ]
+}

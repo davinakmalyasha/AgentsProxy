@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -48,7 +49,7 @@ import (
 )
 
 func main() {
-	// Sentry FIRST: env-gated no-op when SENTRY_DSN is empty (PRD §H).
+	// Sentry FIRST: env-gated no-op when SENTRY_DSN is empty (PRD Â§H).
 	// Re-read env directly so Init runs even before config.Load.
 	sentry.Init(sentry.Options{
 		DSN:                os.Getenv("SENTRY_DSN"),
@@ -124,10 +125,32 @@ func main() {
 	defer rdb.Close()
 	slog.Info("redis connected")
 	agent.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
-	agent.CapRDB = rdb    // per-tenant daily cost cap (unconditional — must not depend on Telegram)
+	agent.CapRDB = rdb    // per-tenant daily cost cap (unconditional â€” must not depend on Telegram)
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
+
+	// Per-tenant agent configuration, from internal/agentconfig/projects/.
+	// Loaded and validated against the tool registry here, once, and fatal
+	// on failure.
+	//
+	// Fatal is the point. Every mistake validation catches -- a tool named in
+	// tools.json that nothing implements, a role a project granted itself, a
+	// skill whose file is missing, a project claiming a write is a read --
+	// produces an agent that looks configured and quietly cannot do its job.
+	// The owner finds out at 3am as "I couldn't reach the system"; the
+	// deploy finds out in a second.
+	projects, err := agent.LoadProjects(agent.NewToolSet(pool))
+	if err != nil {
+		slog.Error("agent project config is invalid", "err", err)
+		return
+	}
+	names := make([]string, 0, len(projects))
+	for slug, p := range projects {
+		names = append(names, slug+" ("+p.Display+")")
+	}
+	sort.Strings(names)
+	slog.Info("agent projects loaded", "count", len(projects), "projects", names)
 
 	// Notification queue (Phase 4 sports vertical). Durable in
 	// notify_jobs (migration 029) rather than an in-process channel, so
@@ -163,7 +186,7 @@ func main() {
 	if vaultErr == nil {
 		telegram_feature.VaultKey = tgVaultKey
 		telegram_feature.PublicURL = cfg.PublicURL
-		ag := agent.New(llmCli, agent.NewToolSet(pool), &agent.History{RDB: rdb})
+		ag := agent.New(llmCli, agent.NewToolSet(pool), &agent.History{RDB: rdb}).WithProjects(projects)
 		tgMgr = telegram.NewManager(adminPool, ag, tgVaultKey, cfg.PublicURL, cfg.TelegramPollDev, cfg.TelegramConcurrency)
 		tgMgr.Sync(context.Background())
 		slog.Info("telegram manager started", "bots", tgMgr.Count(),
@@ -217,6 +240,7 @@ func main() {
 		Redis:     rdb,
 		Cache:     cli,
 		LLM:       llmCli,
+		Projects:  projects,
 		Auth:      &authapi.Auth{Pool: pool, Cache: cli},
 		Version:   Version,
 		TGBots:    tgMgr,
@@ -267,8 +291,8 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		// WriteTimeout bounds slow responses/hijacked streams; agent
-		// LLM calls (≤60s in llm.Client) exceed it, but those paths
-		// don't block on client writes — they respond at the end. Set
+		// LLM calls (â‰¤60s in llm.Client) exceed it, but those paths
+		// don't block on client writes â€” they respond at the end. Set
 		// generous 90s so long provider replies still flush.
 		WriteTimeout: 90 * time.Second,
 		IdleTimeout:  120 * time.Second,

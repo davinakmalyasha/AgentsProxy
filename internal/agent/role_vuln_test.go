@@ -305,8 +305,8 @@ func TestSharedKey_NotLogged(t *testing.T) {
 func TestSystemPrompt_RoleScoped(t *testing.T) {
 	clientDefs := NewToolSetFor(nil, "client").Definitions()
 	ownerDefs := NewToolSetFor(nil, "owner").Definitions()
-	clientPrompt := SystemPromptForRole("sports", "centrum", "client", clientDefs)
-	ownerPrompt := SystemPromptForRole("sports", "centrum", "owner", ownerDefs)
+	clientPrompt := Assemble(Layers{Role: "client", Vertical: "sports", ToolDefs: clientDefs})
+	ownerPrompt := Assemble(Layers{Role: "owner", Vertical: "sports", ToolDefs: ownerDefs})
 	if strings.Contains(clientPrompt, "query_net_profit") {
 		t.Errorf("client prompt leaked money tool")
 	}

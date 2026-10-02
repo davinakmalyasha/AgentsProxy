@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
@@ -20,6 +21,11 @@ type AgentChat struct {
 	LLM  *llm.Client
 	RDB  *redis.Client
 	Auth *authapi.Auth
+	// Projects is the per-tenant agent configuration from
+	// internal/agentconfig, keyed by tenant id. nil is supported and means
+	// "no tenant has an agent config", in which case agents run on the
+	// platform base prompt alone.
+	Projects map[string]*agentconfig.Project
 }
 
 type agentChatRequest struct {
@@ -37,8 +43,18 @@ type agentChatResponse struct {
 // "Bersihkan riwayat" wipes exactly the key that ClientChat reads/writes.
 // History is Redis-only and never client-supplied (prevents prompt injection).
 
-// ClientChat is public — landing widget (client FAQ/availability only, no money).
+// ClientChat is public â€” landing widget (client FAQ/availability only, no money).
 // POST /v1/agent/client-chat?tenant_id=centrum  {message}
+// ProjectFor returns a tenant's agent configuration, or nil when the tenant
+// has none. A miss is not an error: every tenant works without one, and the
+// agent then runs on the platform base prompt alone.
+func (h *AgentChat) ProjectFor(tenantID string) *agentconfig.Project {
+	if h.Projects == nil {
+		return nil
+	}
+	return h.Projects[tenantID]
+}
+
 func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var req agentChatRequest
@@ -89,8 +105,8 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	// only); the client tier keeps list_bookings because there the
 	// token pins the tenant via RLS. A public FAQ widget never needed
 	// customer names, so nothing here can leak another tenant's data.
-	ts := agent.NewToolSetFor(h.Pool, "anon")
-	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB})
+	ts := agent.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
+	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
 	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "provider error")
@@ -102,7 +118,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 // clientIP lives in clientip.go (trust-boundary aware shared helper).
 // ClearHistory deletes the caller's client-bot memory (landing "Bersihkan
 // riwayat"). Client-only by design: staff/owner memory (keyed by email) is
-// important and has no clear path. Only ag: history keys are deleted —
+// important and has no clear path. Only ag: history keys are deleted â€”
 // quota (rpd:) keys are never touched, so clearing can't reset rate limits.
 // DELETE /v1/agent/history?tenant_id=centrum
 func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +148,7 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 // Chat is for staff/owner via X-Session-Token (role determined, per-role caps 20/80/150)
-// Mounted at POST /v1/agent/chat — does NOT go through withTenant middleware, so resolve here.
+// Mounted at POST /v1/agent/chat â€” does NOT go through withTenant middleware, so resolve here.
 func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimSpace(r.Header.Get("X-Session-Token"))
 	if tok == "" {
@@ -168,8 +184,8 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	if vertical == "" {
 		vertical = "sports"
 	}
-	ts := agent.NewToolSetFor(h.Pool, role)
-	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB})
+	ts := agent.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
+	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
 	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "provider error")

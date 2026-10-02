@@ -1,0 +1,4 @@
+{
+  "comment": "External MCP servers this project connects to. Empty on purpose: everything Centrum needs is a first-party tool in internal/agenttools. Any entry here is THIRD-PARTY code, so read_only defaults to true and the server's own tools are not trusted to be read-only.",
+  "servers": []
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -32,6 +33,10 @@ type Deps struct {
 	// Admin (super-operator) wiring for the MCP admin tools + health.
 	AdminPool *pgxpool.Pool // nil when the app pool doubles for it
 	AdminKey  string        // ADMIN_API_KEY
+	// Projects is the per-tenant agent configuration from
+	// internal/agentconfig, validated against the tool registry at boot.
+	// nil is supported: agents then run on the platform base prompt alone.
+	Projects map[string]*agentconfig.Project
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -68,10 +73,11 @@ func NewRouter(d Deps) http.Handler {
 		// Staff/Owner: via X-Session-Token, role-aware toolsets + per-role caps
 		// Stricter per-IP limit for anon client chat to deter waste (20/min/IP)
 		agentH := &AgentChat{
-			Pool: d.Pool,
-			LLM:  d.LLM,
-			RDB:  d.Redis,
-			Auth: d.Auth,
+			Pool:     d.Pool,
+			LLM:      d.LLM,
+			RDB:      d.Redis,
+			Auth:     d.Auth,
+			Projects: d.Projects,
 		}
 		r.Route("/agent", func(r chi.Router) {
 			// Isolated bucket: chat quota must not be eaten by landing polls

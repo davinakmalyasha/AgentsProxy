@@ -1,0 +1,29 @@
+{
+  "comment": "Skills are procedures - HOW to do something. Information/ is WHAT is true. Both are markdown; this file is the index that says which words make each skill relevant. A skill with no triggers would be injected into every conversation, so the triggers live here rather than being guessed from the prose.",
+  "skills": [
+    {
+      "name": "closing-the-day",
+      "title": "Closing the day",
+      "triggers": ["tutup buku", "closing", "rekap harian", "tutup hari", "tutupbuku"],
+      "keywords": ["rekap", "hari", "closing"]
+    },
+    {
+      "name": "handling-a-cancellation",
+      "title": "Handling a cancellation request",
+      "triggers": ["batalkan", "batal", "pembatalan", "hapus booking", "cancel"],
+      "keywords": ["batal", "booking"]
+    },
+    {
+      "name": "booking-on-behalf",
+      "title": "Taking a booking by message",
+      "triggers": ["buat booking", "pesan lapangan", "reservasi", "reservasikan", "catat booking"],
+      "keywords": ["booking", "pesan", "reservasi"]
+    },
+    {
+      "name": "stock-take",
+      "title": "Stock-take and deliveries",
+      "triggers": ["opname", "tambah stok", "kurangi stok", "restock", "stok masuk", "stok berkurang", "stocktake"],
+      "keywords": ["stok", "opname"]
+    }
+  ]
+}

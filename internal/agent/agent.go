@@ -36,6 +36,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 )
 
@@ -87,6 +88,11 @@ type Agent struct {
 	Tools   *ToolSet
 	History *History
 
+	// Projects is the per-tenant agent configuration, keyed by tenant id.
+	// nil means "no project config", which is a supported state: the agent
+	// then runs on the platform base prompt alone.
+	Projects map[string]*agentconfig.Project
+
 	// roleDefs memoizes the per-role tool-definition lists used in the
 	// system prompt (a pure function of Tools.Pool + role, immutable).
 	roleDefs sync.Map
@@ -95,6 +101,13 @@ type Agent struct {
 // New wires an agent. history may be nil (tests).
 func New(llmCli *llm.Client, tools *ToolSet, hist *History) *Agent {
 	return &Agent{LLM: llmCli, Tools: tools, History: hist}
+}
+
+// WithProjects attaches the per-tenant agent configuration and returns the
+// agent, so main can keep a single expression.
+func (a *Agent) WithProjects(p map[string]*agentconfig.Project) *Agent {
+	a.Projects = p
+	return a
 }
 
 // definitionsForRole returns the tool definitions for a role, building
@@ -139,7 +152,20 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 	// message. Definitions() output is immutable, so a shared copy is
 	// safe to hand the prompt builder.
 	toolDefs := a.definitionsForRole(role)
-	sys := SystemPromptForRole(vertical, tenantID, role, toolDefs)
+
+	// Project config for this tenant, if one is configured. A tenant with no
+	// projects/ folder still gets a working agent on the platform base
+	// alone: adding agent config must not be a precondition for the agent
+	// existing.
+	project := a.ProjectFor(tenantID)
+
+	sys := a.assemblePrompt(Layers{
+		Project:  project,
+		Role:     role,
+		ToolDefs: toolDefs,
+		Message:  message,
+		Vertical: vertical,
+	})
 
 	// Load history per tenant+role+user (good-as-possible, central store)
 	hist := []llm.Message{{Role: "system", Content: sys}}
