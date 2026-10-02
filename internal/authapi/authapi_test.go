@@ -227,7 +227,7 @@ func TestRegisterKeepsPhone(t *testing.T) {
 	a, pool, _ := harness(t)
 	ctx := context.Background()
 	mux := a.Routes()
-	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"owner12345"}`, "")
+	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("owner login status=%d", resp.StatusCode)
 	}
@@ -258,14 +258,15 @@ func TestRegisterKeepsPhone(t *testing.T) {
 	if l.StatusCode != 200 {
 		t.Fatalf("login status=%d", l.StatusCode)
 	}
-	loginUser, _ := readJSON(t, l)["user"].(map[string]any)
+	loginBody := readJSON(t, l)
+	loginUser, _ := loginBody["user"].(map[string]any)
 	if p, _ := loginUser["phone"].(string); p != "628123456789" {
 		t.Errorf("login phone = %q, want it to survive the sign-in", p)
 	}
-	tok, _ := loginUser["token"].(string)
-	if tok == "" {
-		tok, _ = readJSON(t, l)["token"].(string)
-	}
+	// The token rides at the top level of the login response, not inside
+	// user -- and the body is already consumed above, so it must come
+	// from the same decode.
+	tok, _ := loginBody["token"].(string)
 
 	// And through /me, which reads private.session_user.
 	m := get(t, mux, "/me", tok)
@@ -280,7 +281,7 @@ func TestRegisterKeepsPhone(t *testing.T) {
 
 	// An account with no phone must still work. Every pre-existing staff row
 	// is NULL here, so an unqualified column would lock all of them out.
-	l2 := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"owner12345"}`, "")
+	l2 := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
 	if l2.StatusCode != 200 {
 		t.Errorf("owner login with NULL phone status=%d want 200", l2.StatusCode)
 	}

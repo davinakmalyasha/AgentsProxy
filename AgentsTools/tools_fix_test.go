@@ -98,7 +98,7 @@ func runTool(t *testing.T, pool *pgxpool.Pool, name string) agentstools.Tool {
 func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(	agentstools.WibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	insert := func(name, status string, price int, override *int, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
@@ -114,7 +114,7 @@ func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 	insert("Bob", "completed", 80, nil, "20:00")            // completed counts, raw 80
 	insert("Eve", "cancelled", 1000, nil, "21:00")          // excluded
 
-	tomorrow := time.Now().In(	agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02")
+	tomorrow := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02")
 	args, _ := json.Marshal(map[string]string{"from": today, "to": tomorrow})
 	out := runTool(t, pool, "query_income").Run(ctx, tenant, args)
 	if strings.Contains(out, "error") {
@@ -128,7 +128,7 @@ func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(	agentstools.WibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	seed := func(status string, start string) string {
 		t.Helper()
 		var id string
@@ -182,7 +182,7 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(	agentstools.WibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	insert := func(name, phone, status, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
@@ -214,8 +214,8 @@ func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	if strings.Contains(out, "error") {
 		t.Fatalf("top_customers error: %s", out)
 	}
-	if !strings.Contains(out, "Rina: 2 visits") {
-		t.Errorf("top_customers=%q want 'Rina: 2 visits'", out)
+	if !strings.Contains(out, "Rina (0812-1111-1111): 2 visits") {
+		t.Errorf("top_customers=%q want 'Rina (phone): 2 visits'", out)
 	}
 	if strings.Contains(out, "Rina S.:") {
 		t.Errorf("top_customers=%q should not double-count name variants", out)

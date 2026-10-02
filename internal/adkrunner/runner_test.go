@@ -140,6 +140,7 @@ func TestBracesInPromptSurvive(t *testing.T) {
 		t.Errorf("reply = %q", reply)
 	}
 }
+
 // TestMaxRoundsAbort bounds a model that chains tool calls forever. The
 // stub never stops emitting calls; the guard must stop the run and the
 // user must get the processing-limit message, not an error.

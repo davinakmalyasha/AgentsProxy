@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -23,11 +23,11 @@ import (
 )
 
 type Deps struct {
-	Cfg     *config.Config
-	Pool    *pgxpool.Pool
-	Redis   *redis.Client
-	Cache   *cache.Client
-	LLM     *llm.Client
+	Cfg   *config.Config
+	Pool  *pgxpool.Pool
+	Redis *redis.Client
+	Cache *cache.Client
+	LLM   *llm.Client
 	// ADK is the cutover loop. Non-nil in production; tests that only
 	// exercise pre-loop rejections may leave it nil, in which case the
 	// not-yet-migrated call sites fall back to the old loop.

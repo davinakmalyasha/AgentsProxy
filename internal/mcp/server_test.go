@@ -88,6 +88,7 @@ func TestMCPBusinessSchemasAreReal(t *testing.T) {
 	}
 	t.Error("query_income not in admin tool list")
 }
+
 // database: the admin tool runs and reports the missing store, which
 // means auth → filter → handler all fired inside the SDK.
 func TestMCPAdminCallThroughSDK(t *testing.T) {
