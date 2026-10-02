@@ -1,7 +1,8 @@
-// Pricing feature tests: CRUD + PriceFor day/evening logic + isolation.
+// Payments feature tests: CRUD + the DB-trigger payment_status recalc
+// (unpaid → partial → paid) + isolation.
 //
 // DONE: Phase 6 (Centrum migration) / STANDARDS A, D, F
-package pricing
+package payments
 
 import (
 	"bytes"
@@ -22,8 +23,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
@@ -58,15 +58,17 @@ func setup(t *testing.T) *harness {
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_pricing_rules WHERE tenant_id IN ('pr-a','pr-b');
-			 DELETE FROM clients WHERE tenant_id IN ('pr-a','pr-b');`); err != nil {
+			`DELETE FROM sports_payments WHERE tenant_id IN ('pay-a','pay-b');
+			 DELETE FROM sports_bookings WHERE tenant_id IN ('pay-a','pay-b');
+			 DELETE FROM sports_facilities WHERE tenant_id IN ('pay-a','pay-b');
+			 DELETE FROM clients WHERE tenant_id IN ('pay-a','pay-b');`); err != nil {
 			return err
 		}
 		for _, c := range [][]string{
-			{"pr-a", "pr-a", "tok-pr-a"},
-			{"pr-b", "pr-b", "tok-pr-b"},
+			{"pay-a", "pay-a", "tok-pay-a"},
+			{"pay-b", "pay-b", "tok-pay-b"},
 		} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "pricing"); err != nil {
+			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "facilities", "bookings", "payments"); err != nil {
 				return err
 			}
 		}
@@ -195,104 +197,109 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b[:n])
 }
 
-// seedRule inserts a rule (day 20000/h, evening 40000/h, day 07-17).
-func seedRule(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string, validFrom string) {
+// seedBooking creates a booking (price 100000) for tenant via admin pool.
+func seedBooking(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) (facilityID, bookingID string) {
 	t.Helper()
-	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
-		 VALUES ($1,$2::date,'07:00','23:00','07:00','17:00',20000,40000)`,
-		tenant, validFrom); err != nil {
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour) VALUES ($1,'Court 1','badminton',50000) RETURNING id::text`,
+		tenant).Scan(&facilityID); err != nil {
 		t.Fatal(err)
 	}
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, price)
+		 VALUES ($1,$2::uuid,'2026-09-15','18:00','20:00','Alice',100000) RETURNING id::text`,
+		tenant, facilityID).Scan(&bookingID); err != nil {
+		t.Fatal(err)
+	}
+	return
 }
 
-func TestPricing_CRUD(t *testing.T) {
+func bookingStatus(t *testing.T, ctx context.Context, admin *pgxpool.Pool, bookingID string) string {
+	t.Helper()
+	var s string
+	if err := admin.QueryRow(ctx,
+		`SELECT payment_status FROM sports_bookings WHERE id=$1::uuid`, bookingID).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// TestPayments_RecalcTrigger is THE test: partial → partial, full → paid,
+// delete → back to unpaid.
+func TestPayments_RecalcTrigger(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
-		`{"valid_from":"2026-01-01","price_day":20000,"price_evening":40000}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+
+	// Pay 40000 of 100000 → partial.
+	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
+		`{"booking_id":"`+bookingID+`","amount":40000,"method":"cash"}`)
 	if resp.StatusCode != 201 {
-		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+		t.Fatalf("pay1 status=%d body=%s", resp.StatusCode, readAll(t, resp))
 	}
 	m := readJSON(t, resp)
-	id, _ := m["id"].(string)
-	// List.
-	resp2 := doReq(t, h.router, "GET", "/pricing", "tok-pr-a", "")
-	m2 := readJSON(t, resp2)
-	items, _ := m2["items"].([]any)
-	if len(items) != 1 {
-		t.Errorf("items=%d want 1", len(items))
+	payID, _ := m["id"].(string)
+	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "partial" {
+		t.Errorf("after 40k: status=%s want partial", s)
 	}
-	// Get one.
-	resp3 := doReq(t, h.router, "GET", "/pricing/"+id, "tok-pr-a", "")
+
+	// Pay the remaining 60000 → paid.
+	resp2 := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
+		`{"booking_id":"`+bookingID+`","amount":60000,"method":"qris"}`)
+	if resp2.StatusCode != 201 {
+		t.Fatalf("pay2 status=%d", resp2.StatusCode)
+	}
+	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "paid" {
+		t.Errorf("after full: status=%s want paid", s)
+	}
+
+	// Delete the 60000 → back to partial.
+	resp3 := doReq(t, h.router, "DELETE", "/payments/"+payID, "tok-pay-a", "")
 	if resp3.StatusCode != 200 {
-		t.Errorf("get status=%d", resp3.StatusCode)
+		t.Fatalf("del status=%d", resp3.StatusCode)
 	}
-	// Duplicate valid_from → 409.
-	resp4 := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
-		`{"valid_from":"2026-01-01","price_day":25000}`)
-	if resp4.StatusCode != 409 {
-		t.Errorf("dup valid_from status=%d want 409", resp4.StatusCode)
+	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "partial" {
+		t.Errorf("after delete: status=%s want partial", s)
 	}
 }
 
-func TestPricing_PriceForDayAndEvening(t *testing.T) {
+// TestPayments_Isolation: B cannot see/pay A's booking.
+func TestPayments_Isolation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
 
-	pool, err := db.NewPool(ctx, toAppDSN(os.Getenv("DATABASE_URL")))
-	if err != nil {
-		t.Fatal(err)
+	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-b",
+		`{"booking_id":"`+bookingID+`","amount":10000}`)
+	if resp.StatusCode != 404 {
+		t.Errorf("B pay on A's booking status=%d want 404", resp.StatusCode)
 	}
-	defer pool.Close()
-
-	date, _ := time.Parse("2006-01-02", "2026-06-10")
-	// Day booking 10:00-12:00 (2h × 20000 = 40000).
-	var price float64
-	err = records.WithTenantTx(ctx, pool, "pr-a", func(tx pgx.Tx) error {
-		var e error
-		price, e = PriceFor(ctx, tx, "pr-a", date,
-			mustTime("10:00"), mustTime("12:00"))
-		return e
-	})
-	if err != nil {
-		t.Fatalf("PriceFor day: %v", err)
-	}
-	if price != 40000 {
-		t.Errorf("day price=%v want 40000 (2h×20000)", price)
-	}
-	// Evening booking 18:00-20:00 (2h × 40000 = 80000).
-	err = records.WithTenantTx(ctx, pool, "pr-a", func(tx pgx.Tx) error {
-		var e error
-		price, e = PriceFor(ctx, tx, "pr-a", date,
-			mustTime("18:00"), mustTime("20:00"))
-		return e
-	})
-	if err != nil {
-		t.Fatalf("PriceFor evening: %v", err)
-	}
-	if price != 80000 {
-		t.Errorf("evening price=%v want 80000 (2h×40000)", price)
-	}
-}
-
-func mustTime(s string) time.Time {
-	t, _ := time.Parse("15:04", s)
-	return t
-}
-
-// TestPricing_Isolation: B cannot see A's rules.
-func TestPricing_Isolation(t *testing.T) {
-	h := setup(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
-
-	respL := doReq(t, h.router, "GET", "/pricing", "tok-pr-b", "")
+	// B's list sees nothing.
+	respL := doReq(t, h.router, "GET", "/payments", "tok-pay-b", "")
 	mL := readJSON(t, respL)
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
-		t.Errorf("B saw %d rules, want 0", len(items))
+		t.Errorf("B saw %d payments, want 0", len(items))
+	}
+}
+
+// TestPayments_Validation: amount <= 0 → 400, bad method → 400.
+func TestPayments_Validation(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+
+	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
+		`{"booking_id":"`+bookingID+`","amount":0}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("zero amount status=%d want 400", resp.StatusCode)
+	}
+	resp2 := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
+		`{"booking_id":"`+bookingID+`","amount":1000,"method":"bitcoin"}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("bad method status=%d want 400", resp2.StatusCode)
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/pricing"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

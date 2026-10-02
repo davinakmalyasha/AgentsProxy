@@ -1,8 +1,7 @@
-// Mandatory isolation + CRUD + quantity-guard tests for the
-// inventory feature.
+// Pricing feature tests: CRUD + PriceFor day/evening logic + isolation.
 //
-// DONE: Phase 4 (sports vertical) / STANDARDS A, D, F
-package inventory
+// DONE: Phase 6 (Centrum migration) / STANDARDS A, D, F
+package pricing
 
 import (
 	"bytes"
@@ -23,7 +22,8 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
@@ -58,12 +58,18 @@ func setup(t *testing.T) *harness {
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_inventory WHERE tenant_id IN ('inv-a','inv-b');
-			 DELETE FROM clients WHERE tenant_id IN ('inv-a','inv-b');`); err != nil {
+			`DELETE FROM sports_pricing_rules WHERE tenant_id IN ('pr-a','pr-b');
+			 DELETE FROM clients WHERE tenant_id IN ('pr-a','pr-b');`); err != nil {
 			return err
 		}
-		seedClientTx(t, ctx, tx, "inv-a", "inv-a", "tok-inv-a", 1000000, "active", "records", "inventory")
-		seedClientTx(t, ctx, tx, "inv-b", "inv-b", "tok-inv-b", 1000000, "active", "records", "inventory")
+		for _, c := range [][]string{
+			{"pr-a", "pr-a", "tok-pr-a"},
+			{"pr-b", "pr-b", "tok-pr-b"},
+		} {
+			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "pricing"); err != nil {
+				return err
+			}
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -107,6 +113,16 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_pricing_rules TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_expenses TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_recurring_series TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_products TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sales TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sale_items TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_stock_movements TO app`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
 	}
 	for _, s := range stmts {
@@ -129,29 +145,15 @@ func toAppDSN(dsn string) string {
 	return dsn[:i+3] + "app" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
 	t.Helper()
 	hash := auth.HashToken(token)
-	if _, err := pool.Exec(ctx,
+	_, err := tx.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
 		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
 		name, tenant, hash, quota, status, feats,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
-	t.Helper()
-	hash := auth.HashToken(token)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
-		name, tenant, hash, quota, status, feats,
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
+	return err
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
@@ -193,83 +195,104 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b[:n])
 }
 
-func TestInventory_CRUD(t *testing.T) {
+// seedRule inserts a rule (day 20000/h, evening 40000/h, day 07-17).
+func seedRule(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string, validFrom string) {
+	t.Helper()
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+		 VALUES ($1,$2::date,'07:00','23:00','07:00','17:00',20000,40000)`,
+		tenant, validFrom); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPricing_CRUD(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/inventory", "tok-inv-a",
-		`{"name":"Soda","quantity":10,"unit_price":8000,"low_stock_threshold":5}`)
+	resp := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
+		`{"valid_from":"2026-01-01","price_day":20000,"price_evening":40000}`)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
 	}
 	m := readJSON(t, resp)
 	id, _ := m["id"].(string)
-	if id == "" {
-		t.Fatal("no id")
-	}
-	// List — should show low_stock=false (10 > 5).
-	resp2 := doReq(t, h.router, "GET", "/inventory", "tok-inv-a", "")
+	// List.
+	resp2 := doReq(t, h.router, "GET", "/pricing", "tok-pr-a", "")
 	m2 := readJSON(t, resp2)
 	items, _ := m2["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("items=%d want 1", len(items))
 	}
-	first := items[0].(map[string]any)
-	if first["low_stock"] != false {
-		t.Errorf("low_stock=%v want false", first["low_stock"])
-	}
-	// Adjust down to 2 (below threshold).
-	resp3 := doReq(t, h.router, "POST", "/inventory/"+id+"/adjust", "tok-inv-a", `{"delta":-8}`)
+	// Get one.
+	resp3 := doReq(t, h.router, "GET", "/pricing/"+id, "tok-pr-a", "")
 	if resp3.StatusCode != 200 {
-		t.Fatalf("adjust status=%d body=%s", resp3.StatusCode, readAll(t, resp3))
+		t.Errorf("get status=%d", resp3.StatusCode)
 	}
-	m3 := readJSON(t, resp3)
-	if m3["quantity"] != float64(2) {
-		t.Errorf("quantity=%v want 2", m3["quantity"])
-	}
-	// Now low_stock should be true.
-	resp4 := doReq(t, h.router, "GET", "/inventory/"+id, "tok-inv-a", "")
-	m4 := readJSON(t, resp4)
-	if m4["low_stock"] != true {
-		t.Errorf("low_stock=%v want true", m4["low_stock"])
+	// Duplicate valid_from → 409.
+	resp4 := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
+		`{"valid_from":"2026-01-01","price_day":25000}`)
+	if resp4.StatusCode != 409 {
+		t.Errorf("dup valid_from status=%d want 409", resp4.StatusCode)
 	}
 }
 
-// TestInventory_NeverNegative: selling more than stock → 409.
-func TestInventory_NeverNegative(t *testing.T) {
+func TestPricing_PriceForDayAndEvening(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/inventory", "tok-inv-a", `{"name":"Water","quantity":3}`)
-	m := readJSON(t, resp)
-	id, _ := m["id"].(string)
-	// Sell 5 of 3 → 409, quantity unchanged.
-	resp2 := doReq(t, h.router, "POST", "/inventory/"+id+"/adjust", "tok-inv-a", `{"delta":-5}`)
-	if resp2.StatusCode != 409 {
-		t.Errorf("oversell status=%d want 409", resp2.StatusCode)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
+
+	pool, err := db.NewPool(ctx, toAppDSN(os.Getenv("DATABASE_URL")))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Quantity still 3.
-	resp3 := doReq(t, h.router, "GET", "/inventory/"+id, "tok-inv-a", "")
-	m3 := readJSON(t, resp3)
-	if m3["quantity"] != float64(3) {
-		t.Errorf("quantity=%v want 3 (must never go negative)", m3["quantity"])
+	defer pool.Close()
+
+	date, _ := time.Parse("2006-01-02", "2026-06-10")
+	// Day booking 10:00-12:00 (2h × 20000 = 40000).
+	var price float64
+	err = records.WithTenantTx(ctx, pool, "pr-a", func(tx pgx.Tx) error {
+		var e error
+		price, e = PriceFor(ctx, tx, "pr-a", date,
+			mustTime("10:00"), mustTime("12:00"))
+		return e
+	})
+	if err != nil {
+		t.Fatalf("PriceFor day: %v", err)
+	}
+	if price != 40000 {
+		t.Errorf("day price=%v want 40000 (2h×20000)", price)
+	}
+	// Evening booking 18:00-20:00 (2h × 40000 = 80000).
+	err = records.WithTenantTx(ctx, pool, "pr-a", func(tx pgx.Tx) error {
+		var e error
+		price, e = PriceFor(ctx, tx, "pr-a", date,
+			mustTime("18:00"), mustTime("20:00"))
+		return e
+	})
+	if err != nil {
+		t.Fatalf("PriceFor evening: %v", err)
+	}
+	if price != 80000 {
+		t.Errorf("evening price=%v want 80000 (2h×40000)", price)
 	}
 }
 
-// TestInventory_TenantIsolation — the mandatory isolation test.
-func TestInventory_TenantIsolation(t *testing.T) {
+func mustTime(s string) time.Time {
+	t, _ := time.Parse("15:04", s)
+	return t
+}
+
+// TestPricing_Isolation: B cannot see A's rules.
+func TestPricing_Isolation(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/inventory", "tok-inv-a", `{"name":"A Item"}`)
-	m := readJSON(t, resp)
-	id, _ := m["id"].(string)
-	respL := doReq(t, h.router, "GET", "/inventory", "tok-inv-b", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
+
+	respL := doReq(t, h.router, "GET", "/pricing", "tok-pr-b", "")
 	mL := readJSON(t, respL)
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
-		t.Errorf("B saw %d items, want 0", len(items))
-	}
-	respG := doReq(t, h.router, "GET", "/inventory/"+id, "tok-inv-b", "")
-	if respG.StatusCode != 404 {
-		t.Errorf("B get status=%d want 404", respG.StatusCode)
-	}
-	respAdj := doReq(t, h.router, "POST", "/inventory/"+id+"/adjust", "tok-inv-b", `{"delta":-1}`)
-	if respAdj.StatusCode != 409 {
-		t.Errorf("B adjust status=%d want 409", respAdj.StatusCode)
+		t.Errorf("B saw %d rules, want 0", len(items))
 	}
 }

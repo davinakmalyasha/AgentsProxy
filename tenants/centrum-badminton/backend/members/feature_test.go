@@ -1,11 +1,7 @@
-// Mandatory isolation + CRUD tests for the facilities feature.
-// The runtime pool connects as the non-superuser `app` role so RLS
-// applies — this is how production runs and the only way to catch
-// cross-tenant leaks. A custom feature without a passing isolation
-// test does not ship.
+// Mandatory isolation + CRUD + balance tests for the members feature.
 //
 // DONE: Phase 4 (sports vertical) / STANDARDS A, D, F
-package facilities
+package members
 
 import (
 	"bytes"
@@ -26,14 +22,14 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
 type harness struct {
-	router http.Handler
-	pool   *pgxpool.Pool
-	rdb    *redis.Client
+	router    http.Handler
+	adminPool *pgxpool.Pool
+	rdb       *redis.Client
 }
 
 func setup(t *testing.T) *harness {
@@ -59,17 +55,14 @@ func setup(t *testing.T) *harness {
 	if err := db.Migrate(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
-	// Clean up this test's own tenants under an advisory lock so the
-	// four sports packages don't race their DELETE+INSERT on the same
-	// tables (SQLSTATE XX000 "tuple concurrently updated").
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_facilities WHERE tenant_id IN ('fac-a','fac-b','fac-c');
-			 DELETE FROM clients WHERE tenant_id IN ('fac-a','fac-b','fac-c');`); err != nil {
+			`DELETE FROM sports_members WHERE tenant_id IN ('mem-a','mem-b');
+			 DELETE FROM clients WHERE tenant_id IN ('mem-a','mem-b');`); err != nil {
 			return err
 		}
-		seedClientTx(t, ctx, tx, "fac-a", "fac-a", "tok-fac-a", 1000000, "active", "records", "facilities")
-		seedClientTx(t, ctx, tx, "fac-b", "fac-b", "tok-fac-b", 1000000, "active", "records", "facilities")
+		seedClientTx(t, ctx, tx, "mem-a", "mem-a", "tok-mem-a", 1000000, "active", "records", "members")
+		seedClientTx(t, ctx, tx, "mem-b", "mem-b", "tok-mem-b", 1000000, "active", "records", "members")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -80,10 +73,6 @@ func setup(t *testing.T) *harness {
 		t.Fatalf("connect as app: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := adminPool.Exec(ctx,
-		`DELETE FROM sports_facilities WHERE tenant_id IN ('fac-a','fac-b','fac-c');`); err != nil {
-		t.Fatal(err)
-	}
 
 	rdb, err := redisx.NewClient(ctx, rurl)
 	if err != nil {
@@ -93,12 +82,10 @@ func setup(t *testing.T) *harness {
 	t.Cleanup(func() { rdb.Close() })
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
-	// Build a vertical router with the facilities feature mounted,
-	// exactly like the builder does for /v1/sports.
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, pool: pool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
 }
 
 func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
@@ -144,14 +131,10 @@ func toAppDSN(dsn string) string {
 func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	featuresList := feats
-	if len(featuresList) == 0 {
-		featuresList = []string{"records"}
-	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
 		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
-		name, tenant, hash, quota, status, featuresList,
+		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -161,14 +144,10 @@ func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, ten
 func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	featuresList := feats
-	if len(featuresList) == 0 {
-		featuresList = []string{"records"}
-	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
 		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
-		name, tenant, hash, quota, status, featuresList,
+		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -213,116 +192,63 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b[:n])
 }
 
-func TestFacilities_CRUD(t *testing.T) {
+func TestMembers_CRUD(t *testing.T) {
 	h := setup(t)
-	// Create
-	resp := doReq(t, h.router, "POST", "/facilities", "tok-fac-a",
-		`{"name":"Court 3","type":"badminton","capacity":2,"price_per_hour":50000,"open_time":"06:00","close_time":"22:00"}`)
+	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a",
+		`{"name":"Budi","phone":"+6281","balance":100000}`)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
 	}
 	m := readJSON(t, resp)
 	id, _ := m["id"].(string)
-	if id == "" {
-		t.Fatal("create: no id")
-	}
-	// List
-	resp2 := doReq(t, h.router, "GET", "/facilities", "tok-fac-a", "")
+	// Top up.
+	resp2 := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":50000}`)
 	if resp2.StatusCode != 200 {
-		t.Fatalf("list status=%d", resp2.StatusCode)
+		t.Fatalf("topup status=%d body=%s", resp2.StatusCode, readAll(t, resp2))
 	}
 	m2 := readJSON(t, resp2)
-	items, _ := m2["items"].([]any)
+	if m2["balance"] != float64(150000) {
+		t.Errorf("balance=%v want 150000", m2["balance"])
+	}
+	// List.
+	resp3 := doReq(t, h.router, "GET", "/members", "tok-mem-a", "")
+	m3 := readJSON(t, resp3)
+	items, _ := m3["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("items=%d want 1", len(items))
 	}
-	// Get one
-	resp3 := doReq(t, h.router, "GET", "/facilities/"+id, "tok-fac-a", "")
-	if resp3.StatusCode != 200 {
-		t.Errorf("get status=%d", resp3.StatusCode)
-	}
-	// Patch
-	resp4 := doReq(t, h.router, "PATCH", "/facilities/"+id, "tok-fac-a", `{"price_per_hour":60000}`)
-	if resp4.StatusCode != 200 {
-		t.Errorf("patch status=%d", resp4.StatusCode)
-	}
-	// Delete
-	resp5 := doReq(t, h.router, "DELETE", "/facilities/"+id, "tok-fac-a", "")
-	if resp5.StatusCode != 200 {
-		t.Errorf("delete status=%d", resp5.StatusCode)
-	}
-	// Get after delete → 404
-	resp6 := doReq(t, h.router, "GET", "/facilities/"+id, "tok-fac-a", "")
-	if resp6.StatusCode != 404 {
-		t.Errorf("get-after-delete status=%d want 404", resp6.StatusCode)
-	}
 }
 
-func TestFacilities_Validation(t *testing.T) {
+func TestMembers_TopupValidation(t *testing.T) {
 	h := setup(t)
-	// Missing name
-	resp := doReq(t, h.router, "POST", "/facilities", "tok-fac-a", `{"type":"badminton"}`)
-	if resp.StatusCode != 400 {
-		t.Errorf("missing name status=%d want 400", resp.StatusCode)
-	}
-	// Invalid type
-	resp2 := doReq(t, h.router, "POST", "/facilities", "tok-fac-a", `{"name":"x","type":"skydiving"}`)
-	if resp2.StatusCode != 400 {
-		t.Errorf("invalid type status=%d want 400", resp2.StatusCode)
-	}
-	// open after close
-	resp3 := doReq(t, h.router, "POST", "/facilities", "tok-fac-a",
-		`{"name":"x","open_time":"22:00","close_time":"06:00"}`)
-	if resp3.StatusCode != 400 {
-		t.Errorf("open>close status=%d want 400", resp3.StatusCode)
-	}
-}
-
-// TestFacilities_TenantIsolation — the mandatory isolation test.
-func TestFacilities_TenantIsolation(t *testing.T) {
-	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/facilities", "tok-fac-a",
-		`{"name":"A Court","type":"badminton"}`)
+	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"Budi"}`)
 	m := readJSON(t, resp)
 	id, _ := m["id"].(string)
-	if id == "" {
-		t.Fatal("create: no id")
+	// Zero/negative topup → 400.
+	resp2 := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":0}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("zero topup status=%d want 400", resp2.StatusCode)
 	}
-	// B sees nothing in list.
-	respL := doReq(t, h.router, "GET", "/facilities", "tok-fac-b", "")
+}
+
+// TestMembers_TenantIsolation — the mandatory isolation test.
+func TestMembers_TenantIsolation(t *testing.T) {
+	h := setup(t)
+	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"A Member"}`)
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+	respL := doReq(t, h.router, "GET", "/members", "tok-mem-b", "")
 	mL := readJSON(t, respL)
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
-		t.Errorf("B saw %d facilities, want 0", len(items))
+		t.Errorf("B saw %d members, want 0", len(items))
 	}
-	// B cannot get A's by id.
-	respG := doReq(t, h.router, "GET", "/facilities/"+id, "tok-fac-b", "")
+	respG := doReq(t, h.router, "GET", "/members/"+id, "tok-mem-b", "")
 	if respG.StatusCode != 404 {
 		t.Errorf("B get status=%d want 404", respG.StatusCode)
 	}
-	// B cannot patch A's.
-	respP := doReq(t, h.router, "PATCH", "/facilities/"+id, "tok-fac-b", `{"name":"hijack"}`)
-	if respP.StatusCode != 404 {
-		t.Errorf("B patch status=%d want 404", respP.StatusCode)
-	}
-	// B cannot delete A's.
-	respD := doReq(t, h.router, "DELETE", "/facilities/"+id, "tok-fac-b", "")
-	if respD.StatusCode != 404 {
-		t.Errorf("B delete status=%d want 404", respD.StatusCode)
-	}
-}
-
-// TestFacilities_Gate: a client without the facilities feature gets 403.
-func TestFacilities_Gate(t *testing.T) {
-	h := setup(t)
-	// Seed a client withOUT facilities (default = records only).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	seedClient(t, ctx, h.pool, "fac-c", "fac-c", "tok-fac-c", 1000000, "active")
-	// The gate reads the cached client; seed wrote to DB, flush to re-read.
-	h.rdb.FlushDB(ctx)
-	resp := doReq(t, h.router, "GET", "/facilities", "tok-fac-c", "")
-	if resp.StatusCode != 403 {
-		t.Errorf("gate status=%d want 403", resp.StatusCode)
+	respT := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-b", `{"amount":1000}`)
+	if respT.StatusCode != 404 {
+		t.Errorf("B topup status=%d want 404", respT.StatusCode)
 	}
 }

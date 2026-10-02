@@ -1,7 +1,7 @@
-// Court blocks feature tests: CRUD + isolation.
+// Expenses feature tests: CRUD + isolation.
 //
 // DONE: Phase 6 (Centrum migration) / STANDARDS A, D, F
-package courtblocks
+package expenses
 
 import (
 	"bytes"
@@ -22,7 +22,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
@@ -57,12 +57,12 @@ func setup(t *testing.T) *harness {
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_court_blocks WHERE tenant_id IN ('cb-a','cb-b');
-			 DELETE FROM clients WHERE tenant_id IN ('cb-a','cb-b');`); err != nil {
+			`DELETE FROM sports_expenses WHERE tenant_id IN ('ex-a','ex-b');
+			 DELETE FROM clients WHERE tenant_id IN ('ex-a','ex-b');`); err != nil {
 			return err
 		}
-		for _, c := range [][]string{{"cb-a", "cb-a", "tok-cb-a"}, {"cb-b", "cb-b", "tok-cb-b"}} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "courtblocks"); err != nil {
+		for _, c := range [][]string{{"ex-a", "ex-a", "tok-ex-a"}, {"ex-b", "ex-b", "tok-ex-b"}} {
+			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "expenses"); err != nil {
 				return err
 			}
 		}
@@ -191,65 +191,55 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b[:n])
 }
 
-func TestCourtBlocks_CRUD(t *testing.T) {
+func TestExpenses_CRUD(t *testing.T) {
 	h := setup(t)
-	// All-courts block.
-	resp := doReq(t, h.router, "POST", "/courtblocks", "tok-cb-a",
-		`{"block_date":"2026-09-25","reason":"maintenance"}`)
+	resp := doReq(t, h.router, "POST", "/expenses", "tok-ex-a",
+		`{"category":"listrik","amount":500000,"note":"tagihan bulan"}`)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
 	}
 	m := readJSON(t, resp)
 	id, _ := m["id"].(string)
-	// List by date.
-	resp2 := doReq(t, h.router, "GET", "/courtblocks?date=2026-09-25", "tok-cb-a", "")
+	// List.
+	resp2 := doReq(t, h.router, "GET", "/expenses", "tok-ex-a", "")
 	m2 := readJSON(t, resp2)
 	items, _ := m2["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("items=%d want 1", len(items))
 	}
 	// Get.
-	resp3 := doReq(t, h.router, "GET", "/courtblocks/"+id, "tok-cb-a", "")
+	resp3 := doReq(t, h.router, "GET", "/expenses/"+id, "tok-ex-a", "")
 	if resp3.StatusCode != 200 {
 		t.Errorf("get status=%d", resp3.StatusCode)
 	}
-	// Delete.
-	resp4 := doReq(t, h.router, "DELETE", "/courtblocks/"+id, "tok-cb-a", "")
+	// Patch.
+	resp4 := doReq(t, h.router, "PATCH", "/expenses/"+id, "tok-ex-a", `{"amount":550000}`)
 	if resp4.StatusCode != 200 {
-		t.Errorf("delete status=%d", resp4.StatusCode)
+		t.Errorf("patch status=%d", resp4.StatusCode)
+	}
+	// Delete.
+	resp5 := doReq(t, h.router, "DELETE", "/expenses/"+id, "tok-ex-a", "")
+	if resp5.StatusCode != 200 {
+		t.Errorf("delete status=%d", resp5.StatusCode)
 	}
 }
 
-func TestCourtBlocks_PerFacilityAndValidation(t *testing.T) {
+func TestExpenses_Validation(t *testing.T) {
 	h := setup(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	var facID string
-	if err := h.adminPool.QueryRow(ctx,
-		`INSERT INTO sports_facilities (tenant_id, name, type) VALUES ('cb-a','Court 2','badminton') RETURNING id::text`,
-	).Scan(&facID); err != nil {
-		t.Fatal(err)
-	}
-	resp := doReq(t, h.router, "POST", "/courtblocks", "tok-cb-a",
-		`{"facility_id":"`+facID+`","block_date":"2026-09-26"}`)
-	if resp.StatusCode != 201 {
-		t.Fatalf("per-facility block status=%d body=%s", resp.StatusCode, readAll(t, resp))
-	}
-	// Bad date → 400.
-	resp2 := doReq(t, h.router, "POST", "/courtblocks", "tok-cb-a", `{"block_date":"not-a-date"}`)
-	if resp2.StatusCode != 400 {
-		t.Errorf("bad date status=%d want 400", resp2.StatusCode)
+	resp := doReq(t, h.router, "POST", "/expenses", "tok-ex-a", `{"amount":0}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("zero amount status=%d want 400", resp.StatusCode)
 	}
 }
 
-// TestCourtBlocks_Isolation: B cannot see A's blocks.
-func TestCourtBlocks_Isolation(t *testing.T) {
+// TestExpenses_Isolation: B cannot see A's expenses.
+func TestExpenses_Isolation(t *testing.T) {
 	h := setup(t)
-	doReq(t, h.router, "POST", "/courtblocks", "tok-cb-a", `{"block_date":"2026-09-25"}`).Body.Close()
-	respL := doReq(t, h.router, "GET", "/courtblocks", "tok-cb-b", "")
+	doReq(t, h.router, "POST", "/expenses", "tok-ex-a", `{"amount":100000}`).Body.Close()
+	respL := doReq(t, h.router, "GET", "/expenses", "tok-ex-b", "")
 	mL := readJSON(t, respL)
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
-		t.Errorf("B saw %d blocks, want 0", len(items))
+		t.Errorf("B saw %d expenses, want 0", len(items))
 	}
 }

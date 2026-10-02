@@ -1,7 +1,7 @@
-// Mandatory isolation + CRUD + balance tests for the members feature.
+// Recurring series feature tests: CRUD + isolation.
 //
-// DONE: Phase 4 (sports vertical) / STANDARDS A, D, F
-package members
+// DONE: Phase 6 (Centrum migration) / STANDARDS A, D, F
+package series
 
 import (
 	"bytes"
@@ -22,7 +22,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/testutil"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
@@ -57,12 +57,21 @@ func setup(t *testing.T) *harness {
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_members WHERE tenant_id IN ('mem-a','mem-b');
-			 DELETE FROM clients WHERE tenant_id IN ('mem-a','mem-b');`); err != nil {
+			`DELETE FROM sports_recurring_series WHERE tenant_id IN ('se-a','se-b');
+			 DELETE FROM sports_facilities WHERE tenant_id IN ('se-a','se-b');
+			 DELETE FROM clients WHERE tenant_id IN ('se-a','se-b');`); err != nil {
 			return err
 		}
-		seedClientTx(t, ctx, tx, "mem-a", "mem-a", "tok-mem-a", 1000000, "active", "records", "members")
-		seedClientTx(t, ctx, tx, "mem-b", "mem-b", "tok-mem-b", 1000000, "active", "records", "members")
+		for _, c := range [][]string{{"se-a", "se-a", "tok-se-a"}, {"se-b", "se-b", "tok-se-b"}} {
+			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "series"); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO sports_facilities (tenant_id, name, type) VALUES ($1,'Court 1','badminton')`,
+				c[1]); err != nil {
+				return err
+			}
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -106,6 +115,16 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_pricing_rules TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_expenses TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_recurring_series TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_products TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sales TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sale_items TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_stock_movements TO app`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
 	}
 	for _, s := range stmts {
@@ -128,29 +147,25 @@ func toAppDSN(dsn string) string {
 	return dsn[:i+3] + "app" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
 	t.Helper()
 	hash := auth.HashToken(token)
-	if _, err := pool.Exec(ctx,
+	_, err := tx.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
 		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
 		name, tenant, hash, quota, status, feats,
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
+	return err
 }
 
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
+func facilityID(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) string {
 	t.Helper()
-	hash := auth.HashToken(token)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
-		name, tenant, hash, quota, status, feats,
-	); err != nil {
+	var id string
+	if err := admin.QueryRow(ctx,
+		`SELECT id::text FROM sports_facilities WHERE tenant_id=$1 LIMIT 1`, tenant).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
+	return id
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
@@ -192,63 +207,75 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b[:n])
 }
 
-func TestMembers_CRUD(t *testing.T) {
+func TestSeries_CRUD(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a",
-		`{"name":"Budi","phone":"+6281","balance":100000}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fac := facilityID(t, ctx, h.adminPool, "se-a")
+	// Create (every Sunday 19-21).
+	resp := doReq(t, h.router, "POST", "/series", "tok-se-a",
+		`{"facility_id":"`+fac+`","customer_name":"Komunitas A","weekday":0,"start_time":"19:00","end_time":"21:00","start_date":"2026-09-01"}`)
 	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
 	}
 	m := readJSON(t, resp)
 	id, _ := m["id"].(string)
-	// Top up.
-	resp2 := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":50000}`)
-	if resp2.StatusCode != 200 {
-		t.Fatalf("topup status=%d body=%s", resp2.StatusCode, readAll(t, resp2))
-	}
-	m2 := readJSON(t, resp2)
-	if m2["balance"] != float64(150000) {
-		t.Errorf("balance=%v want 150000", m2["balance"])
-	}
 	// List.
-	resp3 := doReq(t, h.router, "GET", "/members", "tok-mem-a", "")
-	m3 := readJSON(t, resp3)
-	items, _ := m3["items"].([]any)
+	resp2 := doReq(t, h.router, "GET", "/series", "tok-se-a", "")
+	m2 := readJSON(t, resp2)
+	items, _ := m2["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("items=%d want 1", len(items))
 	}
-}
-
-func TestMembers_TopupValidation(t *testing.T) {
-	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"Budi"}`)
-	m := readJSON(t, resp)
-	id, _ := m["id"].(string)
-	// Zero/negative topup → 400.
-	resp2 := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":0}`)
-	if resp2.StatusCode != 400 {
-		t.Errorf("zero topup status=%d want 400", resp2.StatusCode)
+	// Patch → paused.
+	resp3 := doReq(t, h.router, "PATCH", "/series/"+id, "tok-se-a", `{"status":"paused"}`)
+	if resp3.StatusCode != 200 {
+		t.Errorf("patch status=%d", resp3.StatusCode)
+	}
+	// Get → paused.
+	resp4 := doReq(t, h.router, "GET", "/series/"+id, "tok-se-a", "")
+	m4 := readJSON(t, resp4)
+	if m4["status"] != "paused" {
+		t.Errorf("status=%v want paused", m4["status"])
+	}
+	// Delete.
+	resp5 := doReq(t, h.router, "DELETE", "/series/"+id, "tok-se-a", "")
+	if resp5.StatusCode != 200 {
+		t.Errorf("delete status=%d", resp5.StatusCode)
 	}
 }
 
-// TestMembers_TenantIsolation — the mandatory isolation test.
-func TestMembers_TenantIsolation(t *testing.T) {
+func TestSeries_Validation(t *testing.T) {
 	h := setup(t)
-	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"A Member"}`)
-	m := readJSON(t, resp)
-	id, _ := m["id"].(string)
-	respL := doReq(t, h.router, "GET", "/members", "tok-mem-b", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fac := facilityID(t, ctx, h.adminPool, "se-a")
+	// Bad weekday.
+	resp := doReq(t, h.router, "POST", "/series", "tok-se-a",
+		`{"facility_id":"`+fac+`","customer_name":"x","weekday":9,"start_time":"19:00","end_time":"21:00","start_date":"2026-09-01"}`)
+	if resp.StatusCode != 400 {
+		t.Errorf("bad weekday status=%d want 400", resp.StatusCode)
+	}
+	// end before start.
+	resp2 := doReq(t, h.router, "POST", "/series", "tok-se-a",
+		`{"facility_id":"`+fac+`","customer_name":"x","weekday":1,"start_time":"21:00","end_time":"19:00","start_date":"2026-09-01"}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("end<start status=%d want 400", resp2.StatusCode)
+	}
+}
+
+// TestSeries_Isolation: B cannot see A's series.
+func TestSeries_Isolation(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fac := facilityID(t, ctx, h.adminPool, "se-a")
+	doReq(t, h.router, "POST", "/series", "tok-se-a",
+		`{"facility_id":"`+fac+`","customer_name":"A","weekday":2,"start_time":"19:00","end_time":"21:00","start_date":"2026-09-01"}`).Body.Close()
+	respL := doReq(t, h.router, "GET", "/series", "tok-se-b", "")
 	mL := readJSON(t, respL)
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
-		t.Errorf("B saw %d members, want 0", len(items))
-	}
-	respG := doReq(t, h.router, "GET", "/members/"+id, "tok-mem-b", "")
-	if respG.StatusCode != 404 {
-		t.Errorf("B get status=%d want 404", respG.StatusCode)
-	}
-	respT := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-b", `{"amount":1000}`)
-	if respT.StatusCode != 404 {
-		t.Errorf("B topup status=%d want 404", respT.StatusCode)
+		t.Errorf("B saw %d series, want 0", len(items))
 	}
 }
