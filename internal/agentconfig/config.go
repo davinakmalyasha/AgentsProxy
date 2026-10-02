@@ -10,7 +10,8 @@
 // The split this package enforces:
 //
 //	declaration -> data      prompts, skills, knowledge, MCP servers
-//	implementation -> code   the Run functions in AgentsTools
+//	implementation -> code   the Run functions in tenants/<slug>/tools
+//	                        and the feature handlers in tenants/<slug>/backend
 //
 // A tenant folder can therefore change what its agent knows without a
 // rebuild, but it can never introduce new behaviour or a new SQL statement.
@@ -32,7 +33,7 @@ import (
 
 // Project is one tenant's agent configuration.
 type Project struct {
-	// Slug is the tenant id it serves, from AgentsMemory/<Dir>/project.json.
+	// Slug is the tenant id it serves, from tenants/<dir>/memory/project.json.
 	// Lowercase, no spaces: it is an identifier, not a label.
 	Slug string
 	// Display is the human name, used in logs and the MCP description.
@@ -81,7 +82,7 @@ type Document struct {
 	Body string
 }
 
-// Skill is one .md file under AgentsSkills/<Tenant>/. Every skill is
+// Skill is one .md file under tenants/<slug>/skills/. Every skill is
 // injected whole, every turn: a tenant's skills file is the procedures it
 // wants followed, and a procedure injected only sometimes is followed only
 // sometimes. If the file ever grows noisy enough that always-on hurts, split

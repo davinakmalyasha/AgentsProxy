@@ -1,9 +1,9 @@
-// Package agentprojects embeds the four per-tenant folders into the binary.
+// Package agentprojects embeds the tenants/ tree into the binary.
 //
 // It exists for one mechanical reason: go:embed patterns are relative to
 // the source file and may not use "..", so only a file at the repository
-// root can cover AgentsTools, AgentsSkills, AgentsMcp and AgentsMemory.
-// This file has no logic; internal/agentconfig does the loading.
+// root can cover tenants/. This file has no logic;
+// internal/agentconfig does the loading.
 //
 // Embedding rather than reading from disk at runtime because a per-tenant
 // folder that only exists on one machine is a deployment accident, not a
@@ -13,11 +13,11 @@ package agentprojects
 
 import "embed"
 
-// AgentsFS carries every tenant's agent folders into the binary.
+// AgentsFS carries every tenant's folders into the binary.
 //
-// Underscore-prefixed template directories are embedded too and skipped by
-// the loader; embedding them keeps `go build` honest about their syntax
-// without treating them as live tenants.
+// The _template tenant is embedded too and skipped by the loader;
+// embedding it keeps `go build` honest about its syntax without treating
+// it as a live tenant.
 //
-//go:embed all:AgentsTools all:AgentsSkills all:AgentsMcp all:AgentsMemory
+//go:embed all:tenants
 var AgentsFS embed.FS

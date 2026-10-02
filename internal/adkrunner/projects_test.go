@@ -136,7 +136,7 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	}
 }
 
-// TestSkillsAreAlwaysInjectedWhole: every skill in AgentsSkills/<Tenant>/ is
+// TestSkillsAreAlwaysInjectedWhole: every skill in tenants/<slug>/skills/ is
 // injected whole, every turn. A tenant's skills file is the procedures it
 // wants followed; injecting a procedure only sometimes means it is followed
 // only sometimes.

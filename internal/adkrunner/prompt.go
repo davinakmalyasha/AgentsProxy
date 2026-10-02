@@ -28,9 +28,9 @@ import (
 // Layers, in the order they are appended:
 //
 //	1. role base        the platform rules, same for every tenant
-//	2. tenant prompt    AgentsMemory/<Tenant>/SystemPrompt.md
-//	3. knowledge        Information/*.md -- what is TRUE about this venue
-//	4. skills           AgentsSkills/<Tenant>/*.md -- HOW to do things
+//	2. tenant prompt    tenants/<slug>/memory/SystemPrompt.md
+//	3. knowledge        memory/Information/*.md -- what is TRUE about this venue
+//	4. skills           tenants/<slug>/skills/*.md -- HOW to do things
 //	5. runtime          today's date, the tenant's name, the tools available
 //
 // Layered rather than concatenated because each layer has a different owner

@@ -11,41 +11,27 @@ import (
 	agentprojects "github.com/davinakmalyasha/agents-proxy"
 )
 
-// Load parses every tenant under the four top-level folders.
+// Load parses every tenant under tenants/<slug>/.
 //
-// Tenants are discovered from AgentsMemory/: every tenant has a memory
-// (a prompt and knowledge), while tools, skills and MCP servers are
-// optional. A directory present in one folder but missing from AgentsMemory
-// is not a tenant, it is a mistake -- and Load fails on it rather than
-// silently ignoring half a tenant.
+// Tenants are discovered from tenants/: every subdirectory except
+// _template is a tenant. Tools and backend are compiled Go, not folders
+// the loader reads -- a tenant's code reaches the binary through blank
+// imports in main.go, while this loader reads only the declarative
+// parts (memory, skills, mcp). The two halves meet at boot validation,
+// which checks the loaded config against the live tool registry.
 //
 // It does not validate against a tool registry; call Validate with the live
 // registry once the tools are built. Separation matters: config can be
 // parsed without a database, so a config error is reported as a config
 // error rather than surfacing as a connection failure.
 func Load() (map[string]*Project, error) {
-	memoryDirs, err := listTenants("AgentsMemory")
+	tenantDirs, err := listTenants("tenants")
 	if err != nil {
 		return nil, err
 	}
-	// Every folder that names a tenant must agree on the set. A tenant in
-	// AgentsTools but not in AgentsMemory is a deployment halfway done, and
-	// running with half a tenant is worse than not starting.
-	for _, folder := range []string{"AgentsTools", "AgentsSkills", "AgentsMcp"} {
-		dirs, err := listTenants(folder)
-		if err != nil {
-			return nil, err
-		}
-		for d := range dirs {
-			if !memoryDirs[d] {
-				return nil, fmt.Errorf("tenant %q has a %s/ folder but no AgentsMemory/ folder; "+
-					"a tenant must exist in all four folders or none -- scaffold it or remove it", d, folder)
-			}
-		}
-	}
 
-	out := make(map[string]*Project, len(memoryDirs))
-	for dir := range memoryDirs {
+	out := make(map[string]*Project, len(tenantDirs))
+	for dir := range tenantDirs {
 		p, err := loadOne(dir)
 		if err != nil {
 			return nil, err
@@ -53,12 +39,13 @@ func Load() (map[string]*Project, error) {
 		out[p.Slug] = p
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no tenants found under AgentsMemory/")
+		return nil, fmt.Errorf("no tenants found under tenants/")
 	}
 	return out, nil
 }
 
-// listTenants returns the non-template directories under a top-level folder.
+// listTenants returns the non-template directories under a folder of the
+// embedded tree (tenants/ at top level, _template skipped).
 func listTenants(folder string) (map[string]bool, error) {
 	entries, err := fs.ReadDir(agentprojects.AgentsFS, folder)
 	if err != nil {
@@ -81,7 +68,7 @@ func loadOne(dir string) (*Project, error) {
 	// lowercased directory name keeps a project working if project.json is
 	// forgotten, which is a mistake worth having a visible default for.
 	p := &Project{Slug: strings.ToLower(dir), Display: dir}
-	memoryRoot := path.Join("AgentsMemory", dir)
+	memoryRoot := path.Join("tenants", dir, "memory")
 
 	if raw, err := fs.ReadFile(agentprojects.AgentsFS, path.Join(memoryRoot, "project.json")); err == nil {
 		var doc struct {
@@ -121,7 +108,7 @@ func loadOne(dir string) (*Project, error) {
 	}
 	p.Skills = skills
 
-	if raw, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("AgentsMcp", dir, "mcp.json")); err == nil {
+	if raw, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("tenants", dir, "mcp", "mcp.json")); err == nil {
 		// Object form, not a bare array, so the file can carry a comment
 		// explaining why the list is empty -- which is the first question
 		// anyone asks when they open it.
@@ -166,7 +153,7 @@ func loadDocs(dir string) ([]Document, error) {
 	return out, nil
 }
 
-// loadSkills reads every .md under AgentsSkills/<dir>/ as one skill each.
+// loadSkills reads every .md under tenants/<dir>/skills/ as one skill each.
 //
 // Every skill is always injected, whole. There is no trigger index and no
 // selective matching: a tenant's skills file is the procedures it wants
@@ -174,21 +161,21 @@ func loadDocs(dir string) ([]Document, error) {
 // follows only sometimes. If the file ever grows noisy enough that always-on
 // hurts, split it -- do not add a matching layer on top.
 func loadSkills(dir string) ([]Skill, error) {
-	entries, err := fs.ReadDir(agentprojects.AgentsFS, path.Join("AgentsSkills", dir))
+	entries, err := fs.ReadDir(agentprojects.AgentsFS, path.Join("tenants", dir, "skills"))
 	if err != nil {
 		if isNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read AgentsSkills/%s/: %w", dir, err)
+		return nil, fmt.Errorf("read tenants/%s/skills/: %w", dir, err)
 	}
 	var out []Skill
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
-		b, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("AgentsSkills", dir, e.Name()))
+		b, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("tenants", dir, "skills", e.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("read AgentsSkills/%s/%s: %w", dir, e.Name(), err)
+			return nil, fmt.Errorf("read tenants/%s/skills/%s: %w", dir, e.Name(), err)
 		}
 		out = append(out, Skill{
 			Name:  strings.TrimSuffix(e.Name(), ".md"),

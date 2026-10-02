@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// TestTenantsLoadFromTheFourFolders is the one that would have caught a
+// TestTenantsLoadFromTheTenantsTree is the one that would have caught a
 // missing or malformed tenant folder before it reached a running agent.
 // Parsing happens at boot, so this is cheap insurance that the embedded
 // tree is actually loadable.
-func TestTenantsLoadFromTheFourFolders(t *testing.T) {
+func TestTenantsLoadFromTheTenantsTree(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -48,7 +48,7 @@ func TestTenantsLoadFromTheFourFolders(t *testing.T) {
 	}
 }
 
-// TestSkillBodiesLoad: every .md under AgentsSkills/<Tenant>/ is one skill,
+// TestSkillBodiesLoad: every .md under tenants/<slug>/skills/ is one skill,
 // injected whole. An empty file is a procedure that says nothing.
 func TestSkillBodiesLoad(t *testing.T) {
 	projects, err := Load()
@@ -71,22 +71,24 @@ func TestSkillBodiesLoad(t *testing.T) {
 	}
 }
 
-// TestHalfPresentTenantFailsLoad: a tenant in one folder but missing from
-// AgentsMemory is a deployment halfway done. Running with half a tenant is
-// worse than not starting, so Load must fail rather than skip it.
-func TestHalfPresentTenantFailsLoad(t *testing.T) {
-	// Exercised structurally: the loader rejects any directory present in
-	// AgentsTools, AgentsSkills or AgentsMcp but absent from AgentsMemory.
-	// A synthetic half-tenant cannot be injected into the embedded FS, so
-	// this documents the invariant that TestTenantsLoadFromTheFourFolders
-	// would break on: every live tenant resolves through AgentsMemory.
+// TestAllDiscoveredTenantsValidate: with tools and backend compiled in,
+// the only thing that can make a tenant half-present is a malformed
+// declarative folder -- and that must fail here, not in production boot.
+// (The old cross-folder agreement check died with the four folders:
+// there is only one tenant tree now, discovered from tenants/.)
+func TestAllDiscoveredTenantsValidate(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for slug := range projects {
+	for slug, p := range projects {
 		if slug == "" {
 			t.Error("a tenant loaded with an empty slug")
+		}
+		// Same shape as the centrum check below: identity, budgets,
+		// skills, knowledge and MCP entries, no registry needed.
+		if err := Validate(p, map[string]bool{}, map[string]bool{}, RoleCeiling{}, DefaultBudget()); err != nil {
+			t.Errorf("tenant %q invalid: %v", slug, err)
 		}
 	}
 }
@@ -161,7 +163,7 @@ func TestCentrumConfigIsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := projects["centrum"]
-	// Tool declarations live in AgentsTools .go files now, not in the
+	// Tool declarations live in tenants/<slug>/tools/*.go now, not in the
 	// folders, so there is no per-tool registry to check here. What this
 	// asserts is everything the folders DO own: identity, budgets, skills,
 	// knowledge and MCP entries.
