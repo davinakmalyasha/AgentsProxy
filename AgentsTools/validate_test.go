@@ -4,7 +4,7 @@
 // model's arguments against them. Run unmarshals into a struct, which is a
 // no-op for a wrong-typed field, so bad arguments silently ran the tool
 // with zero values and reported success.
-package agent
+package agentstools
 
 import (
 	"encoding/json"
@@ -38,7 +38,7 @@ func TestValidateAcceptsWhatTheSchemaAllows(t *testing.T) {
 		{dateSchema, `null`},
 	}
 	for i, c := range cases {
-		if err := validateArgs(mustRaw(t, c.schema), mustRaw(t, c.args)); err != nil {
+		if err := ValidateArgs(mustRaw(t, c.schema), mustRaw(t, c.args)); err != nil {
 			t.Errorf("case %d: unexpected error: %v", i, err)
 		}
 	}
@@ -50,7 +50,7 @@ func TestValidateRejectsMalformedDates(t *testing.T) {
 	// confident answer about the wrong period rather than an error.
 	for _, bad := range []string{`"15-10-2026"`, `"2026-13-01"`, `"2026-02-30"`, `"oktober"`, `""`, `20261001`} {
 		args := `{"from":` + bad + `}`
-		if err := validateArgs(mustRaw(t, dateSchema), mustRaw(t, args)); err == nil {
+		if err := ValidateArgs(mustRaw(t, dateSchema), mustRaw(t, args)); err == nil {
 			t.Errorf("date %s should have been rejected", bad)
 		}
 	}
@@ -58,7 +58,7 @@ func TestValidateRejectsMalformedDates(t *testing.T) {
 
 func TestValidateAcceptsRealLeapDay(t *testing.T) {
 	// Guards against a validator that only checks the shape.
-	if err := validateArgs(mustRaw(t, dateSchema), mustRaw(t, `{"from":"2028-02-29"}`)); err != nil {
+	if err := ValidateArgs(mustRaw(t, dateSchema), mustRaw(t, `{"from":"2028-02-29"}`)); err != nil {
 		t.Errorf("2028 is a leap year, should be accepted: %v", err)
 	}
 }
@@ -66,27 +66,27 @@ func TestValidateAcceptsRealLeapDay(t *testing.T) {
 func TestValidateRejectsWrongTypes(t *testing.T) {
 	// The bug this replaces: {"limit":"abc"} reached Run, Left Limit at 0,
 	// and the tool used its default while reporting success.
-	if err := validateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":"abc"}`)); err == nil {
+	if err := ValidateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":"abc"}`)); err == nil {
 		t.Error("a non-numeric limit should be rejected")
 	}
 	// A fractional value where a whole number is declared.
-	if err := validateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":1.5}`)); err == nil {
+	if err := ValidateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":1.5}`)); err == nil {
 		t.Error("a fractional limit should be rejected")
 	}
 	// An object where a string is declared.
-	if err := validateArgs(mustRaw(t, dateSchema), mustRaw(t, `{"from":{"y":2026}}`)); err == nil {
+	if err := ValidateArgs(mustRaw(t, dateSchema), mustRaw(t, `{"from":{"y":2026}}`)); err == nil {
 		t.Error("an object where a date string is declared should be rejected")
 	}
 }
 
 func TestValidateEnforcesMinimum(t *testing.T) {
-	if err := validateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":0}`)); err == nil {
+	if err := ValidateArgs(mustRaw(t, limitSchema), mustRaw(t, `{"limit":0}`)); err == nil {
 		t.Error("limit 0 violates minimum 1 and should be rejected")
 	}
 }
 
 func TestValidateEnforcesEnum(t *testing.T) {
-	err := validateArgs(mustRaw(t, enumSchema), mustRaw(t, `{"type":"sewa"}`))
+	err := ValidateArgs(mustRaw(t, enumSchema), mustRaw(t, `{"type":"sewa"}`))
 	if err == nil {
 		t.Fatal("a value outside the enum should be rejected")
 	}
@@ -99,17 +99,17 @@ func TestValidateEnforcesEnum(t *testing.T) {
 
 func TestValidateEnforcesRequired(t *testing.T) {
 	schema := `{"type":"object","required":["booking_id"],"properties":{"booking_id":{"type":"string"}}}`
-	if err := validateArgs(mustRaw(t, schema), mustRaw(t, `{}`)); err == nil {
+	if err := ValidateArgs(mustRaw(t, schema), mustRaw(t, `{}`)); err == nil {
 		t.Error("a missing required argument should be rejected")
 	}
-	if err := validateArgs(mustRaw(t, schema), mustRaw(t, `{"booking_id":"x"}`)); err != nil {
+	if err := ValidateArgs(mustRaw(t, schema), mustRaw(t, `{"booking_id":"x"}`)); err != nil {
 		t.Errorf("present required argument should pass: %v", err)
 	}
 }
 
 func TestValidateRejectsNonObjectArguments(t *testing.T) {
 	for _, bad := range []string{`[]`, `"text"`, `42`, `true`} {
-		if err := validateArgs(mustRaw(t, dateSchema), mustRaw(t, bad)); err == nil {
+		if err := ValidateArgs(mustRaw(t, dateSchema), mustRaw(t, bad)); err == nil {
 			t.Errorf("arguments %s should be rejected", bad)
 		}
 	}
@@ -118,11 +118,11 @@ func TestValidateRejectsNonObjectArguments(t *testing.T) {
 func TestValidateToleratesMissingOrBrokenSchema(t *testing.T) {
 	// A schema we cannot parse is our bug, not the caller's. Blocking a
 	// working tool over it would turn a typo in meta.go into an outage.
-	if err := validateArgs(nil, mustRaw(t, `{"limit":0}`)); err != nil {
+	if err := ValidateArgs(nil, mustRaw(t, `{"limit":0}`)); err != nil {
 		t.Errorf("nil schema should skip validation, got %v", err)
 	}
 	// Deliberately not valid JSON, so it bypasses mustRaw.
-	if err := validateArgs(json.RawMessage(`not json`), mustRaw(t, `{"limit":0}`)); err != nil {
+	if err := ValidateArgs(json.RawMessage(`not json`), mustRaw(t, `{"limit":0}`)); err != nil {
 		t.Errorf("unparseable schema should skip validation, got %v", err)
 	}
 }
@@ -231,10 +231,10 @@ func TestBookSlotRequiresItsIdentifyingArguments(t *testing.T) {
 	}
 	// And the arguments must validate, so a malformed call is rejected
 	// before the INSERT rather than committing an empty facility_id.
-	if err := validateArgs(tool.Parameters, mustRaw(t, `{"facility_id":"f1"}`)); err == nil {
+	if err := ValidateArgs(tool.Parameters, mustRaw(t, `{"facility_id":"f1"}`)); err == nil {
 		t.Error("a call missing date/times/name should be rejected")
 	}
-	if err := validateArgs(tool.Parameters, mustRaw(t,
+	if err := ValidateArgs(tool.Parameters, mustRaw(t,
 		`{"facility_id":"f1","date":"2026-09-10","start_time":"19:00","end_time":"20:00","customer_name":"Alice"}`)); err != nil {
 		t.Errorf("a complete call should validate: %v", err)
 	}

@@ -20,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
@@ -144,7 +145,7 @@ func TestManager_EndToEndBook(t *testing.T) {
 	llmCli := llm.New(fakeLLM.URL, "sk-test", "mock-model", 512)
 
 	mgr := NewManager(adminPool,
-		agent.New(llmCli, agent.NewToolSet(pool), &agent.History{RDB: rdb}),
+		agent.New(llmCli, agentstools.NewToolSet(pool), &agent.History{RDB: rdb}),
 		vaultKey, "", true, 0)
 	defer mgr.Close()
 	mgr.Sync(ctx)

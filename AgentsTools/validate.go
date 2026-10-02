@@ -1,4 +1,4 @@
-package agent
+package agentstools
 
 import (
 	"encoding/json"
@@ -25,10 +25,10 @@ import (
 // Unknown keywords are ignored rather than rejected, so adding one to a
 // schema cannot start failing calls.
 
-// validateArgs checks decoded arguments against a schema. It returns an
+// ValidateArgs checks decoded arguments against a schema. It returns an
 // error phrased for the model, because the caller feeds it back as the
 // tool result so the model can correct itself on the next round.
-func validateArgs(schema, args json.RawMessage) error {
+func ValidateArgs(schema, args json.RawMessage) error {
 	if len(schema) == 0 {
 		return nil
 	}
@@ -89,7 +89,7 @@ func validateValue(name string, prop map[string]any, raw json.RawMessage) error 
 			return fmt.Errorf("%s must be a YYYY-MM-DD date string", name)
 		}
 		if _, err := time.Parse("2006-01-02", strings.TrimSpace(s)); err != nil {
-			return fmt.Errorf("%s must be a YYYY-MM-DD date, got %q", name, truncate(s, 32))
+			return fmt.Errorf("%s must be a YYYY-MM-DD date, got %q", name, Truncate(s, 32))
 		}
 		return nil
 	}
@@ -109,7 +109,7 @@ func validateValue(name string, prop map[string]any, raw json.RawMessage) error 
 			}
 		}
 		if !match {
-			return fmt.Errorf("%s must be one of [%s], got %q", name, strings.Join(allowed, ", "), truncate(got, 32))
+			return fmt.Errorf("%s must be one of [%s], got %q", name, strings.Join(allowed, ", "), Truncate(got, 32))
 		}
 		return nil
 	}

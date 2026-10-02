@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
@@ -15,8 +17,8 @@ import (
 // may exceed the platform ceiling. Those are the three ways a config file
 // could describe a system that is not the one running.
 func TestCentrumProjectValidatesAgainstTheRegistry(t *testing.T) {
-	ts := NewToolSet(nil)
-	projects, err := LoadProjects(ts)
+	ts := agentstools.NewToolSet(nil)
+	projects, err := agentstools.LoadProjects(ts)
 	if err != nil {
 		t.Fatalf("projects must load and validate at boot: %v", err)
 	}
@@ -41,20 +43,20 @@ func TestCentrumProjectValidatesAgainstTheRegistry(t *testing.T) {
 // routing comes from the compiled tables. This pins that the move did not
 // silently change what any question reaches.
 func TestProjectRoutingSurvivesTheMove(t *testing.T) {
-	base := NewToolSet(nil)
-	projects, err := LoadProjects(base)
+	base := agentstools.NewToolSet(nil)
+	projects, err := agentstools.LoadProjects(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	applied := base.ApplyProject(projects["centrum"])
 
 	// The reported failure, end to end.
-	got := applied.route("hari ini ada pesanan?")
+	got := applied.Route("hari ini ada pesanan?")
 	if got.Tool != "list_bookings" {
 		t.Errorf("route(%q) = %q, want list_bookings", "hari ini ada pesanan?", got.Tool)
 	}
 	// And the write tool must still win when the owner means the verb.
-	if got := applied.route("pesan lapangan jam 9 besok"); got.Tool != "book_slot" {
+	if got := applied.Route("pesan lapangan jam 9 besok"); got.Tool != "book_slot" {
 		t.Errorf("route(booking request) = %q, want book_slot", got.Tool)
 	}
 }
@@ -62,7 +64,7 @@ func TestProjectRoutingSurvivesTheMove(t *testing.T) {
 // TestApplyProjectCannotWidenAccess is the security property. The project
 // file may remove tools and may remove roles; it may never grant either.
 func TestApplyProjectCannotWidenAccess(t *testing.T) {
-	base := NewToolSetFor(nil, "pegawai")
+	base := agentstools.NewToolSetFor(nil, "pegawai")
 	before := base.Names()
 
 	// A project that claims a tool the role cannot call, and gives a tool
@@ -109,7 +111,7 @@ func TestApplyProjectCannotWidenAccess(t *testing.T) {
 // never from the config. If a project could call book_slot a read, the gate
 // would honour it unpinned and the original security hole returns.
 func TestApplyProjectCannotReclassifyAWrite(t *testing.T) {
-	base := NewToolSet(nil)
+	base := agentstools.NewToolSet(nil)
 	no := false
 	p := &agentconfig.Project{
 		Slug:     "liar",
@@ -130,8 +132,8 @@ func TestApplyProjectCannotReclassifyAWrite(t *testing.T) {
 // text, and must NOT still be carrying the hardcoded Centrum contact from
 // the old Go source.
 func TestPromptLayersUseProjectContent(t *testing.T) {
-	ts := NewToolSet(nil)
-	projects, err := LoadProjects(ts)
+	ts := agentstools.NewToolSet(nil)
+	projects, err := agentstools.LoadProjects(ts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,8 +159,8 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 // wants followed; injecting a procedure only sometimes means it is followed
 // only sometimes.
 func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
-	ts := NewToolSet(nil)
-	projects, err := LoadProjects(ts)
+	ts := agentstools.NewToolSet(nil)
+	projects, err := agentstools.LoadProjects(ts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +182,7 @@ func TestSkillsAreAlwaysInjectedWhole(t *testing.T) {
 // TestPromptWithoutProjectStillWorks: an unconfigured tenant must keep a
 // working agent. Config is an addition, not a precondition.
 func TestPromptWithoutProjectStillWorks(t *testing.T) {
-	ts := NewToolSet(nil)
+	ts := agentstools.NewToolSet(nil)
 	got := Assemble(Layers{Role: "owner", Vertical: "sports", ToolDefs: ts.Definitions()})
 	if len(got) < 200 {
 		t.Errorf("a tenant with no project config got a near-empty prompt (%d chars)", len(got))

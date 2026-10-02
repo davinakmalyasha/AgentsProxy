@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
@@ -124,8 +126,8 @@ func main() {
 	}
 	defer rdb.Close()
 	slog.Info("redis connected")
-	agent.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
-	agent.CapRDB = rdb    // per-tenant daily cost cap (unconditional â€” must not depend on Telegram)
+	agentstools.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
+	agentstools.CapRDB = rdb    // per-tenant daily cost cap (unconditional â€” must not depend on Telegram)
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
@@ -140,7 +142,7 @@ func main() {
 	// produces an agent that looks configured and quietly cannot do its job.
 	// The owner finds out at 3am as "I couldn't reach the system"; the
 	// deploy finds out in a second.
-	projects, err := agent.LoadProjects(agent.NewToolSet(pool))
+	projects, err := agentstools.LoadProjects(agentstools.NewToolSet(pool))
 	if err != nil {
 		slog.Error("agent project config is invalid", "err", err)
 		return
@@ -186,7 +188,7 @@ func main() {
 	if vaultErr == nil {
 		telegram_feature.VaultKey = tgVaultKey
 		telegram_feature.PublicURL = cfg.PublicURL
-		ag := agent.New(llmCli, agent.NewToolSet(pool), &agent.History{RDB: rdb}).WithProjects(projects)
+		ag := agent.New(llmCli, agentstools.NewToolSet(pool), &agent.History{RDB: rdb}).WithProjects(projects)
 		tgMgr = telegram.NewManager(adminPool, ag, tgVaultKey, cfg.PublicURL, cfg.TelegramPollDev, cfg.TelegramConcurrency)
 		tgMgr.Sync(context.Background())
 		slog.Info("telegram manager started", "bots", tgMgr.Count(),

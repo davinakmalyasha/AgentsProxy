@@ -1,4 +1,4 @@
-package agent
+package agentstools
 
 import (
 	"path/filepath"
@@ -30,20 +30,20 @@ func sampleReportData() reportData {
 }
 
 func TestIdr(t *testing.T) {
-	if got := idr(1500000); got != "1.500.000" {
-		t.Fatalf("idr(1500000) = %q", got)
+	if got := Idr(1500000); got != "1.500.000" {
+		t.Fatalf("Idr(1500000) = %q", got)
 	}
-	if got := idr(50000); got != "50.000" {
-		t.Fatalf("idr(50000) = %q", got)
+	if got := Idr(50000); got != "50.000" {
+		t.Fatalf("Idr(50000) = %q", got)
 	}
-	if got := idr(-4404999); got != "-4.404.999" {
-		t.Fatalf("idr(-4404999) = %q", got)
+	if got := Idr(-4404999); got != "-4.404.999" {
+		t.Fatalf("Idr(-4404999) = %q", got)
 	}
-	if got := rp(-4404999); got != "-Rp4.404.999" {
-		t.Fatalf("rp(-4404999) = %q", got)
+	if got := Rp(-4404999); got != "-Rp4.404.999" {
+		t.Fatalf("Rp(-4404999) = %q", got)
 	}
-	if got := rp(95000); got != "Rp95.000" {
-		t.Fatalf("rp(95000) = %q", got)
+	if got := Rp(95000); got != "Rp95.000" {
+		t.Fatalf("Rp(95000) = %q", got)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestParseXLSXMarker(t *testing.T) {
 }
 
 func TestBuildReportWorkbook(t *testing.T) {
-	f, err := buildReportWorkbook(sampleReportData(), "centrum", "2026-09-01", "2026-10-01")
+	f, err := BuildReportWorkbook(sampleReportData(), "centrum", "2026-09-01", "2026-10-01")
 	if err != nil {
 		t.Fatal(err)
 	}

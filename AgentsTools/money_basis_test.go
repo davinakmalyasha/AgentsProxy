@@ -1,4 +1,4 @@
-// DB-free tests for the shared money basis.
+// DB-free tests for the shared money Basis.
 //
 // The agent had three different answers for "how much money is there":
 // query_income and query_net_profit summed booking prices (value
@@ -9,7 +9,7 @@
 //
 // These tests pin the arithmetic that keeps the two figures distinct, so
 // a future edit cannot quietly collapse one into the other.
-package agent
+package agentstools
 
 import (
 	"strings"
@@ -17,7 +17,7 @@ import (
 )
 
 func TestReceivedAddsEveryMoneySource(t *testing.T) {
-	b := basis{Cash: 100000, QRIS: 50000, Other: 25000, Kantin: 30000}
+	b := Basis{Cash: 100000, QRIS: 50000, Other: 25000, Kantin: 30000}
 	// Cash + QRIS + any other method + canteen. The "Other" bucket exists
 	// because the old query filtered only on cash/qris and would have
 	// silently dropped a transfer as if it did not exist.
@@ -29,25 +29,25 @@ func TestReceivedAddsEveryMoneySource(t *testing.T) {
 func TestReceivedIgnoresCommittedValue(t *testing.T) {
 	// The whole point: 3 bookings worth 450.000 with nothing collected
 	// is zero received, not 450.000.
-	b := basis{Cash: 50000, Booked: 450000}
+	b := Basis{Cash: 50000, Booked: 450000}
 	if got := b.Received(); got != 50000 {
 		t.Errorf("Received() = %v, want 50000 (Booked must not count as income)", got)
 	}
 }
 
 func TestReceivedWithNoActivity(t *testing.T) {
-	var b basis
+	var b Basis
 	if got := b.Received(); got != 0 {
-		t.Errorf("Received() on an empty basis = %v, want 0", got)
+		t.Errorf("Received() on an empty Basis = %v, want 0", got)
 	}
-	if got := b.describe(); !strings.Contains(got, "terima 0") {
+	if got := b.Describe(); !strings.Contains(got, "terima 0") {
 		t.Errorf("describe() should lead with a zero received figure, got %q", got)
 	}
 }
 
 func TestDescribeLabelsBothFigures(t *testing.T) {
-	b := basis{Cash: 120000, QRIS: 80000, Kantin: 45000, Booked: 400000}
-	got := b.describe()
+	b := Basis{Cash: 120000, QRIS: 80000, Kantin: 45000, Booked: 400000}
+	got := b.Describe()
 	// Both words, so the model has no way to read one as the other.
 	if !strings.Contains(got, "terima") || !strings.Contains(got, "teresan") {
 		t.Errorf("describe() must label both figures, got %q", got)
@@ -71,11 +71,11 @@ func TestDescribeLabelsBothFigures(t *testing.T) {
 }
 
 func TestDescribeNeverPrintsAnEmptyLabel(t *testing.T) {
-	// A zero-valued basis is a normal state (new tenant) and must read
+	// A zero-valued Basis is a normal state (new tenant) and must read
 	// cleanly rather than as "cash 0, qris 0" noise the model has to
 	// explain. It is still allowed here — the point is that it is
 	// unambiguous, not that it is silent.
-	got := basis{}.describe()
+	got := Basis{}.Describe()
 	if strings.Count(got, "terima") != 1 {
 		t.Errorf("describe() should mention 'terima' exactly once, got %q", got)
 	}

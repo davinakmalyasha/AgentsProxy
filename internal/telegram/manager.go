@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 )
@@ -302,9 +303,9 @@ func (m *Manager) handleUpdate(ctx context.Context, mb *ManagedBot, u Update) {
 		return
 	}
 	// Chat-generated .xlsx → document attachment.
-	if path, caption := agent.ParseXLSXMarker(reply); path != "" {
+	if path, caption := agentstools.ParseXLSXMarker(reply); path != "" {
 		token := strings.TrimPrefix(path, "/v1/reports/")
-		if filename, data, derr := agent.ResolveReportDownload(token); derr == nil {
+		if filename, data, derr := agentstools.ResolveReportDownload(token); derr == nil {
 			if caption == "" {
 				caption = "Laporan Excel 🏸"
 			}

@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -106,7 +109,7 @@ func agentHarness(t *testing.T, responses []string, realFacilityID *string) (*Ag
 	}
 	t.Cleanup(func() { rdb.Close() })
 
-	ts := NewToolSet(pool)
+	ts := agentstools.NewToolSet(pool)
 	hist := &History{RDB: rdb}
 	return New(llmCli, ts, hist), pool, rdb
 }

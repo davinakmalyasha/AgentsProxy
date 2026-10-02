@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
@@ -105,7 +106,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	// only); the client tier keeps list_bookings because there the
 	// token pins the tenant via RLS. A public FAQ widget never needed
 	// customer names, so nothing here can leak another tenant's data.
-	ts := agent.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
+	ts := agentstools.NewToolSetFor(h.Pool, "anon").ApplyProject(h.ProjectFor(tenant))
 	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
 	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
 	if err != nil {
@@ -184,7 +185,7 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	if vertical == "" {
 		vertical = "sports"
 	}
-	ts := agent.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
+	ts := agentstools.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
 	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
 	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {

@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
@@ -80,10 +82,23 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 // intPtr is a tiny helper for nullable override_price seeding.
 func intPtr(v int) *int { return &v }
 
+// runTool fetches the registered tool by name rather than calling its
+// constructor. Constructors live in the tenant package and are unexported;
+// the registry is the only way production reaches them, so tests go through
+// it too. That also proves registration happened.
+func runTool(t *testing.T, pool *pgxpool.Pool, name string) agentstools.Tool {
+	t.Helper()
+	tool, ok := agentstools.NewToolSet(pool).Get(name)
+	if !ok {
+		t.Fatalf("tool %q is not registered", name)
+	}
+	return tool
+}
+
 func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(wibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	insert := func(name, status string, price int, override *int, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
@@ -99,9 +114,9 @@ func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 	insert("Bob", "completed", 80, nil, "20:00")            // completed counts, raw 80
 	insert("Eve", "cancelled", 1000, nil, "21:00")          // excluded
 
-	tomorrow := time.Now().In(wibLoc()).AddDate(0, 0, 1).Format("2006-01-02")
+	tomorrow := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02")
 	args, _ := json.Marshal(map[string]string{"from": today, "to": tomorrow})
-	out := queryIncomeTool(pool).Run(ctx, tenant, args)
+	out := runTool(t, pool, "query_income").Run(ctx, tenant, args)
 	if strings.Contains(out, "error") {
 		t.Fatalf("query_income error: %s", out)
 	}
@@ -113,7 +128,7 @@ func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(wibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	seed := func(status string, start string) string {
 		t.Helper()
 		var id string
@@ -132,7 +147,7 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 	var out string
 	var err error
 	doneID := seed("completed", "09:00")
-	out = cancelBookingTool(pool).Run(ctx, tenant, json.RawMessage(`{"booking_id":"`+doneID+`"}`))
+	out = runTool(t, pool, "cancel_booking").Run(ctx, tenant, json.RawMessage(`{"booking_id":"`+doneID+`"}`))
 	if !strings.Contains(out, "cannot cancel") {
 		t.Errorf("completed cancel=%q want 'cannot cancel'", out)
 	}
@@ -145,13 +160,13 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 		t.Errorf("status=%q want completed", status)
 	}
 
-	out = cancelBookingTool(pool).Run(ctx, tenant, json.RawMessage(`{"booking_id":"00000000-0000-0000-0000-000000000000"}`))
+	out = runTool(t, pool, "cancel_booking").Run(ctx, tenant, json.RawMessage(`{"booking_id":"00000000-0000-0000-0000-000000000000"}`))
 	if !strings.Contains(out, "no booking found") {
 		t.Errorf("missing cancel=%q want 'no booking found'", out)
 	}
 
 	liveID := seed("confirmed", "10:00")
-	out = cancelBookingTool(pool).Run(ctx, tenant, json.RawMessage(`{"booking_id":"`+liveID+`"}`))
+	out = runTool(t, pool, "cancel_booking").Run(ctx, tenant, json.RawMessage(`{"booking_id":"`+liveID+`"}`))
 	if !strings.Contains(out, "cancelled") {
 		t.Errorf("valid cancel=%q want cancelled", out)
 	}
@@ -167,7 +182,7 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	today := time.Now().In(wibLoc()).Format("2006-01-02")
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	insert := func(name, phone, status, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
@@ -195,7 +210,7 @@ func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(map[string]int{"limit": 10})
-	out := topCustomersTool(pool).Run(ctx, tenant, args)
+	out := runTool(t, pool, "top_customers").Run(ctx, tenant, args)
 	if strings.Contains(out, "error") {
 		t.Fatalf("top_customers error: %s", out)
 	}
@@ -211,7 +226,7 @@ func TestGetPricing_NoRowVsError(t *testing.T) {
 	ctx, pool, _ := toolTestPool(t)
 	tenant := "tool-test"
 	farFuture := "2999-12-31"
-	out := getPricingTool(pool).Run(ctx, tenant, json.RawMessage(`{"date":"`+farFuture+`"}`))
+	out := runTool(t, pool, "get_pricing").Run(ctx, tenant, json.RawMessage(`{"date":"`+farFuture+`"}`))
 	if !strings.Contains(out, "no pricing") || strings.Contains(out, "error:") {
 		t.Errorf("no-row pricing=%q want clean 'no pricing'", out)
 	}

@@ -16,6 +16,9 @@ package agent
 
 import (
 	"testing"
+
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
 )
 
 // toolsThatReadTenantRows must never be reachable from a tier that runs
@@ -44,7 +47,7 @@ func toolsThatReadTenantRows() []string {
 }
 
 func TestAnonTier_CannotReachTenantRows(t *testing.T) {
-	anon := NewToolSetFor(nil, "anon")
+	anon := agentstools.NewToolSetFor(nil, "anon")
 	for _, name := range toolsThatReadTenantRows() {
 		if _, ok := anon.Get(name); ok {
 			t.Errorf("anon toolset exposes %q, which reads tenant rows", name)
@@ -53,11 +56,11 @@ func TestAnonTier_CannotReachTenantRows(t *testing.T) {
 }
 
 func TestAnonTier_AllowlistIsEmptyOfRowReaders(t *testing.T) {
-	allowed := allowedToolsFor("anon")
+	allowed := agentstools.AllowedToolsFor("anon")
 	for name := range allowed {
 		for _, row := range toolsThatReadTenantRows() {
 			if name == row {
-				t.Errorf("allowedToolsFor(anon) permits %q", name)
+				t.Errorf("agentstools.AllowedToolsFor(anon) permits %q", name)
 			}
 		}
 	}
@@ -66,7 +69,7 @@ func TestAnonTier_AllowlistIsEmptyOfRowReaders(t *testing.T) {
 // The public widget still needs to answer real questions, so the tier
 // must not be empty — an all-denied bot is a regression, not a fix.
 func TestAnonTier_StillAnswersPublicQuestions(t *testing.T) {
-	anon := NewToolSetFor(nil, "anon")
+	anon := agentstools.NewToolSetFor(nil, "anon")
 	for _, want := range []string{"get_pricing", "get_availability"} {
 		if _, ok := anon.Get(want); !ok {
 			t.Errorf("anon toolset lost %q; the landing widget needs it", want)
@@ -82,13 +85,13 @@ func TestAnonTier_StillAnswersPublicQuestions(t *testing.T) {
 // wires them — role "client" for prompt/caps, ToolSet "anon" for tools —
 // and asserts the ToolSet gate is what stops a tenant-row tool.
 func TestClientChatWiring_AnonToolsetBlocksRowsDespiteClientRole(t *testing.T) {
-	ts := NewToolSetFor(nil, "anon") // what ClientChat constructs
-	role := "client"                 // what ClientChat passes to RunWithRole
+	ts := agentstools.NewToolSetFor(nil, "anon") // what ClientChat constructs
+	role := "client"                             // what ClientChat passes to RunWithRole
 
 	// Gate 1 (role allowlist) would permit these - that is fine, gate 2
 	// is the one that must hold.
 	for _, name := range []string{"list_bookings", "query_attendance"} {
-		if !allowedToolsFor(role)[name] {
+		if !agentstools.AllowedToolsFor(role)[name] {
 			t.Logf("note: gate 1 already blocks %q", name)
 		}
 		if _, ok := ts.Get(name); ok {
@@ -105,7 +108,7 @@ func TestClientChatWiring_AnonToolsetBlocksRowsDespiteClientRole(t *testing.T) {
 // The authenticated client tier must KEEP its data tools: that tier
 // exists for API/agent integrations whose token pins the tenant via RLS.
 func TestClientTier_KeepsItsDataTools(t *testing.T) {
-	client := NewToolSetFor(nil, "client")
+	client := agentstools.NewToolSetFor(nil, "client")
 	for _, want := range []string{"list_bookings", "get_pricing", "get_availability"} {
 		if _, ok := client.Get(want); !ok {
 			t.Errorf("client tier lost %q; that would break API integrations", want)
@@ -120,7 +123,7 @@ func TestClientTier_KeepsItsDataTools(t *testing.T) {
 }
 
 func TestOwnerTier_IsUnrestricted(t *testing.T) {
-	owner := NewToolSetFor(nil, "owner")
+	owner := agentstools.NewToolSetFor(nil, "owner")
 	for _, want := range []string{"list_bookings", "query_net_profit", "export_report_excel"} {
 		if _, ok := owner.Get(want); !ok {
 			t.Errorf("owner tier lost %q", want)
@@ -129,7 +132,7 @@ func TestOwnerTier_IsUnrestricted(t *testing.T) {
 }
 
 func TestUnknownRoleGetsNothing(t *testing.T) {
-	ts := NewToolSetFor(nil, "not-a-role")
+	ts := agentstools.NewToolSetFor(nil, "not-a-role")
 	if defs := ts.Definitions(); len(defs) != 0 {
 		t.Errorf("unknown role got %d tools, want 0", len(defs))
 	}
@@ -137,7 +140,7 @@ func TestUnknownRoleGetsNothing(t *testing.T) {
 
 // A tool in the anon tier must still refuse to run against a tenant it
 // was not scoped to. Deliberately does NOT execute a DB tool here:
-// NewToolSetFor(nil, …) builds tools with a nil pool, so Run would panic
+// agentstools.NewToolSetFor(nil, …) builds tools with a nil pool, so Run would panic
 // on the connection rather than prove anything about scoping. The
 // scoping guarantee is RLS plus the per-tool `WHERE tenant_id = $1`,
 // covered by the feature isolation tests in internal/features/….
@@ -146,7 +149,7 @@ func TestUnknownRoleGetsNothing(t *testing.T) {
 // rows, so there is nothing here for a caller-chosen tenant to leak
 // through, and the tier is non-empty so the widget still works.
 func TestAnonTier_ExposesNoRowReaderToScopeAbuse(t *testing.T) {
-	anon := NewToolSetFor(nil, "anon")
+	anon := agentstools.NewToolSetFor(nil, "anon")
 	for _, name := range anon.Definitions() {
 		for _, row := range toolsThatReadTenantRows() {
 			if name == row {

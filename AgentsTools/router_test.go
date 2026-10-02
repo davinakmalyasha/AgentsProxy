@@ -1,4 +1,4 @@
-package agent
+package agentstools
 
 import (
 	"context"
@@ -48,7 +48,7 @@ func TestRoutePicksTheAdvertisedTool(t *testing.T) {
 		"query_kantin_summary", "list_bookings", "book_slot",
 	)
 	for _, c := range cases {
-		got := ts.route(c.message)
+		got := ts.Route(c.message)
 		if got.Tool != c.want {
 			t.Errorf("route(%q) = %q (score %d), want %q", c.message, got.Tool, got.Score, c.want)
 		}
@@ -63,7 +63,7 @@ func TestRouteIsCaseAndPunctuationInsensitive(t *testing.T) {
 		"Buat Closing-Report",
 		"  closing   report  ",
 	} {
-		if got := ts.route(m); got.Tool != "closing_report" {
+		if got := ts.Route(m); got.Tool != "closing_report" {
 			t.Errorf("route(%q) = %q, want closing_report", m, got.Tool)
 		}
 	}
@@ -73,7 +73,7 @@ func TestRouteDeclinesWhenNothingMatches(t *testing.T) {
 	ts := fakeTools(t, "query_income", "closing_report")
 	// Should return no tool rather than guessing, so the model answers from
 	// conversation instead of running an arbitrary query.
-	if got := ts.route("halo, apa kabar?"); got.Tool != "" {
+	if got := ts.Route("halo, apa kabar?"); got.Tool != "" {
 		t.Errorf("route matched %q for a greeting", got.Tool)
 	}
 }
@@ -81,9 +81,9 @@ func TestRouteDeclinesWhenNothingMatches(t *testing.T) {
 func TestRouteIsDeterministic(t *testing.T) {
 	ts := fakeTools(t, "query_income", "query_range_summary", "query_net_profit")
 	msg := "ringkasan pendapatan bulan ini"
-	first := ts.route(msg).Tool
+	first := ts.Route(msg).Tool
 	for i := 0; i < 25; i++ {
-		if got := ts.route(msg).Tool; got != first {
+		if got := ts.Route(msg).Tool; got != first {
 			t.Fatalf("route not deterministic: %q then %q", first, got)
 		}
 	}
@@ -96,7 +96,7 @@ func TestRouteCannotSelectAToolOutsideTheSet(t *testing.T) {
 	for _, n := range []string{"query_income"} {
 		staff.add(ownerOnly.tools[n])
 	}
-	if got := staff.route("Buatkan laporan Excel bulan ini"); got.Tool == "export_report_excel" {
+	if got := staff.Route("Buatkan laporan Excel bulan ini"); got.Tool == "export_report_excel" {
 		t.Error("staff ToolSet routed to an owner-only tool")
 	}
 }
@@ -114,7 +114,7 @@ func TestSanitiseReplyBlocksProtocolMarkup(t *testing.T) {
 		`{"tool": "closing_report", "args": {}}`,
 	}
 	for _, l := range leaks {
-		got := sanitiseReply(l)
+		got := SanitiseReply(l)
 		if strings.Contains(got, "tool_call") || strings.Contains(got, "function") ||
 			strings.Contains(got, "<") {
 			t.Errorf("markup leaked through: %q -> %q", l, got)
@@ -134,14 +134,14 @@ func TestSanitiseReplyPassesOrdinaryText(t *testing.T) {
 		"Stok饮品 habis, ya.",
 		"Jam paling ramai hari ini pukul 19.00.",
 	} {
-		if got := sanitiseReply(ok); got != ok {
+		if got := SanitiseReply(ok); got != ok {
 			t.Errorf("sanitiseReply altered a normal reply: %q -> %q", ok, got)
 		}
 	}
 }
 
 func TestSanitiseReplyHandlesEmpty(t *testing.T) {
-	if got := sanitiseReply("   "); got == "" {
+	if got := SanitiseReply("   "); got == "" {
 		t.Error("empty reply should produce a usable fallback, not an empty string")
 	}
 }
@@ -164,9 +164,9 @@ func TestSanitiseReplyKeepsProseAroundMarkup(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		got := sanitiseReply(c.in)
+		got := SanitiseReply(c.in)
 		if got != c.want {
-			t.Errorf("sanitiseReply(%q) = %q, want %q", c.in, got, c.want)
+			t.Errorf("SanitiseReply(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -177,7 +177,7 @@ func TestSanitiseReplyStripsZeroWidthBypass(t *testing.T) {
 	// emit it. If this regresses, protocol internals reach the user again.
 	zwsp := "\u200b"
 	leak := "<" + zwsp + "tool_call>{function=closing_report}</" + zwsp + "tool_call>"
-	got := sanitiseReply(leak)
+	got := SanitiseReply(leak)
 	if strings.Contains(got, "tool_call") || strings.Contains(got, "function") {
 		t.Errorf("zero-width markup leaked through: %q -> %q", leak, got)
 	}
@@ -186,7 +186,7 @@ func TestSanitiseReplyStripsZeroWidthBypass(t *testing.T) {
 func TestSanitiseReplyRefusesWhenNothingReadableRemains(t *testing.T) {
 	// Markup only, with no prose to salvage: the turn really was nothing
 	// but protocol, so the caller must be told rather than shown "".
-	got := sanitiseReply(`<tool_call>{function=closing_report}</tool_call>`)
+	got := SanitiseReply(`<tool_call>{function=closing_report}</tool_call>`)
 	if strings.TrimSpace(got) == "" {
 		t.Error("markup-only reply should not reduce to an empty message")
 	}
@@ -206,8 +206,8 @@ func TestNormaliseArguments(t *testing.T) {
 		`"a string the model made up"`: `{}`,
 	}
 	for in, want := range cases {
-		if got := string(normaliseArguments(in)); got != want {
-			t.Errorf("normaliseArguments(%q) = %q, want %q", in, got, want)
+		if got := string(NormaliseArguments(in)); got != want {
+			t.Errorf("NormaliseArguments(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -300,7 +300,7 @@ func TestRouteRealOwnerPhrasings(t *testing.T) {
 		{"rekap harian", "closing_report"},
 		{"lapangan kosong besok", "get_availability"},
 	} {
-		got := ts.route(c.msg)
+		got := ts.Route(c.msg)
 		if got.Tool != c.want {
 			t.Errorf("route(%q) = %q (score %d), want %q", c.msg, got.Tool, got.Score, c.want)
 		}
@@ -336,7 +336,7 @@ func TestRouteNeverPinsAWriteToolForAReadQuestion(t *testing.T) {
 		"siapa yang sedang main sekarang?",
 	}
 	for _, msg := range reads {
-		got := ts.route(msg)
+		got := ts.Route(msg)
 		if got.Tool != "" && writes[got.Tool] {
 			t.Errorf("route(%q) pinned write tool %q (score %d); a read question must never do that",
 				msg, got.Tool, got.Score)

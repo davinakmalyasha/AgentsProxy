@@ -1,4 +1,4 @@
-package agent
+package agentstools
 
 import (
 	"strings"
@@ -43,7 +43,7 @@ type routeResult struct {
 // tool name, curated keywords, then description-word overlap. A model call
 // to disambiguate would cost a round-trip and reintroduce the same
 // non-determinism.
-func (ts *ToolSet) route(message string) routeResult {
+func (ts *ToolSet) Route(message string) routeResult {
 	norm := normalise(message)
 	words := tokenize(norm)
 	if len(words) == 0 {

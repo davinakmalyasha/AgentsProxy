@@ -1,12 +1,17 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+)
 
 // TestRouteAgainstRealRegistry routes the prompts the owner UI actually
 // offers, through the real ToolSet — real descriptions, real keyword table.
 // The fake-tool test cannot catch a metadata mistake here.
 func TestOwnerPromptsRouteToTheirTool(t *testing.T) {
-	ts := NewToolSetFor(nil, "owner")
+	ts := agentstools.NewToolSetFor(nil, "owner")
 	cases := []struct {
 		msg  string
 		want string
@@ -24,7 +29,7 @@ func TestOwnerPromptsRouteToTheirTool(t *testing.T) {
 		{"Omzet kantin bulan ini?", "query_kantin_summary"},
 	}
 	for _, c := range cases {
-		if got := ts.route(c.msg); got.Tool != c.want {
+		if got := ts.Route(c.msg); got.Tool != c.want {
 			t.Errorf("route(%q) = %q (score %d), want %q", c.msg, got.Tool, got.Score, c.want)
 		}
 	}

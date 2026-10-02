@@ -16,7 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 )
 
 // Reports serves token-authed report files.
@@ -28,7 +28,7 @@ type Reports struct {
 // full-file buffering — reports can be megabytes).
 func (h *Reports) Download(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSuffix(chi.URLParam(r, "token"), ".xlsx")
-	f, filename, err := agent.OpenReportFile(token)
+	f, filename, err := agentstools.OpenReportFile(token)
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "link kadaluarsa atau tidak dikenal — minta lagi ke bot")
 		return

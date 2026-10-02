@@ -21,7 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 )
@@ -124,7 +124,7 @@ func (s *Server) toolDefs(role string) []toolDef {
 	if role == "admin" {
 		return adminToolDefs()
 	}
-	ts := agent.NewToolSetFor(s.pool, role)
+	ts := agentstools.NewToolSetFor(s.pool, role)
 	out := []toolDef{}
 	for _, d := range ts.Definitions() {
 		// Definitions() yields "- name: description".
@@ -179,7 +179,7 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request, req mcpReque
 		}
 		tenantID = a.TenantID
 	}
-	ts := agent.NewToolSetFor(s.pool, mapRole(role))
+	ts := agentstools.NewToolSetFor(s.pool, mapRole(role))
 	tool, ok := ts.Get(p.Name)
 	if !ok {
 		writeJSON(w, http.StatusOK, mcpResponse{JSONRPC: "2.0", ID: req.ID, Error: &mcpError{Code: -32602, Message: "unknown tool or not allowed for role " + role}})

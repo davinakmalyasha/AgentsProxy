@@ -1,4 +1,4 @@
-package agent
+package agentstools
 
 import (
 	"fmt"
@@ -7,19 +7,18 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
-// LoadProjects parses the embedded project configuration and validates it
+// LoadProjects parses the embedded tenant configuration and validates it
 // against the live tool registry.
 //
 // This runs once at boot and a failure is fatal on purpose. Every mistake it
-// catches -- a tool named in tools.json that nobody implements, a role a
-// project tried to grant itself, a skill whose file is missing -- produces
-// an agent that looks configured and quietly cannot do its job. Finding out
-// at startup costs a failed deploy; finding out at 3am costs the owner a
+// catches -- a tool named in a tenant file that nobody implements, a role a
+// tenant tried to grant itself, a skill file that is missing -- produces an
+// agent that looks configured and quietly cannot do its job. Finding out at
+// startup costs a failed deploy; finding out at 3am costs the owner a
 // conversation with a bot that says it cannot reach the system.
 //
-// Validation is done here rather than in main because it needs the registry,
-// the Mutating flags and the role ceiling, all of which live in this
-// package. main just gets a map or an error.
+// Validation lives here rather than in main because it needs the registry,
+// the Mutating flags and the role ceiling. main just gets a map or an error.
 func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 	projects, err := agentconfig.Load()
 	if err != nil {
@@ -33,13 +32,13 @@ func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 		mutating[name] = tools.tools[name].Mutating
 	}
 
-	// The platform ceiling, straight from allowedToolsFor. A project config
+	// The platform ceiling, straight from allowedToolsFor. A tenant config
 	// is checked against this and may only narrow it.
 	ceiling := agentconfig.RoleCeiling{}
 	for _, role := range []string{"anon", "client", "pegawai", "owner"} {
 		allowed := map[string]bool{}
 		for name := range known {
-			if allowedToolsFor(role)[name] {
+			if AllowedToolsFor(role)[name] {
 				allowed[name] = true
 			}
 		}
@@ -61,20 +60,6 @@ func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 	return projects, nil
 }
 
-// ApplyProject narrows the tool set to what a project actually enables, and
-// folds in that project's keyword tables.
-//
-// Two things happen here, and the second is the reason this is not just a
-// filter:
-//
-//  1. Enabled tools are selected, so a project can say "this venue does not
-//     use set_reminder" without touching Go.
-//  2. Keywords and schemas come from the PROJECT, not from the compiled
-//     table. That is what makes the project folder the source of truth for
-//     routing -- and it is why a project can have "pesanan" reach
-//     list_bookings while book_slot only matches the verb.
-//
-// The Mutating flag is deliberately NOT taken from the project. The gate
 // ApplyProject narrows a role tool set to what a tenant's config allows.
 //
 // Today the loader populates no per-tool specs -- tool declarations live in

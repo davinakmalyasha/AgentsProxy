@@ -1,13 +1,13 @@
 // Chat-generated Excel revenue reports (owner-only).
 //
-// Flow: owner asks in Telegram/staff webapp → export_report_excel tool
-// builds a .xlsx under data/reports/{tenant}/ → mints a 32-byte download
-// token in Redis (30 min TTL, tenant-scoped) → returns an
+// Flow: owner asks in Telegram/staff webapp â†’ export_report_excel Tool
+// builds a .xlsx under data/reports/{tenant}/ â†’ mints a 32-byte download
+// token in Redis (30 min TTL, tenant-scoped) â†’ returns an
 // "XLSX:/v1/reports/{token}.xlsx" marker the LLM presents as a link and
 // the Telegram handler turns into a document attachment.
 //
 // DONE: WS2 (xlsx via chat)
-package agent
+package agentstools
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 )
 
 // ReportRDB stores download tokens. Set once in main.go wiring;
-// nil in tests (tool then reports unavailable).
+// nil in tests (Tool then reports unavailable).
 var ReportRDB *redis.Client
 
 const (
@@ -38,13 +38,13 @@ const (
 	reportTokenPrefix = "rpt:"
 	reportsDir        = "data/reports"
 	reportTokenHexLen = 64 // 32 random bytes
-	maxReportDays     = 370
+	MaxReportDays     = 370
 )
 
 var (
 	hexTokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	tenantRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	dateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	DateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 )
 
 // reportTicket binds a download token to one tenant + one file.
@@ -53,9 +53,9 @@ type reportTicket struct {
 	File   string `json:"file"` // base name only, under reportsDir/tenant/
 }
 
-// ---- marker (agent reply ↔ channels) ----
+// ---- marker (agent reply â†” channels) ----
 
-// XLSXMarkerPrefix starts the download-marker line the tool emits.
+// XLSXMarkerPrefix starts the download-marker line the Tool emits.
 const XLSXMarkerPrefix = "XLSX:"
 
 // ParseXLSXMarker extracts the download path from an agent reply.
@@ -131,60 +131,7 @@ func ResolveReportDownload(token string) (filename string, data []byte, err erro
 	return filepath.Base(t.File), b, nil
 }
 
-// ---- tool ----
-
-func exportReportExcelTool(pool *pgxpool.Pool) Tool {
-	return Tool{
-		Name:        "export_report_excel",
-		Description: `Build a downloadable Excel (.xlsx) revenue report. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD), type? ("lapangan"|"kantin"|"semua", default "semua")}. Defaults to this month, max range 1 year. Returns an XLSX:/v1/reports/... download marker plus a one-line summary — ALWAYS present the marker to the user as the download link, never invent another URL. OWNER ONLY.`,
-		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
-			var p struct {
-				From string `json:"from"`
-				To   string `json:"to"`
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal(args, &p)
-			typ := strings.ToLower(strings.TrimSpace(p.Type))
-			if typ == "" {
-				typ = "semua"
-			}
-			if typ != "lapangan" && typ != "kantin" && typ != "semua" {
-				return `error: type must be "lapangan", "kantin", or "semua"`
-			}
-			from, to := defaultMonthRange(p.From, p.To)
-			if !dateRe.MatchString(from) || !dateRe.MatchString(to) {
-				return "error: from/to must be YYYY-MM-DD"
-			}
-			d0, err0 := time.Parse("2006-01-02", from)
-			d1, err1 := time.Parse("2006-01-02", to)
-			if err0 != nil || err1 != nil || !d1.After(d0) || d1.Sub(d0).Hours()/24 > maxReportDays {
-				return "error: invalid range (need from < to, max 1 year)"
-			}
-			data, err := fetchReportData(ctx, pool, tenantID, from, to)
-			if err != nil {
-				return "error: " + err.Error()
-			}
-			f, err := buildReportWorkbook(data, tenantID, from, to)
-			if err != nil {
-				return "error: " + err.Error()
-			}
-			rel, err := saveReportFile(tenantID, from, to, typ, f)
-			if err != nil {
-				return "error: " + err.Error()
-			}
-			token, err := mintReportToken(tenantID, rel)
-			if err != nil {
-				return "error: " + err.Error()
-			}
-			net := data.Cash + data.Qris + data.KantinOmzet - data.ExpensesTot
-			summary := fmt.Sprintf("Laporan %s–%s: pemasukan %s, pengeluaran %s, bersih %s, %d booking.",
-				from, to, rp(data.Cash+data.Qris+data.KantinOmzet), rp(data.ExpensesTot), rp(net), data.Bookings)
-			return fmt.Sprintf("%s/v1/reports/%s.xlsx\n%s", XLSXMarkerPrefix, token, summary)
-		},
-	}
-}
-
-// ---- data ----
+// ---- Tool ----
 
 type dayRow struct {
 	Date     string
@@ -225,7 +172,7 @@ type reportData struct {
 	KantinModal float64
 }
 
-func fetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to string) (reportData, error) {
+func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to string) (reportData, error) {
 	var d reportData
 	err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		// Lapangan income per day (WIB calendar day, same convention as laporan page).
@@ -343,7 +290,7 @@ func fetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 
 // ---- workbook ----
 
-func idr(v float64) string {
+func Idr(v float64) string {
 	neg := v < 0
 	if neg {
 		v = -v
@@ -365,11 +312,11 @@ func idr(v float64) string {
 }
 
 // rp renders an IDR amount with the sign in front: -Rp4.405.000, Rp95.000.
-func rp(v float64) string {
+func Rp(v float64) string {
 	if v < 0 {
-		return "-Rp" + idr(-v)
+		return "-Rp" + Idr(-v)
 	}
-	return "Rp" + idr(v)
+	return "Rp" + Idr(v)
 }
 
 func headerStyle(f *excelize.File) int {
@@ -385,7 +332,7 @@ func moneyStyle(f *excelize.File) int {
 	return id
 }
 
-func buildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File, error) {
+func BuildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File, error) {
 	f := excelize.NewFile()
 	hs, ms := headerStyle(f), moneyStyle(f)
 
@@ -396,7 +343,7 @@ func buildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File,
 	}
 	net := d.Cash + d.Qris + d.KantinOmzet - d.ExpensesTot
 	rows := [][]any{
-		{"Centrum Badminton — Laporan " + from + " s/d " + to},
+		{"Centrum Badminton â€” Laporan " + from + " s/d " + to},
 		{"Tenant", tenant},
 		{},
 		{"Keterangan", "Jumlah (Rp)"},
@@ -529,7 +476,7 @@ func buildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File,
 
 // ---- storage + tokens ----
 
-func safeTenant(tenant string) string {
+func SafeTenant(tenant string) string {
 	t := strings.ToLower(strings.TrimSpace(tenant))
 	if !tenantRe.MatchString(t) {
 		return "unknown"
@@ -537,8 +484,8 @@ func safeTenant(tenant string) string {
 	return t
 }
 
-func saveReportFile(tenant, from, to, typ string, f *excelize.File) (string, error) {
-	t := safeTenant(tenant)
+func SaveReportFile(tenant, from, to, typ string, f *excelize.File) (string, error) {
+	t := SafeTenant(tenant)
 	dir := filepath.Join(reportsDir, t)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
@@ -554,7 +501,7 @@ func saveReportFile(tenant, from, to, typ string, f *excelize.File) (string, err
 	return name, nil
 }
 
-func mintReportToken(tenant, file string) (string, error) {
+func MintReportToken(tenant, file string) (string, error) {
 	if ReportRDB == nil {
 		return "", fmt.Errorf("report store unavailable (Redis)")
 	}
@@ -563,7 +510,7 @@ func mintReportToken(tenant, file string) (string, error) {
 		return "", err
 	}
 	token := hex.EncodeToString(rb[:])
-	t := reportTicket{Tenant: safeTenant(tenant), File: filepath.Base(file)}
+	t := reportTicket{Tenant: SafeTenant(tenant), File: filepath.Base(file)}
 	b, _ := json.Marshal(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
