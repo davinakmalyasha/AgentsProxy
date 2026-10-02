@@ -732,8 +732,11 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	// opens; the real value is filled in inside the transaction once the
 	// stored start_time is known. Reserving rather than appending is what
 	// keeps the new price from colliding with the id and tenant_id
-	// parameters.
+	// parameters. The reservation is unconditional, because the stored value
+	// is not known until the transaction opens; `reprice` is cleared inside
+	// the tx when the new end_time is not actually an extension.
 	repriceArg := 0
+	reprice := true
 	if req.EndTime != nil {
 		sets = append(sets, "end_time = $"+strconv.Itoa(idx)+"::time")
 		args = append(args, *req.EndTime)
@@ -754,11 +757,11 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		// end_time ordering vs the stored start_time (extend/release), and
 		// the reprice that has to accompany it.
 		if req.EndTime != nil {
-			var start, dateStr string
+			var start, dateStr, storedEnd string
 			if err := tx.QueryRow(r.Context(),
-				`SELECT start_time::text, date::text FROM sports_bookings
-				  WHERE id=$1::uuid AND tenant_id=$2`,
-				id, idn.TenantID()).Scan(&start, &dateStr); err != nil {
+				`SELECT start_time::text, date::text, end_time::text FROM sports_bookings
+			  WHERE id=$1::uuid AND tenant_id=$2`,
+				id, idn.TenantID()).Scan(&start, &dateStr, &storedEnd); err != nil {
 				return err
 			}
 			endT, _ := time.Parse("15:04", *req.EndTime)
@@ -766,31 +769,66 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 			if serr != nil {
 				startT, _ = time.Parse("15:04", start)
 			}
+			storedEndT, eerr := time.Parse("15:04:05", storedEnd)
+			if eerr != nil {
+				storedEndT, _ = time.Parse("15:04", storedEnd)
+			}
 			if !endT.After(startT) {
 				transitionErr = fmt.Errorf("end_time must be after start_time")
 				return transitionErr
 			}
-			// Extending used to cost the customer nothing: the row kept the
-			// price computed for the ORIGINAL window, so extra court time
-			// was given away and never appeared in revenue. Recompute for
-			// the new window instead.
+			// A SHORTENING is a release, not an extension, and must not
+			// reprice.
 			//
-			// This runs for any role on purpose. The figure comes from the
-			// tenant's own pricing rule, never from the request, so it is
-			// not a trust question — and refusing staff would only push
-			// people back to editing the price by hand.
-			date, derr := time.Parse("2006-01-02", dateStr)
-			if derr != nil {
-				return derr
+			// "Kosongkan" sets end_time to the current time to free the rest
+			// of the slot, and its own tooltip promises "uang tetap
+			// dihitung" — the hours already played are still owed. Repricing
+			// shortened the booking to the rate for the time actually used,
+			// so releasing a 3-hour booking after 1 hour cut the committed
+			// value by two thirds, and the schedule and the agent's "teresan"
+			// figure then disagreed with what was charged.
+			//
+			// This slot is reserved whenever end_time is present (the caller
+			// cannot know the stored value), but only filled in when the slot
+			// got LONGER. See repriceArg below.
+			if !endT.After(storedEndT) {
+				reprice = false
 			}
-			newPrice, perr := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, startT, endT)
-			if perr != nil {
-				return perr
+			if reprice {
+				// Extending used to cost the customer nothing: the row kept the
+				// price computed for the ORIGINAL window, so extra court time
+				// was given away and never appeared in revenue. Recompute for
+				// the new window instead.
+				//
+				// This runs for any role on purpose. The figure comes from the
+				// tenant's own pricing rule, never from the request, so it is
+				// not a trust question — and refusing staff would only push
+				// people back to editing the price by hand.
+				date, derr := time.Parse("2006-01-02", dateStr)
+				if derr != nil {
+					return derr
+				}
+				newPrice, perr := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, startT, endT)
+				if perr != nil {
+					return perr
+				}
+				// Fill the slot reserved before the transaction opened. The
+				// SET list and arg order are fixed by then — id and tenant
+				// already occupy the positions after it.
+				args[repriceArg-1] = newPrice
+			} else {
+				// A release keeps the committed value, so the reserved price
+				// argument must be the CURRENT price rather than the
+				// placeholder nil — otherwise this would write NULL and erase
+				// it.
+				var currentPrice float64
+				if err := tx.QueryRow(r.Context(),
+					`SELECT price FROM sports_bookings WHERE id=$1::uuid AND tenant_id=$2`,
+					id, idn.TenantID()).Scan(&currentPrice); err != nil {
+					return err
+				}
+				args[repriceArg-1] = currentPrice
 			}
-			// Fill the slot reserved before the transaction opened. The
-			// SET list and arg order are fixed by then — id and tenant
-			// already occupy the positions after it.
-			args[repriceArg-1] = newPrice
 		}
 		// Validate transition against current status
 		if needsStatusCheck {

@@ -130,6 +130,116 @@ func TestValidateToleratesMissingOrBrokenSchema(t *testing.T) {
 // Every real tool's schema must survive the validator's own parser. A
 // schema written in a shape the validator mishandles would either reject
 // every call or, worse, silently accept anything.
+// A schema property the tool body never reads is a silent failure: the
+// model fills it in correctly, the handler ignores it, and the call fails
+// for a reason that has nothing to do with what the model sent.
+//
+// book_slot had exactly this: the schema declared `court`, the body read
+// `facility_id`, so every booking attempt from chat sent no usable id and
+// came back "unknown facility". The model was doing its job correctly.
+func TestSchemaPropertiesAreAllReadByTheTool(t *testing.T) {
+	ts := NewToolSetFor(nil, "owner")
+	// Declared property -> the json tag the body unmarshals.
+	bodyTags := map[string][]string{
+		"book_slot": {
+			"facility_id", "date", "start_time", "end_time", "customer_name", "customer_phone",
+		},
+		"cancel_booking": {"booking_id"},
+		"list_bookings":  {"date", "status", "facility_id"},
+		"get_pricing":    {},
+		"check_stock":    {"name"},
+	}
+	for tool, tags := range bodyTags {
+		toolDef, ok := ts.Get(tool)
+		if !ok {
+			continue
+		}
+		var s struct {
+			Properties map[string]map[string]any `json:"properties"`
+			Required   []string                  `json:"required"`
+		}
+		if err := json.Unmarshal(toolDef.Parameters, &s); err != nil {
+			t.Errorf("%s: parameters unparseable: %v", tool, err)
+			continue
+		}
+		for prop := range s.Properties {
+			found := false
+			for _, tag := range tags {
+				if prop == tag {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s: schema declares %q but the tool body reads none of %v",
+					tool, prop, tags)
+			}
+		}
+		// A required argument the body ignores is the same defect wearing
+		// a different hat.
+		for _, req := range s.Required {
+			found := false
+			for _, tag := range tags {
+				if req == tag {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s: requires %q but the tool body reads none of %v",
+					tool, req, tags)
+			}
+		}
+	}
+}
+
+// book_slot must require the arguments it cannot work without. Without
+// this the model could omit facility_id and get "unknown facility" back,
+// which reads like a data problem rather than a malformed call.
+func TestBookSlotRequiresItsIdentifyingArguments(t *testing.T) {
+	ts := NewToolSetFor(nil, "owner")
+	tool, ok := ts.Get("book_slot")
+	if !ok {
+		t.Skip("book_slot not in the owner toolset")
+	}
+	var s struct {
+		Properties map[string]map[string]any `json:"properties"`
+		Required   []string                  `json:"required"`
+	}
+	if err := json.Unmarshal(tool.Parameters, &s); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"facility_id", "date", "start_time", "end_time", "customer_name"} {
+		inSchema := false
+		for p := range s.Properties {
+			if p == want {
+				inSchema = true
+			}
+		}
+		if !inSchema {
+			t.Errorf("book_slot schema is missing property %q", want)
+		}
+		required := false
+		for _, r := range s.Required {
+			if r == want {
+				required = true
+			}
+		}
+		if !required {
+			t.Errorf("book_slot must require %q", want)
+		}
+	}
+	// And the arguments must validate, so a malformed call is rejected
+	// before the INSERT rather than committing an empty facility_id.
+	if err := validateArgs(tool.Parameters, mustRaw(t, `{"facility_id":"f1"}`)); err == nil {
+		t.Error("a call missing date/times/name should be rejected")
+	}
+	if err := validateArgs(tool.Parameters, mustRaw(t,
+		`{"facility_id":"f1","date":"2026-09-10","start_time":"19:00","end_time":"20:00","customer_name":"Alice"}`)); err != nil {
+		t.Errorf("a complete call should validate: %v", err)
+	}
+}
+
 func TestEveryRegistrySchemaIsValidJSONObject(t *testing.T) {
 	ts := NewToolSet(nil)
 	for _, name := range ts.Names() {

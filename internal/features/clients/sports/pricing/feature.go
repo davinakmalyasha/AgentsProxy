@@ -132,20 +132,46 @@ func PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time, s
 }
 
 // PriceFor computes the price for a (date, start, end) booking.
+//
+// The window is priced HOUR BY HOUR at the day/evening rate, which is the
+// rule the whole rest of the product uses: computePrice in the frontend
+// (availability.ts) sums one rate per hour, and the same figure is what
+// the customer is quoted on the booking form, the landing board and the
+// WhatsApp message.
+//
+// This used to apply ONE rate to the whole window -- the day rate only if
+// the entire booking fit inside day_start..day_end, otherwise the evening
+// rate for every hour. Any booking straddling the boundary was quoted one
+// number and charged another: 16:00-18:00 with day_end 17:00 quoted
+// Rp90.000 (one day hour + one evening hour) and committed Rp100.000 (two
+// evening hours). That is the same class of bug as the Rp0 pricing
+// fallback, one layer up: the customer agreed to a price the server never
+// used.
 func (h *handler) PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time, start, end time.Time) (float64, error) {
 	r, err := h.resolveRule(ctx, tx, tenantID, date)
 	if err != nil {
 		return 0, err
 	}
-	// Duration in hours (fractional).
-	hours := end.Sub(start).Hours()
 	dayStart, _ := time.Parse("15:04", normTime(r.DayStart))
 	dayEnd, _ := time.Parse("15:04", normTime(r.DayEnd))
-	pricePerHour := r.PriceEvening
-	if !start.Before(dayStart) && !end.After(dayEnd) {
-		pricePerHour = r.PriceDay
+	total := 0.0
+	// Walk the window one hour at a time, charging the rate in force at
+	// the START of each hour. The final partial hour is charged as a full
+	// one, matching the frontend, which iterates `for h = startH; h < endH`.
+	// Overlapping court slots are whole hours everywhere in this product,
+	// so a fractional end is not a case worth diverging on.
+	for h := start; h.Before(end); h = h.Add(time.Hour) {
+		rate := r.PriceEvening
+		if !h.Before(dayStart) && h.Before(dayEnd) {
+			rate = r.PriceDay
+		}
+		segEnd := h.Add(time.Hour)
+		if segEnd.After(end) {
+			segEnd = end
+		}
+		total += rate * segEnd.Sub(h).Hours()
 	}
-	return pricePerHour * hours, nil
+	return total, nil
 }
 
 func normTime(s string) string {

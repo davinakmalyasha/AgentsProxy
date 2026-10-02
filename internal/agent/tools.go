@@ -20,6 +20,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clients/sports/pricing"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
@@ -227,26 +228,24 @@ func errMsg(err error) string {
 
 func bookSlotTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "book_slot",
-		Description: "Book a facility slot. Args: {facility_id, date (YYYY-MM-DD), start_time (HH:MM), end_time (HH:MM), customer_name, customer_phone?}. Returns booking id or an error like 'slot already booked'.",
+		Name: "book_slot",
+		Description: "Book a facility slot. Args: {facility_id, date (YYYY-MM-DD), start_time (HH:MM), " +
+			"end_time (HH:MM), customer_name, customer_phone?}. The price is computed from the tenant's " +
+			"pricing rule and cannot be set here. Returns booking id or an error like 'slot already booked'.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
-				FacilityID    string  `json:"facility_id"`
-				Date          string  `json:"date"`
-				StartTime     string  `json:"start_time"`
-				EndTime       string  `json:"end_time"`
-				CustomerName  string  `json:"customer_name"`
-				CustomerPhone string  `json:"customer_phone"`
-				Price         float64 `json:"price"`
+				FacilityID    string `json:"facility_id"`
+				Date          string `json:"date"`
+				StartTime     string `json:"start_time"`
+				EndTime       string `json:"end_time"`
+				CustomerName  string `json:"customer_name"`
+				CustomerPhone string `json:"customer_phone"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
 				return "error: invalid args: " + err.Error()
 			}
 			if strings.TrimSpace(p.CustomerName) == "" {
 				return "error: customer_name required"
-			}
-			if p.Price < 0 {
-				return "error: price must be >= 0"
 			}
 			// Resolve facility name (or report which facilities exist).
 			var facName, openStr, closeStr string
@@ -288,10 +287,44 @@ func bookSlotTool(pool *pgxpool.Pool) Tool {
 					return errors.New("date must be YYYY-MM-DD")
 				}
 				status := "confirmed"
+				// Price comes from the tenant's pricing rule, never from
+				// the model.
+				//
+				// This used to INSERT the model's `price` argument
+				// verbatim. When the model omitted it -- which it often
+				// did, since the argument is optional in the schema -- the
+				// booking committed at Rp0. And an Rp0 booking can never
+				// be paid: the recalc trigger treats a 0 price as unpaid
+				// forever, and the payments handler then computes
+				// outstanding = 0 - 0 = 0 and refuses every payment with
+				// "already paid". One bad tool call produced a booking that
+				// was permanently uncollectable.
+				//
+				// So compute it exactly as the HTTP create path does, and
+				// enforce the same opening window.
+				price, err := pricing.PriceFor(ctx, tx, tenantID, date, start, end)
+				if err != nil {
+					if errors.Is(err, pricing.ErrNoRule) {
+						return errors.New("no pricing rule covers that date — ask the owner to set prices first")
+					}
+					return err
+				}
+				rule, err := pricing.RuleFor(ctx, tx, tenantID, date)
+				if err != nil {
+					return err
+				}
+				ruleOpen, e1 := time.Parse("15:04", norm(rule.OpenTime))
+				ruleClose, e2 := time.Parse("15:04", norm(rule.CloseTime))
+				if e1 != nil || e2 != nil {
+					return errors.New("pricing rule hours misconfigured")
+				}
+				if start.Before(ruleOpen) || end.After(ruleClose) {
+					return fmt.Errorf("outside opening hours %s-%s", rule.OpenTime, rule.CloseTime)
+				}
 				_, err = tx.Exec(ctx,
 					`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, price)
 					 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-					tenantID, p.FacilityID, date, start, end, p.CustomerName, p.CustomerPhone, status, p.Price)
+					tenantID, p.FacilityID, date, start, end, p.CustomerName, p.CustomerPhone, status, price)
 				if err != nil {
 					return err
 				}

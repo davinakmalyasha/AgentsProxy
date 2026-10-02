@@ -87,7 +87,13 @@ var toolMetaTable = map[string]toolMeta{
 		Strong:     []string{"daftar booking", "list booking"},
 	},
 	"book_slot": {
-		Parameters: `{"type":"object","properties":{"court":{"type":"string","description":"court or facility name"},"date":{"type":"string","format":"date"},"start_time":{"type":"string","description":"HH:MM, 24h"},"end_time":{"type":"string","description":"HH:MM, 24h"},"customer_name":{"type":"string"},"customer_phone":{"type":"string"}}}`,
+		// The parameter was named `court`, but the tool body reads
+		// `facility_id` from the same JSON. So every call the model made
+		// from this schema sent `court: "Lapangan 1"` and no
+		// facility_id at all, which reached the INSERT as an empty
+		// string and came back "unknown facility". The two names have to
+		// agree; `facility_id` is what the tool and the proxy path use.
+		Parameters: `{"type":"object","properties":{"facility_id":{"type":"string","description":"the facility (court) id, from get_availability"},"date":{"type":"string","format":"date"},"start_time":{"type":"string","description":"HH:MM, 24h"},"end_time":{"type":"string","description":"HH:MM, 24h"},"customer_name":{"type":"string"},"customer_phone":{"type":"string"}},"required":["facility_id","date","start_time","end_time","customer_name"]}`,
 		Keywords:   []string{"book", "pesan", "reservasi", "buat booking", "catat booking"},
 		Strong:     []string{"buat booking", "catat booking", "reservasi baru"},
 	},
