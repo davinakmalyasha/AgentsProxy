@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
 // stubTripper replays canned chat-completions bodies in order (repeating
@@ -113,6 +114,32 @@ func TestCtxReachesTool(t *testing.T) {
 	}
 }
 
+// TestBracesInPromptSurvive proves tenant content with {{PLACEHOLDERS}}
+// reaches the model instead of tripping ADK's {key} instruction
+// templating ("state key does not exist"). Regression test for the first
+// live 502 on the cutover path.
+func TestBracesInPromptSurvive(t *testing.T) {
+	trip := &stubTripper{bodies: []string{
+		finalBody("Halo!"),
+	}}
+	r := testRunner(t, trip)
+	r.cfg.Projects = map[string]*agentconfig.Project{
+		"t1": {
+			Slug:         "t1",
+			Display:      "T Satu",
+			Vertical:     "sports",
+			SystemPrompt: "Today's date is {{DATE}} (WIB). {{TOOLS}}",
+		},
+	}
+
+	reply, err := r.RunWithToolsRole(context.Background(), "t1", "sports", "user1", "owner", "owner", "halo")
+	if err != nil {
+		t.Fatalf("run: %v (braces in tenant content must not break the run)", err)
+	}
+	if reply != "Halo!" {
+		t.Errorf("reply = %q", reply)
+	}
+}
 // TestMaxRoundsAbort bounds a model that chains tool calls forever. The
 // stub never stops emitting calls; the guard must stop the run and the
 // user must get the processing-limit message, not an error.

@@ -3,6 +3,7 @@ package adkrunner
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/v2/agent"
@@ -50,9 +51,15 @@ func adaptTool(t agentstools.Tool, tenantID string) (tool.Tool, error) {
 			}
 			norm := agentstools.NormaliseArguments(string(raw))
 			if verr := agentstools.ValidateArgs(t.Parameters, norm); verr != nil {
+				slog.Warn("adkrunner: rejected tool arguments",
+					"tenant", tenantID, "tool", t.Name, "err", verr)
 				return map[string]any{"result": "Error: invalid arguments — " + verr.Error() + ". Call the tool again with corrected arguments."}, nil
 			}
-			return map[string]any{"result": t.Run(toolCtx, tenantID, norm)}, nil
+			out := t.Run(toolCtx, tenantID, norm)
+			slog.Info("adkrunner: tool ran",
+				"tenant", tenantID, "tool", t.Name,
+				"result", agentstools.Truncate(out, 200))
+			return map[string]any{"result": out}, nil
 		},
 	)
 }

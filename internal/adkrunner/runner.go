@@ -162,8 +162,17 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		Name:        fmt.Sprintf("%s-%s", tenantID, role),
 		Description: fmt.Sprintf("venue assistant for tenant %s at tier %s", tenantID, role),
 		Model:       r.model,
-		Instruction: instruction,
-		Tools:       adapted,
+		// InstructionProvider, NOT Instruction: ADK runs {key}
+		// templating over the static Instruction string, and our tenant
+		// content carries {{DATE}} / {{TOOLS}} placeholders that break
+		// that templating ("state key does not exist"). The provider's
+		// return value is used verbatim, so the model sees byte-for-byte
+		// what the old loop sent. This is the documented spelling for
+		// opting out of {} handling.
+		InstructionProvider: func(ctx adkagent.ReadonlyContext) (string, error) {
+			return instruction, nil
+		},
+		Tools: adapted,
 		GenerateContentConfig: &genai.GenerateContentConfig{
 			MaxOutputTokens: int32(r.cfg.MaxTokens),
 		},

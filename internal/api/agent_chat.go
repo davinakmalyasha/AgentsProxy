@@ -130,6 +130,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		reply, err = ag.RunWithRole(r.Context(), tenant, vertical, userName, "client", msg)
 	}
 	if err != nil {
+		slog.Error("client chat run failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
 	}
