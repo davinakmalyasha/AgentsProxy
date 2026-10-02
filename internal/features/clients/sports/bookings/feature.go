@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -401,7 +402,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 // list returns bookings for a date and/or facility (the daily
 // schedule view). Status filter: ?status=a,b (default confirmed for
 // backward compat), plus repeatable ?status.neq= to exclude. ?limit
-// bounds the rows (default 500, max 2000).
+// bounds the rows (default 500, max 2000). ?id= narrows to one booking.
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireIdentity(w, r)
 	if idn == nil {
@@ -410,7 +411,28 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	dateStr := q.Get("date")
 	facilityID := q.Get("facility_id")
+	// ?id=<uuid> narrows to a single booking. The frontend connector has
+	// always sent this for `.eq("id", …)` — the shim's id mapping is
+	// table-agnostic — but this handler never read it. The parameter was
+	// silently dropped, so an id lookup returned the first page of the
+	// list (oldest-first, 500 rows) and the caller got whichever booking
+	// happened to sort first. It reads as "not found" once the target
+	// falls outside that page, which is how a single-row lookup turns
+	// into an intermittent "Booking tidak ditemukan".
+	idFilter := strings.TrimSpace(q.Get("id"))
+	if idFilter != "" {
+		if _, err := uuid.Parse(idFilter); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "id must be a uuid")
+			return
+		}
+	}
+	// An id lookup implies a specific row, so the status filter must not
+	// hide it: a completed or cancelled booking is exactly the one a
+	// caller re-reading a row after an update wants back.
 	statuses := []string{"confirmed"}
+	if idFilter != "" {
+		statuses = nil
+	}
 	if s := strings.TrimSpace(q.Get("status")); s != "" {
 		statuses = nil
 		for _, part := range strings.Split(s, ",") {
@@ -453,6 +475,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	var out []bookingResp
+	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
 		               b.date::text, b.start_time::text, b.end_time::text,
@@ -463,13 +486,20 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		         WHERE b.tenant_id = $1`
 		args := []any{idn.TenantID()}
 		idx := 2
-		placeholders := make([]string, 0, len(statuses))
-		for _, st := range statuses {
-			placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
-			args = append(args, st)
+		if idFilter != "" {
+			sql += fmt.Sprintf(" AND b.id = $%d::uuid", idx)
+			args = append(args, idFilter)
 			idx++
 		}
-		sql += fmt.Sprintf(" AND b.status IN (%s)", strings.Join(placeholders, ","))
+		if len(statuses) > 0 {
+			placeholders := make([]string, 0, len(statuses))
+			for _, st := range statuses {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+				args = append(args, st)
+				idx++
+			}
+			sql += fmt.Sprintf(" AND b.status IN (%s)", strings.Join(placeholders, ","))
+		}
 		for _, ex := range exclude {
 			sql += fmt.Sprintf(" AND b.status != $%d", idx)
 			args = append(args, ex)
@@ -485,34 +515,46 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		// single exact date, so the UI had no way to reach it. from is
 		// inclusive, to is EXCLUSIVE (same convention as the payments and
 		// expenses endpoints) so a caller can pass the next day's date.
-		// Defaults to DESC ordering: newest first is what a collections
-		// view wants, and the ASC default combined with LIMIT 500 silently
-		// hid every recent booking once a tenant passed 500 rows.
 		rangeStart := strings.TrimSpace(q.Get("from"))
 		rangeEnd := strings.TrimSpace(q.Get("to"))
-		desc := false
+		hasRange := false
 		if rangeStart != "" {
 			sql += fmt.Sprintf(" AND b.date >= $%d::date", idx)
 			args = append(args, rangeStart)
 			idx++
-			desc = true
+			hasRange = true
 		}
 		if rangeEnd != "" {
 			sql += fmt.Sprintf(" AND b.date < $%d::date", idx)
 			args = append(args, rangeEnd)
 			idx++
-			desc = true
+			hasRange = true
 		}
 		if facilityID != "" {
 			sql += fmt.Sprintf(" AND b.facility_id = $%d::uuid", idx)
 			args = append(args, facilityID)
 			idx++
 		}
-		order := "b.date, b.start_time"
-		if desc {
-			order = "b.date DESC, b.start_time DESC"
+		// Order newest-first unless the caller is reading one day, which is
+		// the schedule grid and wants chronological order.
+		//
+		// ASC was the only order, and paired with the 500-row cap it made
+		// the cap hit the OLDEST bookings: a tenant with more than 500 rows
+		// asking for its newest bookings — the payments screen, the
+		// dashboard — got a page of history instead and no error. A single
+		// ?date= is the one case where ascending is the correct answer, so
+		// that is the only case that keeps it.
+		desc := !(dateStr != "" && !hasRange)
+		order := "b.date DESC, b.start_time DESC"
+		if !desc {
+			order = "b.date, b.start_time"
 		}
-		sql += fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit)
+		// One row past the cap is how truncation is detected without a
+		// second COUNT query. `truncated` is reported rather than implied,
+		// because a silently shortened list is indistinguishable from a
+		// complete one — a dashboard would show real-but-incomplete
+		// numbers with no way to tell.
+		sql += fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit+1)
 		rows, err := tx.Query(r.Context(), sql, args...)
 		if err != nil {
 			return err
@@ -530,6 +572,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			b.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			b.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
 			out = append(out, b)
+			if len(out) > limit {
+				// The probe row. Drop it and stop.
+				out = out[:limit]
+				truncated = true
+				break
+			}
 		}
 		return rows.Err()
 	})
@@ -537,7 +585,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	// `items` is always a list, never null: the connector and several
+	// pages iterate it unconditionally.
+	if out == nil {
+		out = []bookingResp{}
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
 }
 
 func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
