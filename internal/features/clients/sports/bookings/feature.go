@@ -89,6 +89,10 @@ type bookingReq struct {
 	Status        string   `json:"status"`
 	Source        string   `json:"source"` // whatsapp | walk_in
 	Notes         string   `json:"notes"`
+	// RecurringSeriesID links a generated slot to the subscription that
+	// produced it. Accepted and stored; without it a subscription's weekly
+	// bookings were indistinguishable from ordinary ones.
+	RecurringSeriesID string `json:"recurring_series_id"`
 }
 
 type bookingResp struct {
@@ -105,10 +109,26 @@ type bookingResp struct {
 	Source        string   `json:"source"`
 	Price         float64  `json:"price"`
 	OverridePrice *float64 `json:"override_price,omitempty"`
-	PaymentStatus string   `json:"payment_status"`
-	Deposit       float64  `json:"deposit"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
+	// RecurringSeriesID links a generated slot back to the subscription that
+	// produced it. The frontend has always sent this and the backend had
+	// nowhere to put it, so subscription-generated bookings were
+	// indistinguishable from ordinary ones and could not be counted,
+	// extended, or cancelled with their series.
+	RecurringSeriesID string  `json:"recurring_series_id,omitempty"`
+	PaymentStatus     string  `json:"payment_status"`
+	Deposit           float64 `json:"deposit"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+}
+
+// nullableUUID turns the empty string into SQL NULL. The column is a
+// uuid: passing "" would be a 22P02 invalid-input error rather than the
+// "this booking isn't part of a subscription" the caller meant.
+func nullableUUID(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 var validBookingStatuses = map[string]bool{
@@ -396,10 +416,10 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// the adjustment was.
 		return tx.QueryRow(r.Context(),
 			`INSERT INTO sports_bookings
-			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, override_price, deposit, notes, customer_id, created_by)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id::text`,
+			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, override_price, deposit, notes, customer_id, created_by, recurring_series_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::uuid) RETURNING id::text`,
 			idn.TenantID(), req.FacilityID, date, start, end, req.CustomerName, req.CustomerPhone, status, source, price,
-			req.OverridePrice, req.Deposit, req.Notes, customerID, createdByArg,
+			req.OverridePrice, req.Deposit, req.Notes, customerID, createdByArg, nullableUUID(req.RecurringSeriesID),
 		).Scan(&id)
 	})
 	if err != nil {
@@ -528,6 +548,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
 		               b.date::text, b.start_time::text, b.end_time::text,
 		               b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
+		               COALESCE(b.recurring_series_id::text, ''),
 		               b.created_at, b.updated_at
 		          FROM sports_bookings b
 		          JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
@@ -614,6 +635,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.FacilityName,
 				&b.Date, &b.StartTime, &b.EndTime, &b.CustomerName, &b.CustomerPhone,
 				&b.Status, &b.Source, &b.Price, &b.OverridePrice, &b.PaymentStatus, &b.Deposit,
+				&b.RecurringSeriesID,
 				&createdAt, &updatedAt); err != nil {
 				return err
 			}
@@ -654,6 +676,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 			`SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
 			        b.date::text, b.start_time::text, b.end_time::text,
 			        b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
+			        COALESCE(b.recurring_series_id::text, ''),
 			        b.created_at, b.updated_at
 			   FROM sports_bookings b
 			   JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
@@ -662,6 +685,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 		).Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.FacilityName,
 			&b.Date, &b.StartTime, &b.EndTime, &b.CustomerName, &b.CustomerPhone,
 			&b.Status, &b.Source, &b.Price, &b.OverridePrice, &b.PaymentStatus, &b.Deposit,
+			&b.RecurringSeriesID,
 			&createdAt, &updatedAt)
 	})
 	if err != nil {

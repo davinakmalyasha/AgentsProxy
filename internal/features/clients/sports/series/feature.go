@@ -65,6 +65,29 @@ type seriesResp struct {
 
 var validSeriesStatuses = map[string]bool{"active": true, "paused": true, "ended": true}
 
+// terminalSeriesStatuses are the statuses that mean "this subscription is
+// no longer holding courts". Moving into one of them releases the future
+// bookings it generated.
+var terminalSeriesStatuses = map[string]bool{"paused": true, "ended": true}
+
+// todayJakarta is the current date in WIB. Cancelling "the future" needs a
+// single definition of where the future begins, and it must be the venue's
+// date, not the server's: a server on UTC is a day ahead of WIB from 07:00
+// to 14:00 WIB, so using now() there would cancel today's evening slot at
+// lunchtime.
+func todayJakarta() string {
+	return time.Now().In(jakartaLoc).Format("2006-01-02")
+}
+
+var jakartaLoc *time.Location
+
+func init() {
+	// Fixed +07:00 (WIB) rather than Asia/Jakarta: identical for the whole
+	// of Indonesian time, and it cannot fail if the zoneinfo database is
+	// missing from a minimal container.
+	jakartaLoc = time.FixedZone("WIB", 7*60*60)
+}
+
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireOwner(w, r)
 	if idn == nil {
@@ -254,12 +277,47 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	sql := fmt.Sprintf("UPDATE sports_recurring_series SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
+	var cancelledBookings int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(r.Context(), sql, args...)
 		if err != nil {
 			return err
 		}
 		affected = tag.RowsAffected()
+		if affected == 0 {
+			return nil
+		}
+		// Pausing or ending a subscription must actually release the courts.
+		//
+		// The status change used to be the whole action: the series row said
+		// "paused" while every future booking it had generated stayed
+		// confirmed. The customer cancelled their subscription — or the owner
+		// ended it because the customer moved away — and the courts were
+		// still held, unbookable by anyone else and still showing up on the
+		// schedule as if nothing had happened. The subscription row was the
+		// only thing that changed.
+		//
+		// Same transaction as the status update, so there is no window where
+		// the series reads "ended" but the courts are still held.
+		//
+		// Only pending and confirmed. A booking that has been checked in,
+		// completed, or no-show'd is history: someone turned up, or didn't,
+		// and that is settled. Cancelling those would rewrite the past and,
+		// for completed ones, break the revenue the courts earned.
+		if req.Status != nil && terminalSeriesStatuses[*req.Status] {
+			tag, err := tx.Exec(r.Context(),
+				`UPDATE sports_bookings
+				    SET status='cancelled', updated_at=now()
+				  WHERE tenant_id=$1
+				    AND recurring_series_id=$2::uuid
+				    AND date >= $3::date
+				    AND status IN ('pending','confirmed')`,
+				idn.TenantID(), id, todayJakarta())
+			if err != nil {
+				return err
+			}
+			cancelledBookings = tag.RowsAffected()
+		}
 		return nil
 	})
 	if err != nil {
@@ -270,7 +328,13 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
+	// Report what was released, so the owner sees the consequence of the
+	// click rather than a bare "updated" and having to check the calendar.
+	records.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":                 id,
+		"status":             "updated",
+		"cancelled_bookings": cancelledBookings,
+	})
 }
 
 func (h *handler) del(w http.ResponseWriter, r *http.Request) {
