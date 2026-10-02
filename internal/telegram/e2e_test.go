@@ -14,19 +14,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
-	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestManager_EndToEndBook(t *testing.T) {
@@ -60,6 +60,7 @@ func TestManager_EndToEndBook(t *testing.T) {
 	for _, stmt := range []string{
 		`DELETE FROM agent_reminders WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM sports_bookings WHERE tenant_id='smoke-tg'`,
+		`DELETE FROM sports_pricing_rules WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM sports_facilities WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM telegram_bots WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM clients WHERE tenant_id='smoke-tg'`,
@@ -77,6 +78,15 @@ func TestManager_EndToEndBook(t *testing.T) {
 	if err := adminPool.QueryRow(ctx,
 		`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour, open_time, close_time)
 		 VALUES ('smoke-tg','Court 3','badminton',50000,'06:00','22:00') RETURNING id::text`).Scan(&facID); err != nil {
+		t.Fatal(err)
+	}
+	// book_slot prices from the tenant's pricing rule, never from the
+	// model: without a covering rule the tool refuses, so seed one.
+	if _, err := adminPool.Exec(ctx,
+		`INSERT INTO sports_pricing_rules
+		   (tenant_id, valid_from, open_time, close_time, day_start, day_end,
+		    price_day, price_evening, is_active)
+		 VALUES ('smoke-tg', CURRENT_DATE, '06:00','22:00','06:00','22:00',50000,75000,true)`); err != nil {
 		t.Fatal(err)
 	}
 	vaultKey := make([]byte, 32)
@@ -124,29 +134,54 @@ func TestManager_EndToEndBook(t *testing.T) {
 	defer fakeTg.Close()
 	SetAPIBase(fakeTg.URL + "/bot%s")
 
-	// Fake LLM: first → tool call, then → answer.
-	facJSON, _ := json.Marshal(facID)
-	toolCall := `{"tool":"book_slot","args":{"facility_id":` + string(facJSON) + `,"date":"2026-09-12","start_time":"19:00","end_time":"20:00","customer_name":"Alice"}}`
+	// Fake LLM speaking real chat-completions: the first request gets a
+	// book_slot call, every later one the narration. (The previous fake
+	// spoke the retired {"tool":...} text protocol, which no loop has
+	// honoured since function calling replaced it.)
+	tomorrow := time.Now().Add(24 * time.Hour).Format("2006-01-02")
+	callArgs, _ := json.Marshal(map[string]any{
+		"facility_id": facID, "date": tomorrow,
+		"start_time": "19:00", "end_time": "20:00", "customer_name": "Alice",
+	})
+	chatCompletion := func(inner string) string {
+		return `{"id":"chatcmpl-e2e","object":"chat.completion","created":1700000000,` +
+			`"model":"mock-model","choices":[{"index":0,` + inner + `}],` +
+			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+	}
+	callBody := chatCompletion(`"message":{"role":"assistant","content":null,` +
+		`"tool_calls":[{"id":"call_1","type":"function","function":{"name":"book_slot",` +
+		`"arguments":` + strconv.Quote(string(callArgs)) + `}}]},` +
+		`"finish_reason":"tool_calls"`)
+	finalBody := chatCompletion(`"message":{"role":"assistant","content":` +
+		strconv.Quote("Booked Court 3 for Alice on "+tomorrow+" 19:00-20:00.") + `},` +
+		`"finish_reason":"stop"`)
+	var llmCalls int
 	fakeLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Messages []llm.Message `json:"messages"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		last := body.Messages[len(body.Messages)-1].Content
-		resp := toolCall
-		if strings.HasPrefix(last, "Tool b") {
-			resp = `{"answer":"Booked Court 3 for Alice on 2026-09-12 19:00-20:00."}`
-		}
+		llmCalls++
 		w.Header().Set("Content-Type", "application/json")
-		b, _ := json.Marshal(resp)
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(b) + `}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+		if llmCalls == 1 {
+			_, _ = w.Write([]byte(callBody))
+			return
+		}
+		_, _ = w.Write([]byte(finalBody))
 	}))
 	defer fakeLLM.Close()
-	llmCli := llm.New(fakeLLM.URL, "sk-test", "mock-model", 512)
 
-	mgr := NewManager(adminPool,
-		agent.New(llmCli, agentstools.NewToolSet(pool), &agent.History{RDB: rdb}),
-		vaultKey, "", true, 0)
+	// Sessions are in-memory here: the loop is what's under test, and
+	// this leaves no session rows behind. Bookings assert separately.
+	adkRunner, err := adkrunner.New(adkrunner.Config{
+		Pool:      pool,
+		BaseURL:   fakeLLM.URL,
+		APIKey:    "sk-test",
+		Model:     "mock-model",
+		MaxTokens: 512,
+		Sessions:  session.InMemoryService(),
+	})
+	if err != nil {
+		t.Fatalf("adk runner: %v", err)
+	}
+
+	mgr := NewManager(adminPool, adkRunner, vaultKey, "", true, 0)
 	defer mgr.Close()
 	mgr.Sync(ctx)
 	if mgr.Count() != 1 {
@@ -176,6 +211,7 @@ func TestManager_EndToEndBook(t *testing.T) {
 	// Cleanup.
 	for _, stmt := range []string{
 		`DELETE FROM sports_bookings WHERE tenant_id='smoke-tg'`,
+		`DELETE FROM sports_pricing_rules WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM sports_facilities WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM telegram_bots WHERE tenant_id='smoke-tg'`,
 		`DELETE FROM clients WHERE tenant_id='smoke-tg'`,

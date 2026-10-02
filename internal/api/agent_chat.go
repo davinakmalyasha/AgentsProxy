@@ -217,10 +217,20 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	if vertical == "" {
 		vertical = "sports"
 	}
-	ts := agentstools.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
-	ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
-	reply, err := ag.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
+	// Cutover: the ADK loop, same tier for tools and persona (unlike
+	// ClientChat's anon/client split -- here the session token pins the
+	// tenant, so the role's own tool set is safe). Falls back to the old
+	// loop only when tests do not wire ADK.
+	var reply string
+	if h.ADK != nil {
+		reply, err = h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
+	} else {
+		ts := agentstools.NewToolSetFor(h.Pool, role).ApplyProject(h.ProjectFor(tenant))
+		ag := agent.New(h.LLM, ts, &agent.History{RDB: h.RDB}).WithProjects(h.Projects)
+		reply, err = ag.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
+	}
 	if err != nil {
+		slog.Error("agent chat run failed", "tenant", tenant, "role", role, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
 	}

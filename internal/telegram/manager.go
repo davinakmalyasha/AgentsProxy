@@ -24,7 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
+	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 )
 
@@ -45,7 +45,7 @@ type ManagedBot struct {
 // Manager owns all bots. AdminPool bypasses RLS (must see every tenant).
 type Manager struct {
 	AdminPool *pgxpool.Pool
-	Agent     *agent.Agent
+	Agent     *adkrunner.Runner
 	VaultKey  []byte
 	PublicURL string
 	PollDev   bool
@@ -58,7 +58,7 @@ type Manager struct {
 
 // NewManager builds a manager (call Sync to load). concurrency caps
 // how many updates are handled at once (0 = default 32).
-func NewManager(adminPool *pgxpool.Pool, ag *agent.Agent, vaultKey []byte, publicURL string, pollDev bool, concurrency int) *Manager {
+func NewManager(adminPool *pgxpool.Pool, ag *adkrunner.Runner, vaultKey []byte, publicURL string, pollDev bool, concurrency int) *Manager {
 	if concurrency <= 0 {
 		concurrency = 32
 	}
@@ -294,8 +294,14 @@ func (m *Manager) handleUpdate(ctx context.Context, mb *ManagedBot, u Update) {
 		short = short[:8]
 	}
 	userID := fmt.Sprintf("tg:%s:%d", short, chatID)
-	ctx = agent.WithChatID(ctx, chatID)
-	ctx = agent.WithBotID(ctx, mb.ID)
+	// Stamp with the agentstools copies -- the ones tools actually read.
+	// The old loop stamped the agent package's own key types, which are
+	// different Go types with the same string value, so context lookups
+	// missed and tools (set_reminder's chat delivery) never saw the chat
+	// ID on Telegram. Same signature on the runner, role-filtered tools
+	// now instead of the shared full set.
+	ctx = agentstools.WithChatID(ctx, chatID)
+	ctx = agentstools.WithBotID(ctx, mb.ID)
 	reply, err := m.Agent.RunWithRole(ctx, mb.TenantID, m.Vertical, userID, role, u.Message.Text)
 	if err != nil {
 		slog.Warn("bot agent", "bot", mb.ID, "chat", chatID, "err", err)

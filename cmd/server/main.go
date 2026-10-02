@@ -14,7 +14,6 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	_ "github.com/davinakmalyasha/agents-proxy/AgentsTools/CentrumBadminton"
-	"github.com/davinakmalyasha/agents-proxy/internal/agent"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
@@ -218,8 +217,9 @@ func main() {
 	if vaultErr == nil {
 		telegram_feature.VaultKey = tgVaultKey
 		telegram_feature.PublicURL = cfg.PublicURL
-		ag := agent.New(llmCli, agentstools.NewToolSet(pool), &agent.History{RDB: rdb}).WithProjects(projects)
-		tgMgr = telegram.NewManager(adminPool, ag, tgVaultKey, cfg.PublicURL, cfg.TelegramPollDev, cfg.TelegramConcurrency)
+		// Cutover complete for Telegram: the shared ADK runner (role is
+		// per-bot from the bots table, tools filtered per role).
+		tgMgr = telegram.NewManager(adminPool, adkRunner, tgVaultKey, cfg.PublicURL, cfg.TelegramPollDev, cfg.TelegramConcurrency)
 		tgMgr.Sync(context.Background())
 		slog.Info("telegram manager started", "bots", tgMgr.Count(),
 			"webhooks", cfg.PublicURL != "", "pollDev", cfg.TelegramPollDev)
