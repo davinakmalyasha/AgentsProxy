@@ -185,6 +185,42 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 		// harmless for the write ones: a user asking "how much did we take
 		// today" would have had the agent cancel a booking or take a
 		// payment because the model felt like mentioning it.
+		//
+		// What the gate may refuse is a WRITE the model offered on its own
+		// initiative. It may NOT refuse a read. The first version refused
+		// both, and that turned a routing mistake into a total outage: the
+		// router pinned book_slot for "hari ini ada pesanan?", the model
+		// correctly called list_bookings, the gate deleted that call, the
+		// retry repeated it, and the owner was told the system could not
+		// fetch data -- with a "Coba lagi" button that re-ran the identical
+		// deterministic path. Role isolation does not need this gate:
+		// agent.go's execution loop resolves every call through
+		// a.Tools.Get, and that set is already role-filtered.
+		keepUsable := func(calls []llm.ToolCall) []llm.ToolCall {
+			out := make([]llm.ToolCall, 0, 1)
+			for _, c := range calls {
+				name := c.Function.Name
+				if name == routed.Tool {
+					out = append(out, c)
+					continue
+				}
+				tool, known := a.Tools.Get(name)
+				if !known {
+					// Not ours. The execution loop refuses it with "no such
+					// tool" and lets the model correct itself; counting it
+					// here would only suppress that retry.
+					continue
+				}
+				if !tool.Mutating {
+					out = append(out, c)
+					continue
+				}
+				slog.Info("agent: refused an unpinned write tool",
+					"tenant", tenantID, "role", role,
+					"pinned", routed.Tool, "refused", name)
+			}
+			return out
+		}
 		askForPinnedTool := func() (*llm.Completion, []llm.ToolCall) {
 			comp, err := a.LLM.ChatWithTools(ctx, hist, defs, choice, "")
 			if err != nil {
@@ -193,20 +229,7 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 			if routed.Tool == "" {
 				return comp, comp.ToolCalls
 			}
-			keep := func() []llm.ToolCall {
-				out := make([]llm.ToolCall, 0, 1)
-				for _, c := range comp.ToolCalls {
-					if c.Function.Name == routed.Tool {
-						out = append(out, c)
-					} else {
-						slog.Info("agent: ignored an unpinned tool call",
-							"tenant", tenantID, "role", role,
-							"pinned", routed.Tool, "ignored", c.Function.Name)
-					}
-				}
-				return out
-			}
-			calls := keep()
+			calls := keepUsable(comp.ToolCalls)
 			if len(calls) > 0 {
 				return comp, calls
 			}
@@ -225,7 +248,7 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 			if err != nil {
 				return nil, nil
 			}
-			return comp2, keep2(routed.Tool, comp2.ToolCalls)
+			return comp2, keepUsable(comp2.ToolCalls)
 		}
 
 		comp, calls := askForPinnedTool()
@@ -239,11 +262,20 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 				// this reply would be invented. A visible failure is
 				// strictly better than a confident wrong number about
 				// money.
-				slog.Error("agent: pinned tool was not called after retry",
+				//
+				// finish_reason is logged because "the model ignored the
+				// tool" and "the model ran out of tokens" look identical
+				// from here, and they have completely different fixes. That
+				// distinction used to be captured on the Completion and read
+				// by nobody.
+				slog.Error("agent: no usable tool call after retry",
 					"tenant", tenantID, "role", role,
-					"pinned", routed.Tool, "score", routed.Score)
+					"pinned", routed.Tool, "score", routed.Score,
+					"finish_reason", comp.FinishReason,
+					"completion_tokens", comp.CompletionTok,
+					"truncated", comp.FinishReason == "length")
 				return a.finish(ctx, tenantID, role, userName, message,
-					"Maaf, saya gagal mengambil data dari sistem. Silakan coba lagi sebentar."), nil
+					refusedNoData+" Silakan coba phrasing lain."), nil
 			}
 			// Nothing was routed — a greeting, or a question with no data
 			// behind it. The model's own answer is correct here, and
@@ -322,16 +354,15 @@ func (a *Agent) RunWithRole(ctx context.Context, tenantID, vertical, userName, r
 	return msg, nil
 }
 
-// keep2 returns only the calls for `pinned`, dropping the rest.
-func keep2(pinned string, calls []llm.ToolCall) []llm.ToolCall {
-	out := make([]llm.ToolCall, 0, 1)
-	for _, c := range calls {
-		if c.Function.Name == pinned {
-			out = append(out, c)
-		}
-	}
-	return out
-}
+// refusedNoData is the reply used when a data question was routed, no
+// usable tool call came back, and the only honest answer is that the agent
+// cannot ground itself. Named so tests assert on one string.
+//
+// It deliberately does NOT contain "coba lagi": the frontend's isErrorReply
+// matches that phrase and renders "Gagal terhubung - periksa koneksi",
+// which blames the user's network for a server-side refusal that is
+// deterministic and will repeat identically if they press the button again.
+const refusedNoData = "Maaf, saya belum bisa menjawab itu dengan data dari sistem."
 
 // finish records the exchange and returns the reply.
 func (a *Agent) finish(ctx context.Context, tenantID, role, userName, message, reply string) string {

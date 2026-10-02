@@ -53,7 +53,7 @@ func (ts *ToolSet) route(message string) routeResult {
 	best := routeResult{}
 	for _, name := range ts.Names() {
 		t := ts.tools[name]
-		score := scoreTool(t, norm, words)
+		score := scoreTool(t, words)
 		// Ties break on name for a stable decision.
 		if score > best.Score || (score == best.Score && best.Tool != "" && name < best.Tool) {
 			best = routeResult{Tool: name, Score: score}
@@ -69,11 +69,11 @@ func (ts *ToolSet) route(message string) routeResult {
 	return best
 }
 
-func scoreTool(t Tool, norm string, words []string) int {
+func scoreTool(t Tool, words []string) int {
 	score := 0
 	// 1. The user named the tool outright ("query_income", "closing report").
 	snakes := strings.ReplaceAll(t.Name, "_", " ")
-	if strings.Contains(norm, t.Name) || strings.Contains(norm, snakes) {
+	if hasPhrase(words, t.Name) || hasPhrase(words, snakes) {
 		score += 4
 	}
 	// 2. Strong keywords are decisive. "laba" means profit and nothing else;
@@ -82,23 +82,25 @@ func scoreTool(t Tool, norm string, words []string) int {
 	//    "Berapa laba bulan ini?" reach query_net_profit instead of losing
 	//    a tie against query_income on "berapa".
 	for _, kw := range t.StrongKeywords {
-		if kw != "" && strings.Contains(norm, kw) {
+		if hasPhrase(words, kw) {
 			score += strongWeight
 		}
 	}
 	// 3. Ordinary keywords, weighted by length so a specific term ("excel",
 	//    "stok") beats a generic one.
 	for _, kw := range t.Keywords {
-		if kw == "" {
-			continue
-		}
-		if strings.Contains(norm, kw) {
-			score += 1 + min(len(tokenize(kw)), 3)
+		if hasPhrase(words, kw) {
+			score += 1 + min(len(tokenize(normalise(kw))), 3)
 		}
 	}
 	// 4. Description overlap, so a tool with no curated vocabulary is still
 	//    reachable. Capped: prose is the least reliable signal here and must
 	//    not be able to outvote a strong keyword.
+	//
+	//    Deliberately still a substring test. Description prose is long and
+	//    the signal is capped at 3, so it cannot decide a routing on its
+	//    own; tokenising it would only add a way to lose the hits this
+	//    currently finds.
 	overlap := 0
 	for _, w := range words {
 		if len(w) < 4 {
@@ -110,6 +112,42 @@ func scoreTool(t Tool, norm string, words []string) int {
 	}
 	score += min(overlap, 3)
 	return score
+}
+
+// hasPhrase reports whether kw occurs in words as a whole word, or a
+// contiguous run of whole words.
+//
+// This was strings.Contains, and that is what broke "hari ini ada pesanan?"
+// ("do I have bookings today?"). "pesanan" CONTAINS "pesan", so book_slot's
+// "pesan" keyword scored and the WRITE tool got pinned for a read-only
+// question -- and the tool gate then discarded the model's correct
+// list_bookings call, so the owner got no data at all. Word boundaries stop
+// that, and the same rule stops "book" matching "booking" and "list"
+// matching "listen".
+//
+// The cost is that Indonesian inflection stops matching on its own:
+// "labanya" is no longer the token "laba". That is why the keyword tables
+// spell out the inflected forms ("labanya", "harganya", "stoknya") instead
+// of leaning on a prefix rule -- a prefix rule puts "pesanan" straight back,
+// which is the bug this function exists to remove.
+func hasPhrase(words []string, kw string) bool {
+	if kw == "" {
+		return false
+	}
+	k := tokenize(normalise(kw))
+	if len(k) == 0 || len(k) > len(words) {
+		return false
+	}
+outer:
+	for i := 0; i+len(k) <= len(words); i++ {
+		for j := range k {
+			if words[i+j] != k[j] {
+				continue outer
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func min(a, b int) int {

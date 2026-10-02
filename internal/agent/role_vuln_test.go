@@ -93,9 +93,13 @@ func TestRoleIsolation_Vuln(t *testing.T) {
 			// set, so nothing is pinned and the model's prose is the right
 			// answer — there was no data question to ground. For `pegawai`
 			// query_income IS available and gets pinned, the fake provider
-			// asked only for the blocked tool, and an unpinned call is now
-			// dropped rather than obeyed — so with the pinned tool never
+			// asked only for the blocked tool, and the gate drops a call to
+			// a tool outside the role's set — so with the pinned tool never
 			// called, any figure would be invented and the agent refuses.
+			//
+			// That last part is unchanged by the read/write split: a tool
+			// the role cannot call is dropped for being unknown, which is
+			// distinct from being an unpinned write.
 			if strings.Contains(reply, "Rp") || strings.Contains(reply, "income") {
 				t.Errorf("%s %s: reply leaked data for a tool that never ran: %q",
 					tc.role, tc.tool, reply)
@@ -105,7 +109,7 @@ func TestRoleIsolation_Vuln(t *testing.T) {
 					t.Errorf("%s %s: nothing was pinned, so prose should pass through, got %q",
 						tc.role, tc.tool, reply)
 				}
-			} else if !strings.Contains(reply, "gagal mengambil data") {
+			} else if !strings.Contains(reply, refusedNoData) {
 				t.Errorf("%s %s: a tool was pinned but never called, expected an honest refusal, got %q",
 					tc.role, tc.tool, reply)
 			}
@@ -124,12 +128,18 @@ func TestRoleIsolation_Vuln(t *testing.T) {
 // for a tool routing did not choose. Before, every call in the response
 // ran -- so a user asking about revenue could have had the agent cancel a
 // booking or record a payment, because the model mentioned it.
+//
+// The scenario is a WRITE tool on purpose. An unpinned READ is honoured
+// now, and testing one here would have asserted the bug that blacked out
+// "hari ini ada pesanan?": the router mispicked, and refusing the model's
+// correct read call left the owner with no data at all. Refusing writes
+// only is the security property worth keeping.
 func TestUnpinnedToolCallIsRefused(t *testing.T) {
 	ctx := context.Background()
 	ts := NewToolSetFor(nil, "owner")
 	// The model always asks for a tool the router would not have picked
-	// for "berapa laba?" -- routing pins query_income, not this.
-	srv := fakeLLMToolCall("query_kantin_summary")
+	// for "berapa laba?" -- routing pins query_net_profit, not this.
+	srv := fakeLLMToolCall("cancel_booking")
 	defer srv.Close()
 	cli := llm.New(srv.URL, "test-key-not-logged", "mock", 2048)
 	ag := New(cli, ts, nil)
@@ -138,9 +148,96 @@ func TestUnpinnedToolCallIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	// No figure from the unpinned tool, and no fabricated one either.
-	if !strings.Contains(reply, "gagal mengambil data") {
-		t.Errorf("expected the unpinned call to be refused, got %q", reply)
+	// No figure from the unpinned write, and no fabricated one either.
+	if !strings.Contains(reply, "belum bisa menjawab") {
+		t.Errorf("expected the unpinned write to be refused, got %q", reply)
+	}
+}
+
+// TestUnpinnedReadIsHonoured is the other half of the same gate: a read the
+// model chose over the router's guess must still run.
+//
+// This is the difference between a misroute being a slightly wrong tool and
+// being a total blackout. The owner asked a read question, the model reached
+// for the right read tool, and the first version of the gate deleted it.
+func TestUnpinnedReadIsHonoured(t *testing.T) {
+	ctx := context.Background()
+	// Real routing metadata, stubbed execution: the point of this test is
+	// which call SURVIVES the gate, and a surviving read then runs for real
+	// -- which would need a database.
+	ts := stubToolSet(t)
+	srv := fakeLLMToolCall("query_income")
+	defer srv.Close()
+	cli := llm.New(srv.URL, "test-key-not-logged", "mock", 2048)
+	ag := New(cli, ts, nil)
+
+	reply, err := ag.RunWithRole(ctx, "centrum", "sports", "Tester", "owner", "berapa laba?")
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if strings.Contains(reply, "belum bisa menjawab") {
+		t.Errorf("an unpinned READ should have run, got the refusal: %q", reply)
+	}
+}
+
+// stubToolSet carries the production names, keywords and Mutating flags, but
+// every Run returns a marker instead of touching a database.
+func stubToolSet(t *testing.T) *ToolSet {
+	t.Helper()
+	ts := &ToolSet{tools: map[string]Tool{}}
+	for name, m := range toolMetaTable {
+		ts.add(applyToolMeta(Tool{
+			Name:     name,
+			Run:      func(ctx context.Context, tenantID string, args json.RawMessage) string { return "ran:" + name },
+			Mutating: mutatingToolsContain(name),
+		}))
+		_ = m
+	}
+	return ts
+}
+
+func mutatingToolsContain(name string) bool {
+	for _, n := range mutatingTools {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// mutatingTools is the authoritative list of state-changing tools. Both
+// directions are asserted below, so adding a write tool without the flag
+// -- or flagging a read -- fails the build rather than quietly changing what
+// the gate lets the model do on its own initiative.
+var mutatingTools = []string{
+	"book_slot",
+	"cancel_booking",
+	"adjust_stock",
+	"topup_member",
+	"record_staff_payment",
+	"set_reminder",
+}
+
+func TestMutatingToolsAreExplicitlyClassified(t *testing.T) {
+	ts := NewToolSetFor(nil, "owner")
+	declared := map[string]bool{}
+	for _, n := range mutatingTools {
+		tool, ok := ts.Get(n)
+		if !ok {
+			t.Errorf("mutatingTools lists %q, which is not in the tool set", n)
+			continue
+		}
+		declared[n] = true
+		if !tool.Mutating {
+			t.Errorf("%q writes state but is not marked Mutating, so the gate would let "+
+				"the model call it unpinned", n)
+		}
+	}
+	for _, n := range ts.Names() {
+		if ts.tools[n].Mutating && !declared[n] {
+			t.Errorf("%q is marked Mutating but is not in mutatingTools; either the list "+
+				"or the flag is wrong", n)
+		}
 	}
 }
 

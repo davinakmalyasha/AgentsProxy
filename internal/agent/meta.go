@@ -44,7 +44,10 @@ var toolMetaTable = map[string]toolMeta{
 	"query_net_profit": {
 		Parameters: `{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"}}}`,
 		Keywords:   []string{"profit", "modal"},
-		Strong:     []string{"laba", "profit", "untung", "net profit", "laba bersih"},
+		// "labanya"/"keuntungan" used to be caught as substrings of
+		// "laba". Word-boundary matching does not do that for free, and
+		// "berapa labanya?" is an ordinary thing to ask.
+		Strong: []string{"laba", "labanya", "profit", "untung", "keuntungan", "net profit", "laba bersih"},
 	},
 	"closing_report": {
 		Parameters: `{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to close, defaults to today"}}}`,
@@ -59,7 +62,7 @@ var toolMetaTable = map[string]toolMeta{
 	"export_report_excel": {
 		Parameters: `{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"},"type":{"type":"string","enum":["lapangan","kantin","semua"],"description":"which ledger to export, default semua"}}}`,
 		Keywords:   []string{"file", "export", "laporan file"},
-		Strong:     []string{"excel", "xlsx", "spreadsheet", "unduh", "download", "ekspor"},
+		Strong:     []string{"excel", "xlsx", "spreadsheet", "unduh", "unduhan", "download", "ekspor"},
 	},
 	"query_kantin_summary": {
 		Parameters: `{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"}}}`,
@@ -74,17 +77,27 @@ var toolMetaTable = map[string]toolMeta{
 	"get_pricing": {
 		Parameters: `{"type":"object","properties":{}}`,
 		Keywords:   []string{"harga", "price", "tarif", "biaya", "berapa rupiah"},
-		Strong:     []string{"harga", "price", "tarif", "biaya"},
+		// "harganya"/"harga berapa" are the natural phrasings and were
+		// caught as substrings before. Stated explicitly now.
+		Strong: []string{"harga", "harganya", "price", "tarif", "biaya", "berapa rupiah"},
 	},
 	"check_stock": {
 		Parameters: `{"type":"object","properties":{"name":{"type":"string","description":"product or item name, may be partial"}}}`,
 		Keywords:   []string{"sisa", "barang", "cek", "habis"},
-		Strong:     []string{"stok", "stock", "sisa stok"},
+		// "stoknya" is the possessive form people actually type; it was a
+		// substring hit on "stok" and is now stated.
+		Strong: []string{"stok", "stoknya", "stock", "sisa stok"},
 	},
 	"list_bookings": {
 		Parameters: `{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to list, defaults to today"}}}`,
-		Keywords:   []string{"booking", "daftar", "list", "pemesanan", "ada booking"},
-		Strong:     []string{"daftar booking", "list booking"},
+		// "pesanan" belongs here and NOT to book_slot. It is the noun
+		// ("an order/booking already placed") and used to reach book_slot
+		// only because that tool's keyword "pesan" is a substring of it --
+		// so "hari ini ada pesanan?" pinned the write tool. Matching is on
+		// word boundaries now, which is exactly what separates the noun
+		// from the verb.
+		Keywords: []string{"booking", "daftar", "list", "pemesanan", "pesanan", "ada booking", "jadwal hari ini", "booking hari ini"},
+		Strong:   []string{"daftar booking", "list booking"},
 	},
 	"book_slot": {
 		// The parameter was named `court`, but the tool body reads
@@ -94,13 +107,16 @@ var toolMetaTable = map[string]toolMeta{
 		// string and came back "unknown facility". The two names have to
 		// agree; `facility_id` is what the tool and the proxy path use.
 		Parameters: `{"type":"object","properties":{"facility_id":{"type":"string","description":"the facility (court) id, from get_availability"},"date":{"type":"string","format":"date"},"start_time":{"type":"string","description":"HH:MM, 24h"},"end_time":{"type":"string","description":"HH:MM, 24h"},"customer_name":{"type":"string"},"customer_phone":{"type":"string"}},"required":["facility_id","date","start_time","end_time","customer_name"]}`,
-		Keywords:   []string{"book", "pesan", "reservasi", "buat booking", "catat booking"},
-		Strong:     []string{"buat booking", "catat booking", "reservasi baru"},
+		// Verbs only. The noun forms live in list_bookings, and a
+		// request to CREATE is always explicit -- "pesan lapangan jam 9"
+		// -- so these do not need to catch inflections.
+		Keywords: []string{"book", "pesan", "reservasi", "reservasikan", "buat booking", "catat booking", "pesan lapangan"},
+		Strong:   []string{"buat booking", "catat booking", "reservasi baru"},
 	},
 	"cancel_booking": {
 		Parameters: `{"type":"object","properties":{"booking_id":{"type":"string","description":"the booking id"}}}`,
 		Keywords:   []string{"cancel", "hapus booking"},
-		Strong:     []string{"batal", "batalkan"},
+		Strong:     []string{"batal", "batalkan", "pembatalan", "batalkan booking"},
 	},
 	"adjust_stock": {
 		Parameters: `{"type":"object","properties":{"product_id":{"type":"string"},"name":{"type":"string","description":"product name, may be partial"},"delta":{"type":"integer","description":"signed change to stock"},"count":{"type":"integer","minimum":0,"description":"absolute counted level for a stock-take; replaces delta"}}}`,

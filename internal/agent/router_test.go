@@ -240,6 +240,136 @@ func TestDefsCarrySchemaAndAreSorted(t *testing.T) {
 // TestMetaTableMatchesRegistry keeps the routing vocabulary from drifting
 // away from the tools that actually exist: every entry in the table must be
 // a registered tool, and every money/query tool must have a schema.
+// realToolSet is the production tool set's names and keyword vocabulary
+// without a database, so routing can be exercised against what owners
+// actually type rather than against tool names.
+func realToolSet(t *testing.T) *ToolSet {
+	t.Helper()
+	ts := &ToolSet{tools: map[string]Tool{}}
+	for name := range toolMetaTable {
+		ts.add(applyToolMeta(Tool{
+			Name: name,
+			Run:  func(ctx context.Context, tenantID string, args json.RawMessage) string { return "" },
+		}))
+	}
+	if len(ts.tools) == 0 {
+		t.Fatal("no tools built")
+	}
+	return ts
+}
+
+// TestRouteRealOwnerPhrasings is the table that should have caught the
+// "pesanan" bug.
+//
+// "hari ini ada pesanan?" routed to book_slot: "pesanan" contains "pesan",
+// the verb, so substring matching scored the WRITE tool for a read-only
+// question. The tool gate then dropped the model's correct list_bookings
+// call and the owner was told the system could not fetch data.
+//
+// These are phrasings an Indonesian owner types. Every one used to be
+// checked against substring rules, so they are the ones that can silently
+// regress -- a keyword table that looks right and routes wrong.
+func TestRouteRealOwnerPhrasings(t *testing.T) {
+	ts := realToolSet(t)
+	for _, c := range []struct {
+		msg  string
+		want string
+	}{
+		// The reported failure. "pesanan" is a noun and must not reach the
+		// tool that creates bookings.
+		{"hari ini ada pesanan?", "list_bookings"},
+		{"ada pesanan hari ini?", "list_bookings"},
+		{"pesanan hari ini berapa", "list_bookings"},
+		{"daftar booking hari ini", "list_bookings"},
+		{"booking hari ini ada?", "list_bookings"},
+		// The verb has to keep working, or the fix has broken booking.
+		{"buat booking lapangan 1 jam 9", "book_slot"},
+		{"pesan lapangan jam 9", "book_slot"},
+		{"reservasi baru besok", "book_slot"},
+		{"batalkan booking", "cancel_booking"},
+		{"pembatalan booking besok", "cancel_booking"},
+		// Inflected forms that substring matching used to catch for free.
+		{"berapa labanya bulan ini?", "query_net_profit"},
+		{"berapa harganya?", "get_pricing"},
+		{"cek stoknya air mineral", "check_stock"},
+		{"unduh laporan excel", "export_report_excel"},
+		{"jam tersibuk minggu ini", "query_range_summary"},
+		// Reads that must not fall through to a write tool.
+		{"berapa pendapatan hari ini?", "query_income"},
+		{"omzet kantin hari ini", "query_kantin_summary"},
+		{"rekap harian", "closing_report"},
+		{"lapangan kosong besok", "get_availability"},
+	} {
+		got := ts.route(c.msg)
+		if got.Tool != c.want {
+			t.Errorf("route(%q) = %q (score %d), want %q", c.msg, got.Tool, got.Score, c.want)
+		}
+	}
+}
+
+// TestRouteNeverPinsAWriteToolForAReadQuestion is the invariant behind the
+// fix, stated so it holds for phrasings nobody thought to list.
+//
+// A read question that lands on a write tool is what turns a misroute into
+// a total data blackout, because the gate then discards the model's correct
+// call. If this starts failing, either a keyword has crept back to a verb
+// form or a write tool's vocabulary has grown into a noun.
+func TestRouteNeverPinsAWriteToolForAReadQuestion(t *testing.T) {
+	ts := realToolSet(t)
+	writes := map[string]bool{
+		"book_slot": true, "cancel_booking": true, "adjust_stock": true,
+		"record_staff_payment": true, "topup_member": true, "set_reminder": true,
+	}
+	// Every read question an owner asks on a normal day.
+	reads := []string{
+		"hari ini ada pesanan?",
+		"berapa booking hari ini?",
+		"list booking besok",
+		"jam berapa yg kosong?",
+		"berapa pendapatan hari ini?",
+		"berapa labanya?",
+		"omzet kantin kemarin berapa?",
+		"pelanggan siapa yang paling sering datang?",
+		"stok air mineral masih ada?",
+		"harga lapangan berapa?",
+		"rekap hari ini",
+		"siapa yang sedang main sekarang?",
+	}
+	for _, msg := range reads {
+		got := ts.route(msg)
+		if got.Tool != "" && writes[got.Tool] {
+			t.Errorf("route(%q) pinned write tool %q (score %d); a read question must never do that",
+				msg, got.Tool, got.Score)
+		}
+	}
+}
+
+// TestRouteKeywordMatchRespectsWordBoundaries pins the matcher itself, so a
+// future "simplification" back to strings.Contains fails here with a name
+// rather than in production as a blank screen.
+func TestRouteKeywordMatchRespectsWordBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		words []string
+		kw    string
+		want  bool
+	}{
+		{[]string{"ada", "pesanan"}, "pesan", false}, // noun is not the verb
+		{[]string{"ada", "booking"}, "book", false},  // and the reverse
+		{[]string{"buat", "booking"}, "buat booking", true},
+		{[]string{"buat", "booking", "lapangan"}, "buat booking", true},
+		{[]string{"buat", "booking"}, "booking", true},
+		{[]string{"hari", "ini"}, "booking", false},
+		{[]string{"berapa", "labanya"}, "labanya", true},
+		{[]string{"berapa", "labanya"}, "laba", false},
+		{[]string{"unduhan", "excel"}, "unduhan", true},
+		{[]string{"anything"}, "", false},
+	} {
+		if got := hasPhrase(c.words, c.kw); got != c.want {
+			t.Errorf("hasPhrase(%v, %q) = %v, want %v", c.words, c.kw, got, c.want)
+		}
+	}
+}
+
 func TestMetaTableMatchesRegistry(t *testing.T) {
 	ts := fakeTools(t)
 	for name := range toolMetaTable {

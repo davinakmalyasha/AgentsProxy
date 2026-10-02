@@ -46,6 +46,20 @@ type Tool struct {
 	// a competing tool can accumulate. Use for terms with one meaning in
 	// this domain ("laba", "kosong", "excel").
 	StrongKeywords []string
+	// Mutating marks a tool that CHANGES state -- creates, cancels,
+	// adjusts, records. Reads are not.
+	//
+	// This is the one property the routing gate is allowed to enforce on
+	// the model's own initiative: an unpinned read is honoured, an unpinned
+	// write is refused. A user asking about revenue should never have a
+	// booking cancelled because the model volunteered it, which is the case
+	// that motivated pinning in the first place.
+	//
+	// Defaults to false, so a new read-only tool is safe by omission. The
+	// cost of forgetting it on a WRITE tool is the tool being usable when the
+	// model volunteers it, so TestMutatingToolsAreExplicitlyClassified fails
+	// the build if a tool is added to that list without the flag.
+	Mutating bool
 }
 
 // Defs returns the role-filtered tool set as provider-ready declarations,
@@ -228,7 +242,7 @@ func errMsg(err error) string {
 
 func bookSlotTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name: "book_slot",
+		Name: "book_slot", Mutating: true,
 		Description: "Book a facility slot. Args: {facility_id, date (YYYY-MM-DD), start_time (HH:MM), " +
 			"end_time (HH:MM), customer_name, customer_phone?}. The price is computed from the tenant's " +
 			"pricing rule and cannot be set here. Returns booking id or an error like 'slot already booked'.",
@@ -368,7 +382,7 @@ func bookSlotTool(pool *pgxpool.Pool) Tool {
 
 func cancelBookingTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "cancel_booking",
+		Name: "cancel_booking", Mutating: true,
 		Description: "Cancel a booking by id. Args: {booking_id}. Returns cancelled.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
@@ -588,7 +602,7 @@ func checkStockTool(pool *pgxpool.Pool) Tool {
 
 func adjustStockTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "adjust_stock",
+		Name: "adjust_stock", Mutating: true,
 		Description: "Adjust stock by delta (positive=restock, negative=sale). Args: {item_id, delta}. Returns new quantity.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
@@ -619,7 +633,7 @@ func adjustStockTool(pool *pgxpool.Pool) Tool {
 
 func topupMemberTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "topup_member",
+		Name: "topup_member", Mutating: true,
 		Description: "Add balance to a member. Args: {member_id, amount}. Returns new balance.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
@@ -652,7 +666,7 @@ func topupMemberTool(pool *pgxpool.Pool) Tool {
 
 func recordStaffPaymentTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "record_staff_payment",
+		Name: "record_staff_payment", Mutating: true,
 		Description: "Record a staff payment in the ledger (no real money moved). Args: {staff_name, amount, paid_at? (YYYY-MM-DD, default today), note?}.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
@@ -744,7 +758,7 @@ func listStaffPaymentsTool(pool *pgxpool.Pool) Tool {
 
 func setReminderTool(pool *pgxpool.Pool) Tool {
 	return Tool{
-		Name:        "set_reminder",
+		Name: "set_reminder", Mutating: true,
 		Description: "Set a reminder delivered via Telegram. Args: {text, remind_at (YYYY-MM-DD HH:MM WIB)}. Returns the reminder id. Only works inside a Telegram chat.",
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
