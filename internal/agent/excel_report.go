@@ -291,7 +291,8 @@ func fetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 			        COALESCE(SUM(i.qty),0)
 			   FROM sports_kantin_sale_items i
 			   JOIN sports_kantin_sales s ON s.id = i.sale_id
-			  WHERE i.tenant_id=$1 AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+			  WHERE i.tenant_id=$1 AND s.voided_at IS NULL
+			    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
 			    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
 			  GROUP BY 1 ORDER BY 1`,
 			tenantID, from, to)
@@ -318,7 +319,8 @@ func fetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 		r, err = tx.Query(ctx,
 			`SELECT i.product_name, SUM(i.qty) FROM sports_kantin_sale_items i
 			   JOIN sports_kantin_sales s ON s.id = i.sale_id
-			  WHERE i.tenant_id=$1 AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+			  WHERE i.tenant_id=$1 AND s.voided_at IS NULL
+			    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
 			    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
 			  GROUP BY 1 ORDER BY 2 DESC LIMIT 10`,
 			tenantID, from, to)

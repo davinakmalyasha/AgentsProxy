@@ -313,6 +313,97 @@ func TestKantin_Oversell(t *testing.T) {
 	}
 }
 
+// TestKantin_SoftVoid pins the three things a void has to get right, all
+// of which it got wrong while deleting the row:
+//
+//  1. the sale survives, marked -- a correction to money is still a record
+//     of money, and deleting it leaves nothing to explain what happened
+//  2. stock is restored ONLY for products that track stock. Restoring
+//     unconditionally invented inventory for untracked items, which never
+//     had any deducted
+//  3. voiding twice is refused. With a hard delete the second void found no
+//     row to restore from and so was harmless by accident; now that the row
+//     survives it would restore the stock a second time
+func TestKantin_SoftVoid(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tracked := seedProduct(t, ctx, h.adminPool, "ka-a", "Air", 5000, 20)
+	untracked := seedProduct(t, ctx, h.adminPool, "ka-a", "Kopi", 15000, 0)
+	if _, err := h.adminPool.Exec(ctx,
+		`UPDATE sports_kantin_products SET track_stock=false, stock=0 WHERE id=$1::uuid`, untracked); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := doReq(t, h.router, "POST", "/kantin/sales", "tok-ka-a",
+		`{"items":[{"product_id":"`+tracked+`","qty":3},{"product_id":"`+untracked+`","qty":2}]}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("sale status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	id, _ := readJSON(t, resp)["id"].(string)
+
+	stock := func(pid string) int {
+		var s int
+		if err := h.adminPool.QueryRow(ctx,
+			`SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, pid).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if got := stock(tracked); got != 17 {
+		t.Fatalf("tracked stock after sale = %d, want 17", got)
+	}
+
+	if r := doReq(t, h.router, "POST", "/kantin/sales/"+id+"/void", "tok-ka-a", ""); r.StatusCode != 200 {
+		t.Fatalf("void status=%d body=%s", r.StatusCode, readAll(t, r))
+	}
+	if got := stock(tracked); got != 20 {
+		t.Errorf("tracked stock after void = %d, want 20", got)
+	}
+	// The untracked product never had stock deducted, so restoring it
+	// would fabricate inventory that was never sold.
+	if got := stock(untracked); got != 0 {
+		t.Errorf("untracked stock after void = %d, want 0 (phantom stock)", got)
+	}
+
+	// The row is still there, marked.
+	var voidedAt *string
+	var itemCount int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT voided_at::text FROM sports_kantin_sales WHERE id=$1::uuid`, id).Scan(&voidedAt); err != nil {
+		t.Fatalf("sale row was deleted by the void: %v", err)
+	}
+	if voidedAt == nil {
+		t.Error("sale row survived but voided_at is NULL")
+	}
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT count(*) FROM sports_kantin_sale_items WHERE sale_id=$1::uuid`, id).Scan(&itemCount); err != nil {
+		t.Fatal(err)
+	}
+	if itemCount != 2 {
+		t.Errorf("line items = %d, want 2 (a void must keep the receipt)", itemCount)
+	}
+
+	// Twice more: refused, and no second restoration.
+	for i := 0; i < 2; i++ {
+		r := doReq(t, h.router, "POST", "/kantin/sales/"+id+"/void", "tok-ka-a", "")
+		if r.StatusCode != 409 {
+			t.Fatalf("repeat void #%d status=%d want 409 (body=%s)", i+1, r.StatusCode, readAll(t, r))
+		}
+	}
+	if got := stock(tracked); got != 20 {
+		t.Errorf("tracked stock after repeated voids = %d, want 20 (restored once)", got)
+	}
+	var voidMovements int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT count(*) FROM sports_kantin_stock_movements WHERE reason='void'`).Scan(&voidMovements); err != nil {
+		t.Fatal(err)
+	}
+	if voidMovements != 1 {
+		t.Errorf("void movements = %d, want 1", voidMovements)
+	}
+}
+
 // TestKantin_ClientPriceIgnored: client-sent total is never trusted.
 func TestKantin_ClientPriceIgnored(t *testing.T) {
 	h := setup(t)

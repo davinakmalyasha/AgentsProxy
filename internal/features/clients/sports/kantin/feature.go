@@ -637,6 +637,15 @@ type saleResp struct {
 	CustomerName string  `json:"customer_name"`
 	Note         string  `json:"note"`
 	CreatedAt    string  `json:"created_at"`
+	// VoidedAt is what makes a voided sale visible in the history rather
+	// than simply absent from it. It used to be deleted outright, so the
+	// row that recorded a 60k correction had nothing left to live in.
+	VoidedAt   string `json:"voided_at,omitempty"`
+	VoidedBy   string `json:"voided_by,omitempty"`
+	RecordedBy string `json:"recorded_by,omitempty"`
+	// RecordedByName is joined in for the list so the history can say who
+	// rang it up. The id alone is not something the owner can read.
+	RecordedByName string `json:"recorded_by_name,omitempty"`
 }
 
 func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
@@ -689,12 +698,26 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []saleResp
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, total, method, customer_name, note, created_at FROM sports_kantin_sales WHERE tenant_id=$1`
+		// Voided sales are listed, not hidden. They are excluded from money
+		// arithmetic elsewhere; this screen exists precisely to show what
+		// happened, so filtering them out here would hide the correction
+		// the owner needs to see. The join is what turns recorded_by into
+		// a name the owner can read.
+		sql := `SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
+		               COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
+COALESCE(s.recorded_by::text, ''), COALESCE(u.full_name, ''),
+		               s.created_at
+		          FROM sports_kantin_sales s
+		          LEFT JOIN sports_users u ON u.id = s.recorded_by
+		         WHERE s.tenant_id=$1`
 		args := []any{idn.TenantID()}
 		idx := 2
-		wib := `(created_at AT TIME ZONE 'Asia/Jakarta')::date`
+		// Qualified with s.: the recorder join below brings in a second table that
+		// also has created_at and tenant_id, and an unqualified reference is
+		// ambiguous -- the whole query failed with a 500 once it joined.
+		wib := `(s.created_at AT TIME ZONE 'Asia/Jakarta')::date`
 		if recordedBy != "" {
-			sql += fmt.Sprintf(" AND recorded_by = $%d::uuid", idx)
+			sql += fmt.Sprintf(" AND s.recorded_by = $%d::uuid", idx)
 			args = append(args, recordedBy)
 			idx++
 		}
@@ -714,7 +737,7 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 				idx++
 			}
 		}
-		sql += fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", limit)
+		sql += fmt.Sprintf(" ORDER BY s.created_at DESC LIMIT %d", limit)
 		rows, err := tx.Query(r.Context(), sql, args...)
 		if err != nil {
 			return err
@@ -723,7 +746,8 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var s saleResp
 			var createdAt time.Time
-			if err := rows.Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note, &createdAt); err != nil {
+			if err := rows.Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note,
+				&s.VoidedAt, &s.VoidedBy, &s.RecordedBy, &s.RecordedByName, &createdAt); err != nil {
 				return err
 			}
 			s.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
@@ -748,9 +772,16 @@ func (h *handler) getSale(w http.ResponseWriter, r *http.Request) {
 	var createdAt time.Time
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, total, method, customer_name, note, created_at FROM sports_kantin_sales WHERE id=$1::uuid AND tenant_id=$2`,
+			`SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
+			        COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
+			        COALESCE(s.recorded_by::text, ''), COALESCE(u.full_name, ''),
+			        s.created_at
+			   FROM sports_kantin_sales s
+			   LEFT JOIN sports_users u ON u.id = s.recorded_by
+			  WHERE s.id=$1::uuid AND s.tenant_id=$2`,
 			id, idn.TenantID(),
-		).Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note, &createdAt)
+		).Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note,
+			&s.VoidedAt, &s.VoidedBy, &s.RecordedBy, &s.RecordedByName, &createdAt)
 	})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
@@ -824,17 +855,64 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 // voidSale atomically restores stock for tracked items, writes void
 // movements, then deletes the sale (owner-only). Port of Centrum's
 // void_kantin_sale RPC.
+// Sentinels for the void preflight. They are compared outside the
+// transaction closure, so they are values rather than the query error it
+// would otherwise have to unwrap.
+var (
+	errAlreadyVoid = errors.New("kantin: sale already voided")
+	errVoidLookup  = errors.New("kantin: void lookup failed")
+	errSaleMissing = errors.New("kantin: sale not found")
+)
+
 func (h *handler) voidSale(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireOwner(w, r)
 	if idn == nil {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	var voidErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// Load the sale's tracked items (product_id + qty).
+		// Lock the sale and prove it is still live.
+		//
+		// This is what makes a repeat void safe. The row used to be deleted,
+		// and the handler never checked whether one existed: the item query
+		// returned nothing for a second void, so no stock was restored
+		// again -- by luck, because there was nothing left to restore from.
+		// With a soft void the row survives, so without this check a double
+		// click would restore the stock a second time and write a second
+		// set of movements. Refusing a sale that is already voided is also
+		// the honest answer: the owner asked to void something that is not
+		// live, and there is nothing to do.
+		//
+		// FOR UPDATE serialises two concurrent voids of the same sale, so
+		// the second waits and then sees the first's work.
+		var live bool
+		if err := tx.QueryRow(r.Context(),
+			`SELECT voided_at IS NULL FROM sports_kantin_sales
+			  WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
+			id, idn.TenantID()).Scan(&live); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				voidErr = errSaleMissing
+			}
+			return errVoidLookup
+		}
+		if !live {
+			voidErr = errAlreadyVoid
+			return errVoidLookup
+		}
+
+		// Restore stock only for products that actually track it.
+		//
+		// The restore loop was unconditional, so voiding a sale containing an
+		// untracked item (water, say -- a drink with no stock record) added
+		// a phantom unit to that product's stock. The sale reduced stock
+		// through track_stock too, so this only looked balanced for tracked
+		// items and quietly invented inventory for everything else.
 		rows, err := tx.Query(r.Context(),
-			`SELECT product_id, qty FROM sports_kantin_sale_items
-			  WHERE sale_id=$1::uuid AND product_id IS NOT NULL`,
+			`SELECT si.product_id::text, si.qty
+			   FROM sports_kantin_sale_items si
+			   JOIN sports_kantin_products p ON p.id = si.product_id AND p.tenant_id = si.tenant_id
+			  WHERE si.sale_id=$1::uuid AND si.product_id IS NOT NULL AND p.track_stock`,
 			id)
 		if err != nil {
 			return err
@@ -846,12 +924,10 @@ func (h *handler) voidSale(w http.ResponseWriter, r *http.Request) {
 		var items []item
 		for rows.Next() {
 			var it item
-			var pid string
-			if err := rows.Scan(&pid, &it.qty); err != nil {
+			if err := rows.Scan(&it.productID, &it.qty); err != nil {
 				rows.Close()
 				return err
 			}
-			it.productID = pid
 			items = append(items, it)
 		}
 		rows.Close()
@@ -872,17 +948,29 @@ func (h *handler) voidSale(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		// Delete the sale (cascades to sale_items).
-		_, err = tx.Exec(r.Context(),
-			`DELETE FROM sports_kantin_sales WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID())
-		return err
+		// Mark it voided. The row and its line items stay: a sale is money,
+		// and deleting it destroys the only record of what was rung up.
+		// Queries that count revenue filter on voided_at.
+		var createdByArg any
+		if idn.UserID != "" {
+			createdByArg = idn.UserID
+		}
+		if _, err := tx.Exec(r.Context(),
+			`UPDATE sports_kantin_sales SET voided_at=now(), voided_by=$3 WHERE id=$1::uuid AND tenant_id=$2`,
+			id, idn.TenantID(), createdByArg); err != nil {
+			return err
+		}
+		return nil
 	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			records.WriteJSONError(w, http.StatusNotFound, "sale not found")
+	if voidErr != nil {
+		if errors.Is(voidErr, errAlreadyVoid) {
+			records.WriteJSONError(w, http.StatusConflict, "sale is already voided")
 			return
 		}
+		records.WriteJSONError(w, http.StatusNotFound, "sale not found")
+		return
+	}
+	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}

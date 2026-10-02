@@ -165,9 +165,12 @@ func loadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (basis
 		tenantID, from, to).Scan(&b.Booked); err != nil {
 		return b, err
 	}
+	// voided_at IS NULL: a voided sale is a correction, not revenue. Without
+	// this the agent would keep reporting money that was taken back.
 	return b, tx.QueryRow(ctx,
 		`SELECT COALESCE(SUM(total),0) FROM sports_kantin_sales
 		  WHERE tenant_id=$1
+		    AND voided_at IS NULL
 		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
 		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
 		tenantID, from, to).Scan(&b.Kantin)
@@ -447,14 +450,16 @@ func queryKantinSummaryTool(pool *pgxpool.Pool) Tool {
 					`SELECT COALESCE(SUM(i.unit_price*i.qty),0), COALESCE(SUM(i.unit_cost*i.qty),0), COALESCE(SUM(i.qty),0)
 					   FROM sports_kantin_sale_items i
 					   JOIN sports_kantin_sales s ON s.id = i.sale_id
-					  WHERE i.tenant_id=$1 AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
+					  WHERE i.tenant_id=$1 AND s.voided_at IS NULL
+					    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
 					tenantID, p.Date).Scan(&revenue, &cogs, &items); err != nil {
 					return err
 				}
 				r, err := tx.Query(ctx,
 					`SELECT i.product_name, SUM(i.qty) FROM sports_kantin_sale_items i
 					   JOIN sports_kantin_sales s ON s.id = i.sale_id
-					  WHERE i.tenant_id=$1 AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date
+					  WHERE i.tenant_id=$1 AND s.voided_at IS NULL
+					    AND (s.created_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date
 					  GROUP BY i.product_name ORDER BY 2 DESC LIMIT 5`,
 					tenantID, p.Date)
 				if err != nil {
