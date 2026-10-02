@@ -344,7 +344,56 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	sql := fmt.Sprintf("UPDATE sports_payments SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
+	var overpayErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if req.Amount != nil {
+			// Re-check the outstanding balance, exactly as create does.
+			//
+			// create refuses an amount above the outstanding, but patch
+			// only checked amount > 0. So a recorded payment could be
+			// edited upwards until the ledger said more was collected than
+			// the booking is worth. The recalc trigger then set
+			// payment_status='paid' while the sums disagreed, and the
+			// reports' revenue no longer matched what the booking should
+			// have cost.
+			//
+			// The row is locked FOR UPDATE so a concurrent create cannot
+			// slip a payment in between this check and the update.
+			// The payment's own row tells us which booking it settles; the
+			// booking supplies the amount owed.
+			var bookingID string
+			if err := tx.QueryRow(r.Context(),
+				`SELECT booking_id::text FROM sports_payments
+				  WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
+				id, idn.TenantID()).Scan(&bookingID); err != nil {
+				return err
+			}
+			var price, overridePrice *float64
+			if err := tx.QueryRow(r.Context(),
+				`SELECT price, override_price FROM sports_bookings
+				  WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
+				bookingID, idn.TenantID()).Scan(&price, &overridePrice); err != nil {
+				return err
+			}
+			var effective float64
+			if overridePrice != nil {
+				effective = *overridePrice
+			} else if price != nil {
+				effective = *price
+			}
+			var paid float64
+			if err := tx.QueryRow(r.Context(),
+				`SELECT COALESCE(SUM(amount),0) FROM sports_payments
+				  WHERE booking_id=$1::uuid AND tenant_id=$2 AND id<>$3::uuid`,
+				bookingID, idn.TenantID(), id).Scan(&paid); err != nil {
+				return err
+			}
+			if newTotal := paid + *req.Amount; newTotal > effective+1e-9 {
+				overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f",
+					*req.Amount, effective-paid)
+				return overpayErr
+			}
+		}
 		tag, err := tx.Exec(r.Context(), sql, args...)
 		if err != nil {
 			return err
@@ -352,6 +401,10 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		affected = tag.RowsAffected()
 		return nil
 	})
+	if overpayErr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, overpayErr.Error())
+		return
+	}
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return

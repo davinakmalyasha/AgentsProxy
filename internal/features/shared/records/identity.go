@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -32,9 +33,10 @@ type IdentityDeps struct {
 //
 // Public reads (GET /availability, /facilities, /pricing) are allowed
 // without a token for the landing page. The proxy defers a scoped public
-// token design — for now the tenant is inferred from ?tenant_id= or
-// defaults to "centrum" and the identity is role "public" (read-only).
-// Writes remain 401 without a token; owner gates remain 403 for public.
+// token design — for now the tenant must be named with ?tenant_id=, is
+// validated against the clients table, and the identity is role "public"
+// (read-only). Writes remain 401 without a token; owner gates remain 403
+// for public.
 //
 // 401 on bad/missing, 403 on paused/blocked, 500 on internal.
 func WithIdentity(deps IdentityDeps) func(http.Handler) http.Handler {
@@ -161,23 +163,92 @@ func RequireStaffOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identi
 	return id
 }
 
+// publicReadSegments are the ONLY collections readable without a token.
+//
+// Matched as a complete segment SEQUENCE, never as a raw substring. The
+// previous implementation used strings.Contains, so ANY GET whose path
+// contained "/facilities", "/pricing" or "/availability" anywhere was
+// unauthenticated — including a nested path like /admin/facilities or
+// /reports/pricing-export, which would have silently leaked whatever lived
+// there. Substring matching for an authorisation decision is the wrong tool;
+// the set is small and known, so it is spelled out.
+//
+// Note the paths arrive with the /v1/{vertical} prefix still attached (the
+// middleware runs on the vertical router, so r.URL.Path is the full path),
+// so the collection must be matched relative to that prefix rather than at
+// the start of the path.
+//
+// It is matched at a FIXED position: the segment immediately after the
+// vertical name. That is where these collections actually live
+// (/v1/sports/facilities, /v1/sports/pricing/...). Anchoring there rather
+// than searching anywhere keeps the rule tight: "/v1/sports/facilities" is
+// public, while "/v1/sports/admin/facilities" -- which contains the same
+// word at a different depth -- is not, because it is a different resource
+// that happens to share a name.
+var publicReadSegments = [][]string{
+	{"availability"},
+	{"facilities"},
+	{"pricing"},
+}
+
+// isPublicRead reports whether this request may be served as a public
+// landing read.
+//
+// Two rules, both deliberate:
+//
+// GET only. A public identity is read-only, and relying on each handler to
+// re-check that is how a write ends up unauthenticated.
+//
+// The collection must be the path segment directly under the vertical
+// prefix, as whole segments. "/v1/sports/facilities" and
+// "/v1/sports/facilities/{id}" are public; "/v1/sports/x-facilities",
+// "/v1/sports/facilities-internal" and "/v1/sports/admin/facilities" are
+// not.
 func isPublicRead(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	p := r.URL.Path
-	// Paths are seen inside the vertical router: /availability, /facilities, /pricing etc.
-	return strings.Contains(p, "/availability") ||
-		strings.Contains(p, "/facilities") ||
-		strings.Contains(p, "/pricing")
+	segs := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// /v1/{vertical}/{collection}/...
+	if len(segs) < 3 || segs[0] != "v1" {
+		return false
+	}
+	tail := segs[2:]
+	for _, want := range publicReadSegments {
+		if tail[0] == want[0] {
+			return true
+		}
+	}
+	return false
 }
 
-func tenantFromQuery(r *http.Request) string {
-	if t := strings.TrimSpace(r.URL.Query().Get("tenant_id")); t != "" {
-		return t
+// tenantFromQuery resolves the tenant for a public read.
+//
+// The tenant must be stated explicitly. It used to fall back to "centrum",
+// which meant a caller who omitted it silently got one specific venue's
+// courts and prices -- and, worse, that default made the endpoint look
+// single-tenant while the parameter above it accepted any registered
+// tenant. A public read is now either for a named tenant or it is a 400.
+//
+// The value is still validated against the clients table by
+// publicIdentity, so this cannot be used to name a tenant that does not
+// exist.
+func tenantFromQuery(w http.ResponseWriter, r *http.Request) (string, bool) {
+	t := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
+	if t == "" {
+		writeJSONError(w, http.StatusBadRequest, "tenant_id required")
+		return "", false
 	}
-	return "centrum"
+	if !tenantSlugRe.MatchString(t) {
+		writeJSONError(w, http.StatusBadRequest, "invalid tenant_id")
+		return "", false
+	}
+	return t, true
 }
+
+// tenantSlugRe bounds the value before it reaches a query, and keeps it to
+// the lowercase-slug shape tenants actually use.
+var tenantSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // publicIdentity builds the read-only landing identity, validating the
 // tenant against the clients table. Unknown tenants get a 400 (and nil)
@@ -187,7 +258,10 @@ func tenantFromQuery(r *http.Request) string {
 // reporting it as a bad request hides server faults behind "unknown
 // tenant" and points whoever is debugging at the caller.
 func publicIdentity(w http.ResponseWriter, r *http.Request, deps IdentityDeps) *clientctx.Identity {
-	tenant := tenantFromQuery(r)
+	tenant, ok := tenantFromQuery(w, r)
+	if !ok {
+		return nil
+	}
 	known, err := CheckTenant(r.Context(), deps.Pool, tenant)
 	if err != nil {
 		slog.Error("public tenant lookup failed", "tenant", tenant, "err", err)
