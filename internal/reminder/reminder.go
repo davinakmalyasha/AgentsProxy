@@ -1,8 +1,13 @@
 // Package reminder is the due-reminder scheduler for the agentic
 // layer. A goroutine polls agent_reminders for due rows and sends
-// them via the Telegram sender, then marks them sent.
+// them through the configured delivery transport, then marks them sent.
 //
-// The sender is a func so tests can inject a fake.
+// Telegram delivery was deleted. Until the PWA delivery transport lands,
+// a scheduler without a sender preserves pending rows instead of
+// claiming or dead-lettering them.
+//
+// The sender is a func so tests can inject a fake and the future PWA
+// transport can plug in here.
 //
 // TWO DRIVERS, ONE CLAIM. This ticker is the driver for long-running
 // hosts (Laragon, VPS, Railway). On serverless (Vercel) it is disabled
@@ -13,7 +18,7 @@
 // row. private.reap_stale_claims() hands back rows orphaned by a crash.
 // See migrations 030_reminder_claim.sql and 031_delivery_roles.sql.
 //
-// DONE: Phase 5 (telegram agentic) / STANDARDS A, E
+// DONE: Phase 5 (reminders) / STANDARDS A, E
 package reminder
 
 import (
@@ -28,25 +33,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
-	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
-	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 )
 
 // maxConcurrentSends bounds how many reminders a single tick delivers
-// in parallel. Telegram per-bot rate limits make fully-serial sends
-// safe but slow; a modest fan-out keeps one slow/429 bot from stalling
+// in parallel. A modest fan-out keeps one slow destination from stalling
 // every other tenant's reminders while still bounding outbound load.
 const maxConcurrentSends = 8
 
-// SendFunc delivers a reminder to a chat (legacy; prefer Scheduler.Key
-// + per-row bot tokens, which send through the owning bot).
-type SendFunc func(ctx context.Context, chatID int64, text string) error
+// SendFunc delivers a reminder to a recipient. The recipient is currently
+// the legacy chat identifier; the PWA transport will replace it with a
+// user/device recipient.
+type SendFunc func(ctx context.Context, recipientID int64, text string) error
 
 // Scheduler polls for due reminders.
 type Scheduler struct {
 	Pool   *pgxpool.Pool
-	Send   SendFunc // legacy fallback when a row has no bot
-	Key    []byte   // vault master key for per-bot tokens
+	Send   SendFunc // nil until the PWA delivery transport lands
 	Every  time.Duration
 	stopCh chan struct{}
 }
@@ -54,11 +56,6 @@ type Scheduler struct {
 // New returns a scheduler (not yet running).
 func New(pool *pgxpool.Pool, send SendFunc) *Scheduler {
 	return &Scheduler{Pool: pool, Send: send, Every: time.Minute, stopCh: make(chan struct{})}
-}
-
-// NewWithKey returns a scheduler that delivers through owning bots.
-func NewWithKey(pool *pgxpool.Pool, send SendFunc, key []byte) *Scheduler {
-	return &Scheduler{Pool: pool, Send: send, Key: key, Every: time.Minute, stopCh: make(chan struct{})}
 }
 
 // Start launches the polling goroutine.
@@ -86,13 +83,19 @@ func (s *Scheduler) loop() {
 }
 
 type dueReminder struct {
-	id, tenant, chat, text string
-	botTokenEnc            []byte // nil for legacy rows (use Send fallback)
-	claimedAt              time.Time
+	id, tenant, recipient, text string
+	claimedAt                   time.Time
 }
 
 // Tick processes one batch of due reminders.
 func (s *Scheduler) Tick() {
+	if s.Send == nil {
+		// No delivery transport is configured. Do not claim rows: claiming
+		// would move them to 'sending' and the missing sender would then
+		// dead-letter reminders that a future PWA transport could deliver.
+		slog.Warn("reminder delivery unavailable; preserving pending rows until PWA transport lands")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -109,7 +112,8 @@ func (s *Scheduler) Tick() {
 	// still scope by claimed_at so a stale send cannot clobber a row
 	// the reaper handed back.
 	//
-	// Bot token joins inline so each reminder goes out its owning bot.
+	// Claim rows without joining a delivery transport: transport-specific
+	// addressing belongs to the sender, not the claim.
 	rows, err := s.Pool.Query(ctx,
 		`WITH due AS (
 			SELECT r.id FROM agent_reminders r
@@ -122,11 +126,10 @@ func (s *Scheduler) Tick() {
 			   SET status = 'sending', claimed_at = clock_timestamp()
 			  FROM due WHERE r.id = due.id
 			RETURNING r.id, r.tenant_id, r.chat_id, r.text, r.attempts,
-			          r.claimed_at, r.bot_id
+			          r.claimed_at
 		)
-		SELECT c.id::text, c.tenant_id, c.chat_id, c.text, c.claimed_at, b.token_enc
-		  FROM claimed c
-		  LEFT JOIN telegram_bots b ON b.id = c.bot_id`, 50)
+		SELECT c.id::text, c.tenant_id, c.chat_id, c.text, c.claimed_at
+		  FROM claimed c`, 50)
 	if err != nil {
 		slog.Warn("reminder query", "err", err)
 		return
@@ -135,7 +138,7 @@ func (s *Scheduler) Tick() {
 	var batch []dueReminder
 	for rows.Next() {
 		var d dueReminder
-		if err := rows.Scan(&d.id, &d.tenant, &d.chat, &d.text, &d.claimedAt, &d.botTokenEnc); err != nil {
+		if err := rows.Scan(&d.id, &d.tenant, &d.recipient, &d.text, &d.claimedAt); err != nil {
 			slog.Warn("reminder scan", "err", err)
 			return
 		}
@@ -147,7 +150,7 @@ func (s *Scheduler) Tick() {
 	}
 
 	// Deliver concurrently, each row under its own deadline so a slow
-	// bot can't eat the whole batch context. The batch ctx (10s) is
+	// destination can't eat the whole batch context. The batch ctx (10s) is
 	// only for the SELECT/UPDATE bookkeeping.
 	sem := make(chan struct{}, maxConcurrentSends)
 	var wg sync.WaitGroup
@@ -171,14 +174,14 @@ func (s *Scheduler) Tick() {
 }
 
 func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
-	chatID, err := strconv.ParseInt(d.chat, 10, 64)
-	if err != nil || chatID == 0 {
+	recipientID, err := strconv.ParseInt(d.recipient, 10, 64)
+	if err != nil || recipientID == 0 {
 		// Permanently undeliverable — dead-letter instead of retrying
 		// every minute forever (the old poison loop).
-		s.markDead(ctx, d, "bad chat")
+		s.markDead(ctx, d, "bad recipient")
 		return
 	}
-	sendErr := s.deliver(ctx, d, chatID)
+	sendErr := s.deliver(ctx, d, recipientID)
 	if sendErr != nil {
 		if errors.Is(sendErr, errHandledDead) {
 			return // already dead-lettered inside deliver
@@ -194,7 +197,7 @@ func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
 	// Tenant-scoped via WithTenantTx, matching the rest of the package:
 	// the per-row writes set app.tenant_id so RLS admits them, which
 	// keeps this working on a runtime pool as well as the admin one.
-	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
+	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE agent_reminders SET status='sent', claimed_at=NULL
 			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
@@ -205,41 +208,19 @@ func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
 			slog.Warn("reminder claim lost before mark sent", "id", d.id)
 		}
 		return nil
-	})
+	}); err != nil {
+		slog.Warn("reminder mark sent failed, will retry", "id", d.id, "err", err)
+	}
 }
 
-// deliver sends through the owning bot (decrypted per row). Legacy rows
-// without a bot fall back to the injected Send func. A Telegram 429
-// sleeps retry_after once, then retries once. Permanently unroutable
-// rows are dead-lettered and report errHandledDead (not a failure).
-func (s *Scheduler) deliver(ctx context.Context, d dueReminder, chatID int64) error {
-	if len(d.botTokenEnc) == 0 || len(s.Key) == 0 {
-		if s.Send == nil {
-			s.markDead(ctx, d, "no bot")
-			return errHandledDead
-		}
-		return s.Send(ctx, chatID, "⏰ Reminder: "+d.text)
+// deliver sends through the configured transport. Without a sender it
+// returns an error without dead-lettering, so Tick's early return (and
+// the claim-scoped updates) preserve rows until PWA delivery lands.
+func (s *Scheduler) deliver(ctx context.Context, d dueReminder, recipientID int64) error {
+	if s.Send == nil {
+		return errors.New("reminder delivery unavailable")
 	}
-	tok, err := tgvault.Decrypt(s.Key, d.botTokenEnc)
-	if err != nil {
-		slog.Warn("reminder undecryptable, dead-lettering", "id", d.id)
-		s.markDead(ctx, d, "bad token")
-		return errHandledDead
-	}
-	bot := telegram.New(string(tok))
-	if err := bot.Send(ctx, chatID, "⏰ Reminder: "+d.text); err != nil {
-		var rl *telegram.RateError
-		if errors.As(err, &rl) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(rl.RetryAfter) * time.Second):
-			}
-			return bot.Send(ctx, chatID, "⏰ Reminder: "+d.text)
-		}
-		return err
-	}
-	return nil
+	return s.Send(ctx, recipientID, "⏰ Reminder: "+d.text)
 }
 
 var errHandledDead = errors.New("reminder dead-lettered")
@@ -256,7 +237,7 @@ const maxAttempts = 5
 // row must be reset to 'pending' explicitly or it stays invisible to
 // every driver forever.
 func (s *Scheduler) bumpAttempts(ctx context.Context, d dueReminder) {
-	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
+	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE agent_reminders
 			    SET attempts = attempts + 1,
@@ -271,12 +252,15 @@ func (s *Scheduler) bumpAttempts(ctx context.Context, d dueReminder) {
 			slog.Warn("reminder claim lost before bump", "id", d.id)
 		}
 		return nil
-	})
+	}); err != nil {
+		slog.Warn("reminder bump failed, will retry", "id", d.id, "err", err)
+	}
 }
 
 func (s *Scheduler) markDead(ctx context.Context, d dueReminder, reason string) {
-	slog.Warn("reminder dead-lettered", "id", d.id, "reason", reason)
-	_ = records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
+	// Dead-lettering is permanent data loss signal: it pages.
+	slog.Error("reminder dead-lettered", "id", d.id, "reason", reason)
+	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE agent_reminders SET status='dead', claimed_at=NULL
 			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
@@ -287,5 +271,7 @@ func (s *Scheduler) markDead(ctx context.Context, d dueReminder, reason string) 
 			slog.Warn("reminder claim lost before dead-letter", "id", d.id)
 		}
 		return nil
-	})
+	}); err != nil {
+		slog.Error("reminder dead-letter write failed", "id", d.id, "err", err)
+	}
 }

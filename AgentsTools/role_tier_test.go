@@ -41,7 +41,6 @@ func toolsThatReadTenantRows() []string {
 		"topup_member",
 		"record_staff_payment",
 		"list_staff_payments",
-		"set_reminder",
 		"export_report_excel",
 	}
 }

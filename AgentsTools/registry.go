@@ -45,11 +45,10 @@ type Tool struct {
 	// Mutating marks a tool that CHANGES state -- creates, cancels,
 	// adjusts, records. Reads are not.
 	//
-	// This is what keeps a tenant config honest: ApplyProject may narrow
-	// a role's tool set but can never reclassify a write as a read, and
-	// boot validation fails a project that tries. A user asking about
-	// revenue must never have a booking cancelled because the model
-	// volunteered it, and the tiers are built so a role that should not
+	// This is what keeps tool classification honest: a write can never be
+	// reclassified as a read by config, and boot validation fails a project
+	// that tries. A user asking about revenue must never have a booking cancelled
+	// because the model volunteered it, and the tiers are built so a role that should not
 	// write never sees the tool at all.
 	//
 	// Defaults to false, so a new read-only tool is safe by omission. The
@@ -221,7 +220,6 @@ func AllowedToolsFor(role string) map[string]bool {
 			"query_attendance":    true,
 			"check_stock":         true,
 			"adjust_stock":        true,
-			"set_reminder":        true,
 			"closing_report":      true, // daily only
 			"list_staff_payments": true,
 			"get_pricing":         true,

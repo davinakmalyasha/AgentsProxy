@@ -60,7 +60,6 @@ var mutatingTools = []string{
 	"adjust_stock",
 	"topup_member",
 	"record_staff_payment",
-	"set_reminder",
 }
 
 func TestMutatingToolsAreExplicitlyClassified(t *testing.T) {

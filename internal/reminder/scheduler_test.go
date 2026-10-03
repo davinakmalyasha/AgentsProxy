@@ -73,7 +73,7 @@ func TestSendOneDeadLettersBadChat(t *testing.T) {
 	s := &Scheduler{Pool: pool, Send: func(ctx context.Context, chatID int64, text string) error {
 		return errors.New("unreachable in this test")
 	}}
-	s.sendOne(ctx, dueReminder{id: id, tenant: tenant, chat: "not-a-chat", text: "x", claimedAt: claimedAt})
+	s.sendOne(ctx, dueReminder{id: id, tenant: tenant, recipient: "not-a-chat", text: "x", claimedAt: claimedAt})
 	var status string
 	err = records.WithTenantTx(ctx, pool, tenant, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
@@ -149,9 +149,9 @@ func TestSendOneStaleClaimDoesNotComplete(t *testing.T) {
 
 	// The slow driver's late completion carries the OLD claim token and
 	// must be rejected, leaving the row for whoever holds it now.
-	s := &Scheduler{Pool: pool, Key: nil}
+	s := &Scheduler{Pool: pool}
 	s.sendOne(ctx, dueReminder{
-		id: id, tenant: tenant, chat: "12345", text: "TEST-STALE",
+		id: id, tenant: tenant, recipient: "12345", text: "TEST-STALE",
 		claimedAt: time.Now().Add(-30 * time.Minute).Truncate(time.Microsecond),
 	})
 	if got := readStatus(); got != "pending" {
