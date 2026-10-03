@@ -38,6 +38,11 @@ type Project struct {
 	Slug string
 	// Display is the human name, used in logs and the MCP description.
 	Display string
+	// Contact is the owner contact quoted in refusal and quota replies
+	// (client tier). Optional; empty falls back to the platform default.
+	// It lives here rather than in SystemPrompt.md so shared code can
+	// address the tenant without parsing prose.
+	Contact string
 	// Vertical decides which feature set the tenant's tools come from.
 	Vertical string
 	// Tools is reserved for per-tenant narrowing and is currently NOT loaded

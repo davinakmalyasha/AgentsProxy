@@ -20,12 +20,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"google.golang.org/adk/v2/session"
 )
 

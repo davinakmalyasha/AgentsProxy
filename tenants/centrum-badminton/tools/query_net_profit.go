@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("query_net_profit", queryNetProfitTool) }
+func init() { agentstools.Register("centrum", "query_net_profit", queryNetProfitTool) }
 
 func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

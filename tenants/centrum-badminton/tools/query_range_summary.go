@@ -18,7 +18,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
-func init() { agentstools.Register("query_range_summary", queryRangeSummaryTool) }
+func init() { agentstools.Register("centrum", "query_range_summary", queryRangeSummaryTool) }
 
 func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

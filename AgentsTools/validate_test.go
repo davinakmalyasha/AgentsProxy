@@ -138,7 +138,7 @@ func TestValidateToleratesMissingOrBrokenSchema(t *testing.T) {
 // `facility_id`, so every booking attempt from chat sent no usable id and
 // came back "unknown facility". The model was doing its job correctly.
 func TestSchemaPropertiesAreAllReadByTheTool(t *testing.T) {
-	ts := NewToolSetFor(nil, "owner")
+	ts := NewToolSetFor(nil, "centrum", "owner")
 	// Declared property -> the json tag the body unmarshals.
 	bodyTags := map[string][]string{
 		"book_slot": {
@@ -197,7 +197,7 @@ func TestSchemaPropertiesAreAllReadByTheTool(t *testing.T) {
 // this the model could omit facility_id and get "unknown facility" back,
 // which reads like a data problem rather than a malformed call.
 func TestBookSlotRequiresItsIdentifyingArguments(t *testing.T) {
-	ts := NewToolSetFor(nil, "owner")
+	ts := NewToolSetFor(nil, "centrum", "owner")
 	tool, ok := ts.Get("book_slot")
 	if !ok {
 		t.Skip("book_slot not in the owner toolset")
@@ -241,7 +241,7 @@ func TestBookSlotRequiresItsIdentifyingArguments(t *testing.T) {
 }
 
 func TestEveryRegistrySchemaIsValidJSONObject(t *testing.T) {
-	ts := NewToolSet(nil)
+	ts := NewToolSetFor(nil, "centrum", "owner")
 	for _, name := range ts.Names() {
 		tool, ok := ts.Get(name)
 		if !ok {

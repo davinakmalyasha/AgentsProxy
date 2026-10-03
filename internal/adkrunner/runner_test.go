@@ -218,7 +218,7 @@ func testRunner(t *testing.T, trip *stubTripper, tools ...agentstools.Tool) *Run
 	return &Runner{
 		cfg:   Config{Sessions: session.InMemoryService(), MaxTokens: 512},
 		model: m,
-		newToolSet: func(_ *pgxpool.Pool, _ string) *agentstools.ToolSet {
+		newToolSet: func(_ *pgxpool.Pool, _, _ string) *agentstools.ToolSet {
 			return agentstools.NewToolSetFrom(nil, tools...)
 		},
 	}

@@ -7,11 +7,14 @@
 // Tools self-register from their own packages via init(), the same pattern
 // internal/features uses:
 //
-//	func init() { agentstools.Register("list_bookings", listBookingsTool) }
+//	func init() { agentstools.Register("centrum", "list_bookings", listBookingsTool) }
 //
-// A constructor takes the pool and returns a Tool, so the registry holds no
-// connections and tests build fresh sets without global state leaking
-// between them. internal/agent builds role-filtered views on top.
+// The tenant is part of the key: two tenants may each implement
+// "book_slot" without colliding, and no tenant ever sees another
+// tenant's tools. A constructor takes the pool and returns a Tool, so
+// the registry holds no connections and tests build fresh sets without
+// global state leaking between them. adkrunner builds role-filtered
+// views on top.
 package agentstools
 
 import (
@@ -35,6 +38,10 @@ type Tool struct {
 	Run        func(ctx context.Context, tenantID string, args json.RawMessage) string
 	// Roles that may call this tool. Empty = all (legacy). Used for isolation.
 	Roles []string
+	// Tenant is the slug that registered this tool, stamped at build time
+	// from the registry key -- never set by hand. Empty means global: a
+	// hand-built set (tests) is visible to every tenant.
+	Tenant string
 	// Mutating marks a tool that CHANGES state -- creates, cancels,
 	// adjusts, records. Reads are not.
 	//
@@ -56,16 +63,39 @@ type Tool struct {
 // once per ToolSet build so every instance closes over the pool it runs on.
 type Constructor func(pool *pgxpool.Pool) Tool
 
-var registry = map[string]Constructor{}
+// tenantTool keys the registry: (tenant, name), so tenants never collide.
+type tenantTool struct {
+	tenant string
+	name   string
+}
 
-// Register adds a tool constructor under its name. Called from init() in the
-// tool's own package. A duplicate name fails the build loudly rather than
-// letting one tool silently shadow another.
-func Register(name string, fn Constructor) {
-	if _, exists := registry[name]; exists {
-		panic("agentstools: duplicate tool registration for " + name)
+var registry = map[tenantTool]Constructor{}
+
+// Register adds a tool constructor under (tenant, name). Called from init()
+// in the tool's own package. A duplicate fails the build loudly rather
+// than letting one tool silently shadow another.
+func Register(tenant, name string, fn Constructor) {
+	k := tenantTool{tenant: tenant, name: name}
+	if _, exists := registry[k]; exists {
+		panic("agentstools: duplicate tool registration for " + tenant + "/" + name)
 	}
-	registry[name] = fn
+	registry[k] = fn
+}
+
+// Tenants returns every slug with at least one registered tool, sorted.
+// A tenant directory without tools is a configuration error the boot
+// validation catches, not a silent agent.
+func Tenants() []string {
+	seen := map[string]bool{}
+	for k := range registry {
+		seen[k.tenant] = true
+	}
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ToolSet holds the tools for one agent instance.
@@ -74,31 +104,40 @@ type ToolSet struct {
 	Pool  *pgxpool.Pool
 }
 
-// NewToolSet builds the full set: every registered constructor, run against
-// this pool. A tenant that registers no tools gets an empty set, which is a
-// configuration error the boot validation catches, not a silent agent.
-func NewToolSet(pool *pgxpool.Pool) *ToolSet {
-	ts := &ToolSet{tools: map[string]Tool{}, Pool: pool}
-	names := make([]string, 0, len(registry))
-	for n := range registry {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		ts.add(registry[n](pool))
-	}
-	return ts
-}
-
 // NewToolSetFrom builds a set from explicit tools rather than the global
 // registry. Tests use it to combine real metadata with stub execution;
-// production uses NewToolSet, which reads the registry populated by init().
+// production uses NewToolSetFor, which reads the registry populated by init().
 func NewToolSetFrom(pool *pgxpool.Pool, tools ...Tool) *ToolSet {
 	ts := &ToolSet{tools: make(map[string]Tool, len(tools)), Pool: pool}
 	for _, t := range tools {
 		ts.tools[t.Name] = t
 	}
 	return ts
+}
+
+// AllTools runs every registered constructor and returns the stamped tools
+// as a list, sorted by (tenant, name). A list rather than a set because
+// two tenants may implement the same tool name -- a name-keyed map would
+// silently drop one. Used for boot-time checks that must see everything
+// (schema parse proofs, config validation grouping, MCP registration).
+func AllTools(pool *pgxpool.Pool) []Tool {
+	keys := make([]tenantTool, 0, len(registry))
+	for k := range registry {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tenant != keys[j].tenant {
+			return keys[i].tenant < keys[j].tenant
+		}
+		return keys[i].name < keys[j].name
+	})
+	out := make([]Tool, 0, len(keys))
+	for _, k := range keys {
+		t := registry[k](pool)
+		t.Tenant = k.tenant
+		out = append(out, t)
+	}
+	return out
 }
 
 // pegawai, owner. Single shared LLM key (AgentsProxy/.env LLM_API_KEY) is
@@ -108,19 +147,39 @@ func NewToolSetFrom(pool *pgxpool.Pool, tools ...Tool) *ToolSet {
 // "anon" exists because the public landing chat has no credential but
 // still runs tools against a caller-supplied tenant; "client" is the
 // authenticated API/agent tier and keeps its data tools.
-func NewToolSetFor(pool *pgxpool.Pool, role string) *ToolSet {
-	full := NewToolSet(pool)
-	if role == "owner" {
-		return full // all
-	}
-	allowed := AllowedToolsFor(role)
-	filtered := &ToolSet{tools: map[string]Tool{}, Pool: pool}
-	for name, t := range full.tools {
-		if allowed[name] {
-			filtered.tools[name] = t
+//
+// tenant selects the registering tenant. Empty means all tenants -- used
+// only where a global view is needed (boot checks iterate AllTools
+// instead); production callers always pass a concrete tenant, because a
+// name-keyed set cannot hold two tenants' same-named tools at once.
+func NewToolSetFor(pool *pgxpool.Pool, tenant, role string) *ToolSet {
+	ts := &ToolSet{tools: map[string]Tool{}, Pool: pool}
+	for _, t := range AllTools(pool) {
+		if tenant != "" && t.Tenant != "" && t.Tenant != tenant {
+			continue
+		}
+		if role == "owner" {
+			ts.tools[t.Name] = applyToolMeta(t)
+			continue
+		}
+		if AllowedToolsFor(role)[t.Name] {
+			ts.tools[t.Name] = applyToolMeta(t)
 		}
 	}
-	return filtered
+	return ts
+}
+
+// ForTenant narrows a hand-built set to one tenant's tools, keeping
+// globally-stamped (empty Tenant) tools visible to all. Tests use this
+// to assert isolation without touching the global registry.
+func (ts *ToolSet) ForTenant(tenant string) *ToolSet {
+	out := &ToolSet{tools: map[string]Tool{}, Pool: ts.Pool}
+	for name, t := range ts.tools {
+		if t.Tenant == "" || t.Tenant == tenant {
+			out.tools[name] = t
+		}
+	}
+	return out
 }
 
 func AllowedToolsFor(role string) map[string]bool {
@@ -174,8 +233,6 @@ func AllowedToolsFor(role string) map[string]bool {
 		return map[string]bool{}
 	}
 }
-
-func (ts *ToolSet) add(t Tool) { ts.tools[t.Name] = applyToolMeta(t) }
 
 // Get returns a tool by name.
 func (ts *ToolSet) Get(name string) (Tool, bool) {

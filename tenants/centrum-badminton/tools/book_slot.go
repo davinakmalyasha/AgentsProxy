@@ -10,15 +10,15 @@ import (
 	"errors"
 	"fmt"
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"strings"
 	"time"
 )
 
-func init() { agentstools.Register("book_slot", bookSlotTool) }
+func init() { agentstools.Register("centrum", "book_slot", bookSlotTool) }
 
 func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

@@ -22,9 +22,9 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 )
 
 type harness struct {

@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("topup_member", topupMemberTool) }
+func init() { agentstools.Register("centrum", "topup_member", topupMemberTool) }
 
 func topupMemberTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

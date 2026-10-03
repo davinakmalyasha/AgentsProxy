@@ -75,23 +75,32 @@ func New(pool *pgxpool.Pool, cacheCli *cache.Client, auth *authapi.Auth, adminPo
 
 	ms := mcpsrv.NewMCPServer("agents-proxy", "1.0.0", mcpsrv.WithToolFilter(filterByRole))
 
-	// Business tools: the owner set is every business tool, each carrying
-	// its REAL input schema now (the hand-rolled server advertised an
-	// empty {} for all of them). The filter narrows per caller role.
-	full := agentstools.NewToolSetFor(pool, "owner")
-	for _, name := range full.Names() {
-		t, ok := full.Get(name)
-		if !ok {
-			continue
+	// Business tools: every tenant's owner set, each carrying its REAL input
+	// schema. Same-named tools across tenants would collide under one MCP
+	// name, so that fails boot loudly here instead of silently shadowing:
+	// shared MCP names must be unique until per-tenant MCP servers exist
+	// (the day a second tenant registers an overlapping tool).
+	seen := map[string]string{}
+	for _, tenant := range agentstools.Tenants() {
+		full := agentstools.NewToolSetFor(pool, tenant, "owner")
+		for _, name := range full.Names() {
+			if prev, dup := seen[name]; dup {
+				panic("mcp: tool " + name + " registered by tenants " + prev + " and " + tenant)
+			}
+			seen[name] = tenant
+			t, ok := full.Get(name)
+			if !ok {
+				continue
+			}
+			schema := t.Parameters
+			if len(schema) == 0 {
+				schema = json.RawMessage(`{"type":"object"}`)
+			}
+			ms.AddTool(
+				mcpsdk.NewToolWithRawSchema(t.Name, t.Description, schema),
+				s.handleBusinessTool,
+			)
 		}
-		schema := t.Parameters
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object"}`)
-		}
-		ms.AddTool(
-			mcpsdk.NewToolWithRawSchema(t.Name, t.Description, schema),
-			s.handleBusinessTool,
-		)
 	}
 	// Admin tools, real schemas from admin.go.
 	for _, d := range adminToolDefs() {
@@ -148,7 +157,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = tenantID
-		writeJSON(w, http.StatusOK, map[string]any{"tools": s.discovery(role), "role": role})
+		writeJSON(w, http.StatusOK, map[string]any{"tools": s.discovery(tenantID, role), "role": role})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -163,9 +172,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.http.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity{tenantID: tenantID, role: role})))
 }
 
-// discovery lists {name, description} for a role, the same sets the
+// discovery lists {name, description} for a tenant+role, the same sets the
 // filter exposes.
-func (s *Server) discovery(role string) []map[string]any {
+func (s *Server) discovery(tenantID, role string) []map[string]any {
 	out := []map[string]any{}
 	if role == "admin" {
 		for _, d := range adminToolDefs() {
@@ -173,7 +182,7 @@ func (s *Server) discovery(role string) []map[string]any {
 		}
 		return out
 	}
-	ts := agentstools.NewToolSetFor(s.pool, role)
+	ts := agentstools.NewToolSetFor(s.pool, tenantID, role)
 	for _, name := range ts.Names() {
 		t, ok := ts.Get(name)
 		if !ok {
@@ -203,7 +212,7 @@ func (s *Server) handleBusinessTool(ctx context.Context, req mcpsdk.CallToolRequ
 		}
 		tenantID = a.TenantID
 	}
-	ts := agentstools.NewToolSetFor(s.pool, mapRole(id.role))
+	ts := agentstools.NewToolSetFor(s.pool, tenantID, mapRole(id.role))
 	tool, ok := ts.Get(req.Params.Name)
 	if !ok {
 		return errorResult("error: unknown tool or not allowed for role " + id.role), nil

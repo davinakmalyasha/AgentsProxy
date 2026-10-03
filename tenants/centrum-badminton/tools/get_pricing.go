@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("get_pricing", getPricingTool) }
+func init() { agentstools.Register("centrum", "get_pricing", getPricingTool) }
 
 func getPricingTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("cancel_booking", cancelBookingTool) }
+func init() { agentstools.Register("centrum", "cancel_booking", cancelBookingTool) }
 
 func cancelBookingTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

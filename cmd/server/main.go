@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	// Phase 3 shared features: each registers itself in init().
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/article"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/booking"
@@ -27,6 +27,13 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/promo"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	// Phase 4/6 sports-vertical custom features.
+	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/notify"
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
+	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
+	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
+	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
@@ -41,13 +48,6 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/series"
 	telegram_feature "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/telegram"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/users"
-	"github.com/davinakmalyasha/agents-proxy/internal/llm"
-	"github.com/davinakmalyasha/agents-proxy/internal/notify"
-	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
-	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
-	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
-	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
-	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 )
 
 func main() {
@@ -142,7 +142,7 @@ func main() {
 	// produces an agent that looks configured and quietly cannot do its job.
 	// The owner finds out at 3am as "I couldn't reach the system"; the
 	// deploy finds out in a second.
-	projects, err := agentstools.LoadProjects(agentstools.NewToolSet(pool))
+	projects, err := agentstools.LoadProjects(agentstools.AllTools(pool))
 	if err != nil {
 		slog.Error("agent project config is invalid", "err", err)
 		return

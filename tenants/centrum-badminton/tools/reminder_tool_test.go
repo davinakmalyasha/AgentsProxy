@@ -16,7 +16,7 @@ import (
 // production reaches it, so the test proves registration happened.
 func reminderTool(t *testing.T) agentstools.Tool {
 	t.Helper()
-	ts := agentstools.NewToolSet(nil)
+	ts := agentstools.NewToolSetFor(nil, "centrum", "owner")
 	tool, ok := ts.Get("set_reminder")
 	if !ok {
 		t.Fatal("set_reminder is not registered")

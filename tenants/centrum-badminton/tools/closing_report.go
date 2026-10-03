@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("closing_report", closingReportTool) }
+func init() { agentstools.Register("centrum", "closing_report", closingReportTool) }
 
 func closingReportTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

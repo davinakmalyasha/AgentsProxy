@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-func init() { agentstools.Register("query_kantin_summary", queryKantinSummaryTool) }
+func init() { agentstools.Register("centrum", "query_kantin_summary", queryKantinSummaryTool) }
 
 func queryKantinSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

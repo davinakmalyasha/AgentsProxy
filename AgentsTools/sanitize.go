@@ -200,29 +200,81 @@ func firstMarkupHit(text string) *markupHit {
 }
 
 // IsOffTopic is the cheap abuse/jailbreak heuristic for the public tiers.
-// Exported so the agent loop (old and ADK) share one copy instead of
-// drifting apart; kept in sanitize because it is input hygiene, not policy.
+// Exported so the agent loop shares one copy instead of drifting apart;
+// kept in sanitize because it is input hygiene, not policy. Sports is the
+// default vertical, preserving the exact historical behavior.
 func IsOffTopic(msg string) bool {
+	return IsOffTopicFor(msg, "sports")
+}
+
+// IsOffTopicFor is the same heuristic scoped to a vertical: the
+// jailbreak markers are universal, but the venue words that redeem a
+// message belong to the tenant's domain. A salon tenant's "potong rambut"
+// must count the way a sports tenant's "lapangan" does.
+func IsOffTopicFor(msg, vertical string) bool {
 	m := strings.ToLower(msg)
-	// Very cheap heuristic for abuse/jailbreak vs badminton venue
+	// Very cheap heuristic for abuse/jailbreak vs venue talk.
 	offMarkers := []string{
 		"ignore instructions", "ignore previous", "system prompt", "jailbreak", "dan ", "do anything now",
 		"write code", "python", "javascript", "translate this", "summarize this article",
 		"who are you", "what is your name",
 	}
+	venueWords := venueWordsFor(vertical)
 	for _, k := range offMarkers {
 		if strings.Contains(m, k) {
-			// Allow if also contains badminton-related words, then not off-topic
-			if strings.Contains(m, "badminton") || strings.Contains(m, "lapangan") || strings.Contains(m, "centrum") || strings.Contains(m, "booking") || strings.Contains(m, "jadwal") || strings.Contains(m, "harga") {
+			// Allow if also contains venue-related words, then not off-topic
+			redeemed := false
+			for _, w := range markerRedeemersFor(vertical) {
+				if strings.Contains(m, w) {
+					redeemed = true
+					break
+				}
+			}
+			if redeemed {
 				continue
 			}
 			return true
 		}
 	}
-	// If message is long and has no badminton keywords at all, treat as off-topic
-	hasBadminton := strings.Contains(m, "badminton") || strings.Contains(m, "lapangan") || strings.Contains(m, "centrum") || strings.Contains(m, "booking") || strings.Contains(m, "jadwal") || strings.Contains(m, "harga") || strings.Contains(m, "fasilitas") || strings.Contains(m, "lokasi") || strings.Contains(m, "whatsapp") || strings.Contains(m, "jam")
-	if !hasBadminton && len(strings.Fields(m)) > 12 {
+	// If message is long and has no venue keywords at all, treat as off-topic
+	hasVenue := false
+	for _, w := range venueWords {
+		if strings.Contains(m, w) {
+			hasVenue = true
+			break
+		}
+	}
+	if !hasVenue && len(strings.Fields(m)) > 12 {
 		return true
 	}
 	return false
+}
+
+// venueWordsFor returns the words that mark a message as venue talk, and
+// markerRedeemersFor the smaller set that redeems a message carrying a
+// jailbreak marker. The sports lists are the historical sets, word for
+// word -- changing them would change what centrum's public tier refuses,
+// including the old asymmetry where the marker check allowed fewer words
+// than the length check.
+func venueWordsFor(vertical string) []string {
+	if vertical == "sports" {
+		return []string{
+			"badminton", "lapangan", "centrum", "booking", "jadwal", "harga",
+			"fasilitas", "lokasi", "whatsapp", "jam",
+		}
+	}
+	return []string{
+		"booking", "jadwal", "schedule", "harga", "price", "venue", "tempat",
+		"fasilitas", "facility", "lokasi", "location", "whatsapp", "kontak",
+		"contact", "jam", "hours", "buka", "tutup", "layanan", "service",
+	}
+}
+
+func markerRedeemersFor(vertical string) []string {
+	if vertical == "sports" {
+		return []string{
+			"badminton", "lapangan", "centrum", "booking", "jadwal", "harga",
+		}
+	}
+	return venueWordsFor(vertical)
 }

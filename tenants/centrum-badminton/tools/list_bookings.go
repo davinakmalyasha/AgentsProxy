@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-func init() { agentstools.Register("list_bookings", listBookingsTool) }
+func init() { agentstools.Register("centrum", "list_bookings", listBookingsTool) }
 
 func listBookingsTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

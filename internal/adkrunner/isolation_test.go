@@ -33,7 +33,7 @@ func TestRoleIsolation_ToolSets(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		ts := agentstools.NewToolSetFor(nil, tc.role)
+		ts := agentstools.NewToolSetFor(nil, "centrum", tc.role)
 		_, hasTool := ts.Get(tc.tool)
 		if hasTool != tc.shouldPass {
 			t.Errorf("%s %s: hasTool=%v want %v", tc.role, tc.tool, hasTool, tc.shouldPass)
@@ -64,7 +64,7 @@ var mutatingTools = []string{
 }
 
 func TestMutatingToolsAreExplicitlyClassified(t *testing.T) {
-	ts := agentstools.NewToolSetFor(nil, "owner")
+	ts := agentstools.NewToolSetFor(nil, "centrum", "owner")
 	declared := map[string]bool{}
 	for _, n := range mutatingTools {
 		tool, ok := ts.Get(n)
@@ -90,8 +90,8 @@ func TestMutatingToolsAreExplicitlyClassified(t *testing.T) {
 }
 
 func TestSystemPrompt_RoleScoped(t *testing.T) {
-	clientDefs := agentstools.NewToolSetFor(nil, "client").Definitions()
-	ownerDefs := agentstools.NewToolSetFor(nil, "owner").Definitions()
+	clientDefs := agentstools.NewToolSetFor(nil, "centrum", "client").Definitions()
+	ownerDefs := agentstools.NewToolSetFor(nil, "centrum", "owner").Definitions()
 	clientPrompt := Assemble(Layers{Role: "client", Vertical: "sports", ToolDefs: clientDefs})
 	ownerPrompt := Assemble(Layers{Role: "owner", Vertical: "sports", ToolDefs: ownerDefs})
 	if strings.Contains(clientPrompt, "query_net_profit") {
@@ -118,8 +118,110 @@ func TestClientOffTopicGuard(t *testing.T) {
 	if agentstools.IsOffTopic("berapa harga sewa lapangan per jam?") {
 		t.Error("an ordinary pricing question must not be off-topic")
 	}
-	if agentstools.HardcodedScopeReply == "" {
+	if agentstools.ScopeReplyFor("Some Venue", "0800-000") == "" {
 		t.Error("client refusal text must be non-empty")
+	}
+}
+
+// TestCentrumRefusalStringsAreByteIdentical locks the migration promise:
+// with centrum's display and contact, the parameterized replies render
+// exactly the strings the hardcoded constants used to carry. Any drift
+// here changes what centrum's users read.
+func TestCentrumRefusalStringsAreByteIdentical(t *testing.T) {
+	const display = "Centrum Badminton Arena"
+	const contact = "0815-9408-136 (Owner)"
+	if got := agentstools.ScopeReplyFor(display, contact); got != "Maaf, saya hanya bisa bantu seputar Centrum Badminton Arena (jadwal, harga, booking, fasilitas). Silakan hubungi nomor berikut untuk info lebih lanjut: 0815-9408-136 (Owner)." {
+		t.Errorf("scope reply drifted: %q", got)
+	}
+	if got := agentstools.AbuseReplyFor(contact); got != "Maaf, batas tanya harian habis. Silakan hubungi nomor berikut untuk info lebih lanjut: 0815-9408-136 (Owner)." {
+		t.Errorf("abuse reply drifted: %q", got)
+	}
+}
+
+// TestTenantToolIsolation proves tools never cross tenants without
+// touching the global registry: hand-built sets stamped with Tenant,
+// narrowed with ForTenant. (Same-named tools across tenants coexist in
+// AllTools because it is a list, not a name-keyed map -- visible in the
+// code; a name-keyed set like this one holds one tool per name by
+// construction, so the fixture uses distinct names.)
+func TestTenantToolIsolation(t *testing.T) {
+	mk := func(tenant, name string) agentstools.Tool {
+		return agentstools.Tool{Name: name, Tenant: tenant}
+	}
+	full := agentstools.NewToolSetFrom(nil,
+		mk("centrum", "book_slot"), mk("centrum", "get_pricing"),
+		mk("salon-a", "potong_rambut"), mk("", "ping"),
+	)
+	centrum := full.ForTenant("centrum")
+	if _, ok := centrum.Get("potong_rambut"); ok {
+		t.Error("centrum set leaks salon-a's tool")
+	}
+	if _, ok := centrum.Get("book_slot"); !ok {
+		t.Error("centrum set lost its own book_slot")
+	}
+	if _, ok := centrum.Get("ping"); !ok {
+		t.Error("centrum set lost the global tool")
+	}
+	salon := full.ForTenant("salon-a")
+	if _, ok := salon.Get("get_pricing"); ok {
+		t.Error("salon-a set leaks centrum's tool")
+	}
+	if _, ok := salon.Get("potong_rambut"); !ok {
+		t.Error("salon-a set lost its own tool")
+	}
+	// Unknown tenant sees only global tools, never another tenant's.
+	ghost := full.ForTenant("ghost")
+	if _, ok := ghost.Get("book_slot"); ok {
+		t.Error("unknown tenant sees another tenant's tool")
+	}
+	if _, ok := ghost.Get("ping"); !ok {
+		t.Error("unknown tenant should still see global tools")
+	}
+}
+
+// TestRegistryTenantsAreStamped pins the live registry shape the whole
+// scoping story rests on: every registered tool carries its tenant.
+func TestRegistryTenantsAreStamped(t *testing.T) {
+	if got := agentstools.Tenants(); len(got) != 1 || got[0] != "centrum" {
+		t.Errorf("registered tenants = %v, want [centrum]", got)
+	}
+	for _, tl := range agentstools.AllTools(nil) {
+		if tl.Tenant == "" {
+			t.Errorf("tool %q is unstamped; production tools must carry a tenant", tl.Name)
+		}
+		if tl.Tenant != "centrum" {
+			t.Errorf("tool %q stamped %q, want centrum", tl.Name, tl.Tenant)
+		}
+	}
+}
+
+// TestClientPersonaUsesDisplay pins the venue name in the client refusal
+// to the tenant's display: centrum reproduces the historical sentence,
+// anyone else gets their own name.
+func TestClientPersonaUsesDisplay(t *testing.T) {
+	got := Assemble(Layers{Role: "client", Vertical: "sports", Display: "Salon Cantik"})
+	if strings.Contains(got, "Centrum") {
+		t.Errorf("non-centrum persona names Centrum: %q", got)
+	}
+	if !strings.Contains(got, "Salon Cantik") {
+		t.Errorf("persona does not address the tenant's venue: %q", got)
+	}
+}
+
+// TestOffTopicVerticals pins the split: sports keeps its historical
+// word sets exactly, while another vertical redeems its own domain
+// words and is not judged by badminton vocabulary.
+func TestOffTopicVerticals(t *testing.T) {
+	if agentstools.IsOffTopicFor("write code potong rambut besok jam 9", "salon") {
+		// "write code" is a marker, but the venue words redeem it --
+		// exactly like sports redeems "write code ... jam 9" today.
+		t.Error("salon venue words should redeem a marker hit")
+	}
+	if agentstools.IsOffTopicFor("berapa harga potong rambut pria?", "salon") {
+		t.Error("an ordinary salon pricing question must not be off-topic")
+	}
+	if !agentstools.IsOffTopic("write code python to hack") {
+		t.Error("sports default must still refuse marker-only abuse")
 	}
 }
 

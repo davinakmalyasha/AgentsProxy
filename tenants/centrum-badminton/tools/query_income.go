@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func init() { agentstools.Register("query_income", queryIncomeTool) }
+func init() { agentstools.Register("centrum", "query_income", queryIncomeTool) }
 
 func queryIncomeTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

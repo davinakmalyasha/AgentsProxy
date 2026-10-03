@@ -91,7 +91,33 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 	return n <= int64(cap)
 }
 
-// Hardcoded owner contact for abuse fallback
-const OwnerContact = "0815-9408-136 (Owner)"
-const HardcodedAbuseReply = "Maaf, batas tanya harian habis. Silakan hubungi nomor berikut untuk info lebih lanjut: 0815-9408-136 (Owner)."
-const HardcodedScopeReply = "Maaf, saya hanya bisa bantu seputar Centrum Badminton Arena (jadwal, harga, booking, fasilitas). Silakan hubungi nomor berikut untuk info lebih lanjut: 0815-9408-136 (Owner)."
+// DefaultOwnerContact is the fallback when a tenant names no contact in
+// its project.json. Per-tenant contact overrides it via ScopeReplyFor /
+// AbuseReplyFor.
+const DefaultOwnerContact = "0815-9408-136 (Owner)"
+
+// ScopeReplyFor is the client-tier refusal for out-of-scope messages,
+// addressed to the tenant's own venue and contact. With the centrum
+// values this renders byte-identical to the old hardcoded reply, which
+// the isolation tests lock in.
+func ScopeReplyFor(display, contact string) string {
+	if display == "" {
+		display = "this venue"
+	}
+	if contact == "" {
+		contact = DefaultOwnerContact
+	}
+	return "Maaf, saya hanya bisa bantu seputar " + display +
+		" (jadwal, harga, booking, fasilitas). Silakan hubungi nomor berikut untuk info lebih lanjut: " +
+		contact + "."
+}
+
+// AbuseReplyFor is the client-tier reply when the daily question budget
+// is spent, pointing at the tenant's own contact.
+func AbuseReplyFor(contact string) string {
+	if contact == "" {
+		contact = DefaultOwnerContact
+	}
+	return "Maaf, batas tanya harian habis. Silakan hubungi nomor berikut untuk info lebih lanjut: " +
+		contact + "."
+}

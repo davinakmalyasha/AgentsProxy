@@ -16,7 +16,7 @@ import (
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 )
 
-func init() { agentstools.Register("export_report_excel", exportReportExcelTool) }
+func init() { agentstools.Register("centrum", "export_report_excel", exportReportExcelTool) }
 
 func exportReportExcelTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("query_attendance", queryAttendanceTool) }
+func init() { agentstools.Register("centrum", "query_attendance", queryAttendanceTool) }
 
 func queryAttendanceTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

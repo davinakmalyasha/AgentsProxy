@@ -75,6 +75,7 @@ func loadOne(dir string) (*Project, error) {
 			Slug     string `json:"slug"`
 			Display  string `json:"display"`
 			Vertical string `json:"vertical"`
+			Contact  string `json:"contact"`
 		}
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			return nil, fmt.Errorf("tenant %q: project.json is not valid JSON: %w", dir, err)
@@ -86,6 +87,7 @@ func loadOne(dir string) (*Project, error) {
 			p.Display = doc.Display
 		}
 		p.Vertical = doc.Vertical
+		p.Contact = doc.Contact
 	} else if !isNotExist(err) {
 		return nil, fmt.Errorf("tenant %q: read project.json: %w", dir, err)
 	}

@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func init() { agentstools.Register("set_reminder", setReminderTool) }
+func init() { agentstools.Register("centrum", "set_reminder", setReminderTool) }
 
 func setReminderTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

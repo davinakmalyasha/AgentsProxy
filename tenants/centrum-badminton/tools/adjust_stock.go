@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func init() { agentstools.Register("adjust_stock", adjustStockTool) }
+func init() { agentstools.Register("centrum", "adjust_stock", adjustStockTool) }
 
 func adjustStockTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{

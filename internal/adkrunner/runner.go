@@ -47,10 +47,7 @@ type Runner struct {
 	// newToolSet builds the role-filtered set. A field (not a direct
 	// NewToolSetFor call) so tests can substitute stub tools without
 	// touching the global registry.
-	newToolSet func(pool *pgxpool.Pool, role string) *agentstools.ToolSet
-}
-type openaiModel interface {
-	Name() string
+	newToolSet func(pool *pgxpool.Pool, tenant, role string) *agentstools.ToolSet
 }
 
 // New builds the shared model and proves every registered tool adapts.
@@ -82,12 +79,8 @@ func New(cfg Config) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("adkrunner: model: %w", err)
 	}
-	full := agentstools.NewToolSet(cfg.Pool)
-	for _, name := range full.Names() {
-		t, ok := full.Get(name)
-		if !ok {
-			continue
-		}
+	full := agentstools.AllTools(cfg.Pool)
+	for _, t := range full {
 		if _, err := adaptTool(t, "boot-check"); err != nil {
 			return nil, err
 		}
@@ -115,24 +108,39 @@ func (r *Runner) RunWithRole(ctx context.Context, tenantID, vertical, userName, 
 // a caller-chosen tenant) with the client persona. Every other caller
 // passes the same tier twice.
 func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userName, toolsRole, role, message string) (string, error) {
+	var project *agentconfig.Project
+	if r.cfg.Projects != nil {
+		project = r.cfg.Projects[tenantID]
+	}
+	// Tenant identity for shared text: the project's display and contact,
+	// falling back to the tenant slug and the platform default. For
+	// centrum these resolve to the exact strings the hardcoded replies
+	// used, which the isolation tests lock in byte for byte.
+	display, contact := tenantID, ""
+	effectiveVertical := vertical
+	if project != nil {
+		if project.Display != "" {
+			display = project.Display
+		}
+		contact = project.Contact
+		if project.Vertical != "" {
+			effectiveVertical = project.Vertical
+		}
+	}
 	// Pre-guards, identical to the old loop: no model call is spent on
 	// abuse, and clearing history cannot reset these (quota keys are
 	// separate from session state).
-	if role == "client" && agentstools.IsOffTopic(message) {
-		return agentstools.HardcodedScopeReply, nil
+	if role == "client" && agentstools.IsOffTopicFor(message, effectiveVertical) {
+		return agentstools.ScopeReplyFor(display, contact), nil
 	}
 	if !agentstools.RPDCapAllowedForUser(ctx, tenantID, role, userName) {
-		return agentstools.HardcodedAbuseReply, nil
+		return agentstools.AbuseReplyFor(contact), nil
 	}
 	if !agentstools.CostCapAllowedForRole(ctx, tenantID, role) {
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 
-	var project *agentconfig.Project
-	if r.cfg.Projects != nil {
-		project = r.cfg.Projects[tenantID]
-	}
-	ts := r.newToolSet(r.cfg.Pool, toolsRole).ApplyProject(project)
+	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole).ApplyProject(project)
 
 	adapted := make([]tool.Tool, 0, len(ts.Names()))
 	for _, name := range ts.Names() {
@@ -152,6 +160,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 	instruction := Assemble(Layers{
 		Project:  project,
 		Role:     role,
+		Display:  display,
 		ToolDefs: ts.Definitions(),
 		Message:  message,
 		Vertical: vertical,

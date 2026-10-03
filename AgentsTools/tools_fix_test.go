@@ -11,9 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 )
 
 // toolTestPool connects to the real test DB (env-gated like the rest
@@ -88,7 +88,7 @@ func intPtr(v int) *int { return &v }
 // it too. That also proves registration happened.
 func runTool(t *testing.T, pool *pgxpool.Pool, name string) agentstools.Tool {
 	t.Helper()
-	tool, ok := agentstools.NewToolSet(pool).Get(name)
+	tool, ok := agentstools.NewToolSetFor(pool, "centrum", "owner").Get(name)
 	if !ok {
 		t.Fatalf("tool %q is not registered", name)
 	}

@@ -7,8 +7,8 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
-// LoadProjects parses the embedded tenant configuration and validates it
-// against the live tool registry.
+// LoadProjects parses the embedded tenant configuration and validates
+// each tenant against the tools ITS package registered.
 //
 // This runs once at boot and a failure is fatal on purpose. Every mistake it
 // catches -- a tool named in a tenant file that nobody implements, a role a
@@ -19,30 +19,28 @@ import (
 //
 // Validation lives here rather than in main because it needs the registry,
 // the Mutating flags and the role ceiling. main just gets a map or an error.
-func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
+//
+// tools is the flat list from AllTools: every stamped tool from every
+// tenant. Each project is checked against its own tenant's tools, so a
+// tenant that registers nothing fails here -- an agent with no tools is a
+// configuration error, not a silent agent.
+func LoadProjects(all []Tool) (map[string]*agentconfig.Project, error) {
 	projects, err := agentconfig.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load agent projects: %w", err)
 	}
 
-	known := map[string]bool{}
-	mutating := map[string]bool{}
-	for _, name := range tools.Names() {
-		known[name] = true
-		mutating[name] = tools.tools[name].Mutating
-	}
-
-	// The platform ceiling, straight from allowedToolsFor. A tenant config
-	// is checked against this and may only narrow it.
-	ceiling := agentconfig.RoleCeiling{}
-	for _, role := range []string{"anon", "client", "pegawai", "owner"} {
-		allowed := map[string]bool{}
-		for name := range known {
-			if AllowedToolsFor(role)[name] {
-				allowed[name] = true
+	// Group by registering tenant. Empty-Tenant tools (hand-built sets in
+	// tests) belong to every tenant.
+	byTenant := map[string][]Tool{}
+	for _, t := range all {
+		if t.Tenant == "" {
+			for slug := range projects {
+				byTenant[slug] = append(byTenant[slug], t)
 			}
+			continue
 		}
-		ceiling[role] = allowed
+		byTenant[t.Tenant] = append(byTenant[t.Tenant], t)
 	}
 
 	budget := agentconfig.DefaultBudget()
@@ -53,6 +51,29 @@ func LoadProjects(tools *ToolSet) (map[string]*agentconfig.Project, error) {
 	sort.Strings(slugs)
 
 	for _, slug := range slugs {
+		known := map[string]bool{}
+		mutating := map[string]bool{}
+		for _, t := range byTenant[slug] {
+			known[t.Name] = true
+			mutating[t.Name] = t.Mutating
+		}
+		if len(known) == 0 {
+			return nil, fmt.Errorf("tenant %q has no tools registered; an agent with no tools cannot serve", slug)
+		}
+
+		// The platform ceiling, straight from allowedToolsFor. A tenant config
+		// is checked against this and may only narrow it.
+		ceiling := agentconfig.RoleCeiling{}
+		for _, role := range []string{"anon", "client", "pegawai", "owner"} {
+			allowed := map[string]bool{}
+			for name := range known {
+				if AllowedToolsFor(role)[name] {
+					allowed[name] = true
+				}
+			}
+			ceiling[role] = allowed
+		}
+
 		if err := agentconfig.Validate(projects[slug], known, mutating, ceiling, budget); err != nil {
 			return nil, err
 		}

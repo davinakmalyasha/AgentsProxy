@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func init() { agentstools.Register("get_availability", getAvailabilityTool) }
+func init() { agentstools.Register("centrum", "get_availability", getAvailabilityTool) }
 
 func getAvailabilityTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
