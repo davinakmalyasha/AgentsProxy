@@ -100,18 +100,6 @@ func Get(name string) (Feature, bool) {
 	return f, ok
 }
 
-// Names returns every registered feature name, sorted.
-func Names() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-	out := make([]string, 0, len(all))
-	for k := range all {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // AllowedForVertical reports whether the named feature is permitted
 // for the given vertical. A feature with an empty VerticalSlugs is
 // permitted for every vertical; otherwise the vertical must be in

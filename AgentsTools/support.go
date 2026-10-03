@@ -32,13 +32,3 @@ func NormaliseArguments(raw string) json.RawMessage {
 	}
 	return json.RawMessage(trimmed)
 }
-
-// ErrMsg renders an error for a tool result. Tools return strings, not
-// errors, so a nil error must still produce a readable acknowledgement
-// rather than an empty string the model reads as silence.
-func ErrMsg(err error) string {
-	if err == nil {
-		return "ok"
-	}
-	return err.Error()
-}

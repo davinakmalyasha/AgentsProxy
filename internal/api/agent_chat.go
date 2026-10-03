@@ -47,16 +47,6 @@ type agentChatResponse struct {
 
 // ClientChat is public â€” landing widget (client FAQ/availability only, no money).
 // POST /v1/agent/client-chat?tenant_id=centrum  {message}
-// ProjectFor returns a tenant's agent configuration, or nil when the tenant
-// has none. A miss is not an error: every tenant works without one, and the
-// agent then runs on the platform base prompt alone.
-func (h *AgentChat) ProjectFor(tenantID string) *agentconfig.Project {
-	if h.Projects == nil {
-		return nil
-	}
-	return h.Projects[tenantID]
-}
-
 func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var req agentChatRequest

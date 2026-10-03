@@ -36,10 +36,13 @@ var ReportRDB *redis.Client
 const (
 	reportTTL         = 30 * time.Minute
 	reportTokenPrefix = "rpt:"
-	reportsDir        = "data/reports"
-	reportTokenHexLen = 64 // 32 random bytes
 	MaxReportDays     = 370
 )
+
+// ReportsDir is where chat-generated .xlsx files live, tenant
+// subdirectories beneath it. Exported so the download sweeper cleans
+// the same directory the tools write: one path, two users.
+const ReportsDir = "data/reports"
 
 var (
 	hexTokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -50,7 +53,7 @@ var (
 // reportTicket binds a download token to one tenant + one file.
 type reportTicket struct {
 	Tenant string `json:"tenant"`
-	File   string `json:"file"` // base name only, under reportsDir/tenant/
+	File   string `json:"file"` // base name only, under ReportsDir/tenant/
 }
 
 // ---- marker (agent reply â†” channels) ----
@@ -97,7 +100,7 @@ func lookupTicket(token string) (reportTicket, error) {
 
 // ticketPath confines a ticket to reportsDir/tenant/, base name only.
 func ticketPath(t reportTicket) string {
-	return filepath.Join(reportsDir, t.Tenant, filepath.Base(t.File))
+	return filepath.Join(ReportsDir, t.Tenant, filepath.Base(t.File))
 }
 
 // OpenReportFile validates a token and opens the file for streaming
@@ -123,7 +126,7 @@ func ResolveReportDownload(token string) (filename string, data []byte, err erro
 	if err != nil {
 		return "", nil, err
 	}
-	// Never trust the ticket blindly: confine to reportsDir/tenant/, base name only.
+	// Never trust the ticket blindly: confine to ReportsDir/tenant/, base name only.
 	b, err := os.ReadFile(ticketPath(t))
 	if err != nil {
 		return "", nil, fmt.Errorf("file gone")
@@ -486,7 +489,7 @@ func SafeTenant(tenant string) string {
 
 func SaveReportFile(tenant, from, to, typ string, f *excelize.File) (string, error) {
 	t := SafeTenant(tenant)
-	dir := filepath.Join(reportsDir, t)
+	dir := filepath.Join(ReportsDir, t)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}

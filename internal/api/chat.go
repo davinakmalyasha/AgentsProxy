@@ -175,7 +175,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	_ = usage.Record(r.Context(), h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok)
 
-	cost := float64(inTok)/1e6*0.14 + float64(outTok)/1e6*0.28
+	cost := usage.EstimateCost(inTok, outTok)
 	writeJSON(w, http.StatusOK, chatResponse{
 		Reply: reply,
 		Usage: chatUsage{PromptTokens: inTok, CompletionTokens: outTok, CostUSD: cost},

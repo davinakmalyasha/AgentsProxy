@@ -65,8 +65,9 @@ func (h *Reports) StartSweeper(stop <-chan struct{}) {
 }
 
 // reportsRoot is where chat-generated .xlsx files live. A var so tests
-// can point it at a temp dir instead of the real working tree.
-var reportsRoot = filepath.Join("data", "reports")
+// can point it at a temp dir instead of the real working tree; defaults
+// to the same directory the tools write (agentstools.ReportsDir).
+var reportsRoot = agentstools.ReportsDir
 
 // sweepOldReports deletes report files older than 1h (best-effort).
 func sweepOldReports() {

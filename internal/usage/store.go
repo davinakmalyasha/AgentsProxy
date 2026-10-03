@@ -14,7 +14,7 @@ import (
 // Record inserts a usage row (synchronous, source of truth) and
 // best-effort increments the monthly quota cache in Redis.
 func Record(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID, model, kind string, tokensIn, tokensOut int) error {
-	costUSD := estimateCost(tokensIn, tokensOut)
+	costUSD := EstimateCost(tokensIn, tokensOut)
 	if _, err := db.Exec(ctx,
 		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind) VALUES ($1, $2, $3, $4, $5, $6)`,
 		clientID, tokensIn, tokensOut, costUSD, model, kind,
@@ -38,9 +38,11 @@ func Record(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID, 
 	return nil
 }
 
-// estimateCost applies a fixed per-million-token price. Documented as
-// an estimate, not the provider bill.
-func estimateCost(in, out int) float64 {
+// EstimateCost applies a fixed per-million-token price. Documented as
+// an estimate, not the provider bill. Shared with the /chat door, which
+// reports the same figure back to the caller: one formula, one place to
+// update when pricing changes.
+func EstimateCost(in, out int) float64 {
 	// DeepSeek flash-ish: 0.14 / 0.28 per 1M.
 	return float64(in)/1e6*0.14 + float64(out)/1e6*0.28
 }

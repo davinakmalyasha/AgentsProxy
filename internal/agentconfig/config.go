@@ -27,7 +27,6 @@ package agentconfig
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -127,19 +126,6 @@ func (c RoleCeiling) Valid(role, tool string) bool {
 		return false
 	}
 	return allowed[tool]
-}
-
-// ToolNames returns the enabled tool names, sorted for a stable prompt and
-// a stable test.
-func (p *Project) ToolNames() []string {
-	var out []string
-	for _, t := range p.Tools {
-		if t.IsEnabled() {
-			out = append(out, t.Name)
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Budget is the per-layer size ceiling. These strings go straight into a

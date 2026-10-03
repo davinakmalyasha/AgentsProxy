@@ -144,7 +144,7 @@ func (c *Client) Complete(
 	// kept purely as a fallback for a provider that wants the other shape.
 	reasonLow := "low"
 	payload.ReasoningEffort = &reasonLow
-	if isReasoningModel(model) {
+	if IsReasoningModel(model) {
 		payload.Thinking = &thinking{Type: "disabled"}
 	}
 
@@ -190,7 +190,12 @@ func (c *Client) Complete(
 	return comp, nil
 }
 
-func isReasoningModel(model string) bool {
+// IsReasoningModel reports whether the model thinks unless told not to,
+// in which case thinking tokens eat the max_tokens budget tool calls
+// need. Shared with adkrunner, which sends the same shaping through
+// ADK's openaimodel: one matcher, one place to update when providers
+// change their thinking protocol.
+func IsReasoningModel(model string) bool {
 	m := strings.ToLower(model)
 	return strings.Contains(m, "mimo") || strings.Contains(m, "deepseek")
 }

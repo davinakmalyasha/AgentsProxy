@@ -11,8 +11,8 @@ func TestRegisterAndLookup(t *testing.T) {
 	ResetForTest()
 	Register(Feature{Name: "alpha", Kind: "alpha", DefaultOn: true})
 	Register(Feature{Name: "beta", Kind: "beta"})
-	if got := Names(); len(got) != 2 {
-		t.Errorf("Names len=%d want 2", len(got))
+	if got := All(); len(got) != 2 {
+		t.Errorf("All len=%d want 2", len(got))
 	}
 	if _, ok := Get("alpha"); !ok {
 		t.Errorf("Get(alpha) missing")

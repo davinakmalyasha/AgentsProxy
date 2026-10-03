@@ -19,12 +19,6 @@ func CapKey(tenantID string) string {
 	return "agcap:" + tenantID + ":" + time.Now().Format("2006-01-02")
 }
 
-// CostCapAllowed checks (and increments) the per-tenant daily cap.
-// Returns false when the tenant has hit the cap. Legacy global check.
-func CostCapAllowed(ctx context.Context, tenantID string) bool {
-	return CostCapAllowedForRole(ctx, tenantID, "owner")
-}
-
 // CostCapAllowedForRole checks per-tenant+role daily cap (20/80/150). Single LLM_API_KEY shared.
 func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	if CapRDB == nil {

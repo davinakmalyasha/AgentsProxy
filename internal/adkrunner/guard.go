@@ -17,7 +17,7 @@ type maxRoundsError struct{}
 
 func (e *maxRoundsError) Error() string { return "adkrunner: model call budget exceeded" }
 
-func NewMaxRoundsError() error { return &maxRoundsError{} }
+func newMaxRoundsError() error { return &maxRoundsError{} }
 
 // IsMaxRounds reports whether err is (or wraps) the budget abort. The
 // runner may wrap callback errors, so this uses errors.As, not ==.
@@ -51,7 +51,7 @@ func (g *budgetGuard) beforeModel(ctx agent.Context, req *model.LLMRequest) (*mo
 	defer g.mu.Unlock()
 	g.calls++
 	if g.calls > g.max {
-		return nil, NewMaxRoundsError()
+		return nil, newMaxRoundsError()
 	}
 	return nil, nil
 }

@@ -14,12 +14,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
@@ -169,6 +172,21 @@ func TestManager_EndToEndBook(t *testing.T) {
 
 	// Sessions are in-memory here: the loop is what's under test, and
 	// this leaves no session rows behind. Bookings assert separately.
+	// The transport under test is tenant-agnostic, but tools register per
+	// tenant: lend the smoke tenant centrum's real booking implementation
+	// so the test exercises a genuine tool call. Production tenants each
+	// bring their own tools package; this aliasing lives only in this
+	// test (guarded for -count reruns).
+	if !slices.Contains(agentstools.Tenants(), "smoke-tg") {
+		bookSlot, ok := agentstools.NewToolSetFor(pool, "centrum", "owner").Get("book_slot")
+		if !ok {
+			t.Fatal("centrum book_slot not registered")
+		}
+		agentstools.Register("smoke-tg", "book_slot", func(*pgxpool.Pool) agentstools.Tool {
+			return bookSlot
+		})
+	}
+
 	adkRunner, err := adkrunner.New(adkrunner.Config{
 		Pool:      pool,
 		BaseURL:   fakeLLM.URL,

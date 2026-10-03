@@ -22,6 +22,7 @@ import (
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 )
 
 // Config wires one Runner: the pool tools run against, the tenant projects,
@@ -66,7 +67,7 @@ func New(cfg Config) (*Runner, error) {
 	opts := []option.RequestOption{
 		option.WithJSONSet("reasoning_effort", "low"),
 	}
-	if isReasoningModel(cfg.Model) {
+	if llm.IsReasoningModel(cfg.Model) {
 		opts = append(opts, option.WithJSONSet("thinking", map[string]string{"type": "disabled"}))
 	}
 	m, err := openaimodel.NewModel(context.Background(), cfg.Model, &openaimodel.ClientConfig{
@@ -86,14 +87,6 @@ func New(cfg Config) (*Runner, error) {
 		}
 	}
 	return &Runner{cfg: cfg, model: m, newToolSet: agentstools.NewToolSetFor}, nil
-}
-
-// isReasoningModel mirrors internal/llm's matcher: these models think unless
-// told not to, and thinking tokens eat the max_tokens budget the tool calls
-// need.
-func isReasoningModel(modelName string) bool {
-	m := strings.ToLower(modelName)
-	return strings.Contains(m, "mimo") || strings.Contains(m, "deepseek")
 }
 
 // RunWithRole processes one user message and returns the reply. Same
@@ -116,12 +109,10 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 	// falling back to the tenant slug and the platform default. For
 	// centrum these resolve to the exact strings the hardcoded replies
 	// used, which the isolation tests lock in byte for byte.
-	display, contact := tenantID, ""
+	display := displayFor(project, tenantID)
+	contact := ""
 	effectiveVertical := vertical
 	if project != nil {
-		if project.Display != "" {
-			display = project.Display
-		}
 		contact = project.Contact
 		if project.Vertical != "" {
 			effectiveVertical = project.Vertical
