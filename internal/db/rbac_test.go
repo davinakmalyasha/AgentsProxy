@@ -93,6 +93,15 @@ func TestAppRuntime_CanMutateTenantRecords(t *testing.T) {
 	if err := bootstrapAppRuntime(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
+	// tenant_records.tenant_id references clients(tenant_id): the RBAC
+	// tenant must exist or the INSERT fails on FK, not on RLS.
+	if _, err := adminPool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
+		 VALUES ('rbac', 'rbac-tenant', 'rbac-test-hash', 1000000, 'active')
+		 ON CONFLICT (tenant_id) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+
 	runtimePool, err := NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatal(err)

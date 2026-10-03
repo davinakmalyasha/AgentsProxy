@@ -35,7 +35,7 @@ func closingReportTool(pool *pgxpool.Pool) agentstools.Tool {
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 				if err := tx.QueryRow(ctx,
 					`SELECT COALESCE(SUM(amount) FILTER (WHERE method='cash'),0), COALESCE(SUM(amount) FILTER (WHERE method='qris'),0)
-				   FROM sports_payments WHERE tenant_id=$1 AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
+				   FROM sports_payments WHERE tenant_id=$1 AND deleted_at IS NULL AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
 					tenantID, p.Date).Scan(&cash, &qris); err != nil {
 					return err
 				}

@@ -105,7 +105,8 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
+			`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
+			`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_member_topups TO app`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
 	}
 	for _, s := range stmts {
@@ -154,6 +155,10 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
+	return doReqKey(t, h, method, path, token, body, "")
+}
+
+func doReqKey(t *testing.T, h http.Handler, method, path, token, body, idemKey string) *http.Response {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -166,6 +171,9 @@ func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http
 	}
 	if token != "" {
 		req.Header.Set("X-Client-Token", token)
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -228,6 +236,42 @@ func TestMembers_TopupValidation(t *testing.T) {
 	resp2 := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":0}`)
 	if resp2.StatusCode != 400 {
 		t.Errorf("zero topup status=%d want 400", resp2.StatusCode)
+	}
+}
+
+// TestMembers_TopupIdempotency: same Idempotency-Key twice → credited once.
+// Second call returns the same balance with deduplicated:true, and exactly
+// one ledger row exists.
+func TestMembers_TopupIdempotency(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"Siti","balance":10000}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	resp2 := doReqKey(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":5000}`, "top-key-1")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("first topup status=%d body=%s", resp2.StatusCode, readAll(t, resp2))
+	}
+	resp3 := doReqKey(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":5000}`, "top-key-1")
+	if resp3.StatusCode != 200 {
+		t.Fatalf("replay status=%d want 200, body=%s", resp3.StatusCode, readAll(t, resp3))
+	}
+	m3 := readJSON(t, resp3)
+	if m3["balance"] != float64(15000) || m3["deduplicated"] != true {
+		t.Errorf("replay = %v, want balance 15000 with deduplicated:true", m3)
+	}
+	var n int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("ledger rows = %d, want 1 (no double credit)", n)
 	}
 }
 
