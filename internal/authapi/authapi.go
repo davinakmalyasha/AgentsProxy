@@ -265,6 +265,13 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 	// is what removes the ability to mint a session for a user in an
 	// arbitrary tenant.
 	var sessionID *string
+	// TEMPORARY login diagnosis (remove after prod login is green): log
+	// the exact arguments handed to create_session. No secrets here — the
+	// user id is a uuid, the expiry is a duration string, and the password
+	// and token hashes are never logged.
+	slog.Info("login session insert args",
+		"tenant", req.TenantID, "user_id", id, "role", role,
+		"active", active, "expiry", SessionTTL.String())
 	if err := a.Pool.QueryRow(r.Context(),
 		`SELECT private.create_session($1::uuid, $2, now() + $3::interval)::text`,
 		id, tokenHash, SessionTTL.String(),
