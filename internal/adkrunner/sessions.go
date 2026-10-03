@@ -5,12 +5,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 
 	"google.golang.org/adk/v2/session"
-	adkdatabase "google.golang.org/adk/v2/session/database"
 )
 
 // sessionTables are the tables ADK's database session service owns. They
@@ -19,21 +15,16 @@ import (
 // connects as a non-superuser that must not need DDL.
 var sessionTables = []string{"sessions", "events", "app_states", "user_states"}
 
-// NewSessionService builds the ADK session store on top of the app pool.
-// stdlib.OpenDBFromPool shares the pool's connections rather than opening
-// new ones, so session reads/writes cost no extra connections.
+// NewSessionService builds the session store on top of the app pool.
+// This is the pgx-native implementation (pgx_sessions.go), proven
+// against ADK's own conformance suite and row-compatible with the
+// previous gorm-backed store, which it replaced to drop two
+// dependencies for zero behavior change.
 func NewSessionService(pool *pgxpool.Pool) (session.Service, error) {
-	gdb, err := gorm.Open(postgres.New(postgres.Config{
-		Conn: stdlib.OpenDBFromPool(pool),
-	}), &gorm.Config{})
-	if err != nil {
-		return nil, fmt.Errorf("adkrunner: session gorm: %w", err)
+	if pool == nil {
+		return nil, fmt.Errorf("adkrunner: session pool is required")
 	}
-	svc, err := adkdatabase.NewSessionServiceFromDB(gdb)
-	if err != nil {
-		return nil, fmt.Errorf("adkrunner: session service: %w", err)
-	}
-	return svc, nil
+	return NewPgxSessionService(pool), nil
 }
 
 // VerifySessionTables fails boot loudly when the ADK tables are missing.
