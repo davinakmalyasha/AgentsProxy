@@ -28,7 +28,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // route-only, read-only
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -136,7 +135,7 @@ func (h *handler) build(ctx context.Context, tenantID, date, typ string) (map[st
 
 	err := records.WithTenantTx(ctx, h.pool, tenantID, func(tx pgx.Tx) error {
 		q := `SELECT id::text, name, open_time::text, close_time::text FROM sports_facilities
-			  WHERE tenant_id=$1 AND status='active'`
+			  WHERE tenant_id=$1 AND deleted_at IS NULL AND status='active'`
 		args := []any{tenantID}
 		if typ != "" {
 			q += ` AND type=$2`

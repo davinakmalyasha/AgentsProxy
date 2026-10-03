@@ -47,7 +47,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -333,7 +332,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// Validate the facility exists + is active + within open hours.
 		err := tx.QueryRow(r.Context(),
 			`SELECT name, open_time::text, close_time::text FROM sports_facilities
-			  WHERE id = $1::uuid AND tenant_id = $2 AND status = 'active'`,
+			  WHERE id = $1::uuid AND tenant_id = $2 AND status = 'active' AND deleted_at IS NULL`,
 			req.FacilityID, idn.TenantID(),
 		).Scan(&facility, &openStr, &closeStr)
 		if err != nil {
@@ -397,7 +396,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		if req.CustomerPhone != "" {
 			var cid string
 			if err := tx.QueryRow(r.Context(),
-				`SELECT id::text FROM sports_customers WHERE tenant_id=$1 AND phone=$2`,
+				`SELECT id::text FROM sports_customers WHERE tenant_id=$1 AND phone=$2 AND deleted_at IS NULL`,
 				idn.TenantID(), req.CustomerPhone).Scan(&cid); err == nil {
 				customerID = &cid
 			}
@@ -949,7 +948,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		if affected > 0 && req.Status != nil && *req.Status == "no_show" {
 			if _, err := tx.Exec(r.Context(),
 				`UPDATE sports_customers SET no_show_count = no_show_count + 1
-				  WHERE tenant_id=$1 AND (
+				  WHERE tenant_id=$1 AND deleted_at IS NULL AND (
 				    id = (SELECT customer_id FROM sports_bookings WHERE id=$2::uuid AND customer_id IS NOT NULL)
 				    OR phone = (SELECT customer_phone FROM sports_bookings WHERE id=$2::uuid)
 				  )`,

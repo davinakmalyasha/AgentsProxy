@@ -29,7 +29,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "",
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -94,7 +93,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		var one int
 		err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 			return tx.QueryRow(r.Context(),
-				`SELECT 1 FROM sports_facilities WHERE id=$1::uuid AND tenant_id=$2`,
+				`SELECT 1 FROM sports_facilities WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 				req.FacilityID, idn.TenantID()).Scan(&one)
 		})
 		if err != nil {

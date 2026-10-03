@@ -29,7 +29,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "",
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -165,7 +164,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
-			   FROM sports_recurring_series WHERE tenant_id=$1 ORDER BY weekday, start_time LIMIT $2`,
+			   FROM sports_recurring_series WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY weekday, start_time LIMIT $2`,
 			idn.TenantID(), limit)
 		if err != nil {
 			return err
@@ -201,7 +200,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
-			   FROM sports_recurring_series WHERE id=$1::uuid AND tenant_id=$2`,
+			   FROM sports_recurring_series WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&s.ID, &s.TenantID, &s.FacilityID, &s.CustomerName, &s.CustomerPhone, &s.Weekday,
 			&s.StartTime, &s.EndTime, &s.StartDate, &s.EndDate, &s.Status, &createdAt)
@@ -274,7 +273,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_recurring_series SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
+	sql := fmt.Sprintf("UPDATE sports_recurring_series SET %s WHERE id=$%d::uuid AND tenant_id=$%d AND deleted_at IS NULL",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	var cancelledBookings int64
@@ -345,9 +344,15 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Tombstone, not DELETE: the series row is preserved with who/when,
+		// hidden from lists/reads. (del carries no booking side effect;
+		// the future-booking release lives on patch → paused/ended and is
+		// unchanged.)
+		deletedBy := idn.UserID
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_recurring_series WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID())
+			`UPDATE sports_recurring_series SET deleted_at = now(), deleted_by = $3
+			  WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+			id, idn.TenantID(), deletedBy)
 		if err != nil {
 			return err
 		}

@@ -28,7 +28,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "",
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -141,7 +140,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	var out []expenseResp
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
-			   FROM sports_expenses WHERE tenant_id=$1`
+			   FROM sports_expenses WHERE tenant_id=$1 AND deleted_at IS NULL`
 		args := []any{idn.TenantID()}
 		idx := 2
 		if dateStr != "" {
@@ -195,7 +194,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
-			   FROM sports_expenses WHERE id=$1::uuid AND tenant_id=$2`,
+			   FROM sports_expenses WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&e.ID, &e.TenantID, &e.Category, &e.Amount, &e.Note, &e.SpentAt, &createdAt)
 	})
@@ -259,7 +258,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_expenses SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
+	sql := fmt.Sprintf("UPDATE sports_expenses SET %s WHERE id=$%d::uuid AND tenant_id=$%d AND deleted_at IS NULL",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -289,9 +288,13 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Tombstone, not DELETE: the ledger row is preserved with who/when,
+		// hidden from lists/reads/totals.
+		deletedBy := idn.UserID
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_expenses WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID())
+			`UPDATE sports_expenses SET deleted_at = now(), deleted_by = $3
+			  WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+			id, idn.TenantID(), deletedBy)
 		if err != nil {
 			return err
 		}

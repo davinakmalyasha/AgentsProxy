@@ -39,7 +39,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -175,11 +174,11 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	var args []any
 	if typ != "" {
 		q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE tenant_id = $1 AND type=$2 ORDER BY sort_order, name LIMIT %d`, limit)
+			   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL AND type=$2 ORDER BY sort_order, name LIMIT %d`, limit)
 		args = []any{idn.TenantID(), typ}
 	} else {
 		q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE tenant_id = $1 ORDER BY sort_order, name LIMIT %d`, limit)
+			   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY sort_order, name LIMIT %d`, limit)
 		args = []any{idn.TenantID()}
 	}
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -219,7 +218,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2`,
+			   FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&f.ID, &f.TenantID, &f.Name, &f.Type, &f.Capacity, &f.PricePerHour,
 			&f.OpenTime, &f.CloseTime, &f.Status, &createdAt, &updatedAt)
@@ -312,7 +311,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_facilities SET %s WHERE id = $%d::uuid AND tenant_id = $%d",
+	sql := fmt.Sprintf("UPDATE sports_facilities SET %s WHERE id = $%d::uuid AND tenant_id = $%d AND deleted_at IS NULL",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -363,9 +362,15 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		if bookings > 0 {
 			return errFacilityInUse
 		}
+		// Tombstone, not DELETE: the court row is preserved with who/when,
+		// hidden from lists/reads. The in-use guard above is unchanged:
+		// bookings are soft-cancelled via status, never tombstoned, so any
+		// history still blocks the delete.
+		deletedBy := idn.UserID
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2`,
-			id, idn.TenantID())
+			`UPDATE sports_facilities SET deleted_at = now(), deleted_by = $3
+			  WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
+			id, idn.TenantID(), deletedBy)
 		if err != nil {
 			return err
 		}

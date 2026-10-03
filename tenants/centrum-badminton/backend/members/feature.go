@@ -31,7 +31,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -283,8 +282,38 @@ func (h *handler) topup(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "amount must be > 0")
 		return
 	}
+	// Idempotency-Key (optional phase): a repeated key returns the original
+	// topup without crediting twice. The key lives on a ledger row because
+	// the topup itself is an UPDATE. Absent header behaves as before.
+	idemKey, haveIdem, idemErr := records.IdempotencyKey(w, r)
+	if idemErr != nil {
+		return
+	}
+	dedupBalance := func() (float64, bool) {
+		var bal float64
+		qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+			return tx.QueryRow(r.Context(),
+				`SELECT m.balance FROM sports_member_topups t
+				  JOIN sports_members m ON m.id = t.member_id AND m.tenant_id = t.tenant_id
+				  WHERE t.tenant_id=$1 AND t.idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&bal)
+		})
+		return bal, qerr == nil
+	}
+	if haveIdem {
+		if bal, ok := dedupBalance(); ok {
+			records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "balance": bal, "deduplicated": true})
+			return
+		}
+	}
 	var newBalance float64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO sports_member_topups (tenant_id, member_id, amount, idempotency_key)
+			 VALUES ($1,$2::uuid,$3,NULLIF($4,''))`,
+			idn.TenantID(), id, req.Amount, idemKey); err != nil {
+			return err
+		}
 		err := tx.QueryRow(r.Context(),
 			`UPDATE sports_members SET balance = balance + $1, updated_at = now()
 			  WHERE id = $2::uuid AND tenant_id = $3
@@ -294,6 +323,13 @@ func (h *handler) topup(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
+		// Lost the ledger race with a duplicate key: return the winner.
+		if haveIdem && records.IsUniqueViolation(err) {
+			if bal, ok := dedupBalance(); ok {
+				records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "balance": bal, "deduplicated": true})
+				return
+			}
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			records.WriteJSONError(w, http.StatusNotFound, "not found")
 			return
