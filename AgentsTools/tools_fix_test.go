@@ -49,6 +49,12 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
+	// Apply migrations here rather than relying on another package having done
+	// it: Go runs this package first (capital A sorts before cmd/ and internal/),
+	// so on a fresh CI database the sports_* tables do not exist yet.
+	if err := db.Migrate(ctx, adminPool); err != nil {
+		t.Fatal(err)
+	}
 	for _, stmt := range []string{
 		`DELETE FROM sports_bookings WHERE tenant_id=$1`,
 		`DELETE FROM sports_customers WHERE tenant_id=$1`,
