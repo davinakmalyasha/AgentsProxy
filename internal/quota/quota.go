@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,24 +32,54 @@ func (e *QuotaExceededError) Error() string {
 // Check returns (remaining, resetAt, error). When exceeded, the
 // returned error is *QuotaExceededError so handlers can surface the
 // resetAt to clients.
+//
+// Fail-closed on the money side: a corrupt cache value falls back to the
+// DB SUM (never treated as zero usage), and a DB failure denies. A
+// non-positive limit denies outright — quota math must never grant.
 func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID string, limit int) (int, time.Time, error) {
 	now := time.Now().UTC()
 	monthKey := now.Format("200601")
 	rkey := keyPrefix + clientID + ":" + monthKey
+	resetAt := nextMonthStart(now)
 
-	var used int
-	if v, err := rdb.Get(ctx, rkey).Result(); err == nil {
-		used, _ = strconv.Atoi(v)
-	} else {
-		// Miss → DB SUM, then SETEX.
-		used, err = sumMonthUsage(ctx, db, clientID)
-		if err != nil {
-			return 0, time.Time{}, fmt.Errorf("quota sum: %w", err)
-		}
-		_ = rdb.Set(ctx, rkey, used, cacheTTL).Err()
+	if limit <= 0 {
+		return 0, resetAt, &QuotaExceededError{ResetAt: resetAt, Used: 0, Limit: limit}
 	}
 
-	resetAt := nextMonthStart(now)
+	var used int
+	fromCache := false
+	v, gerr := rdb.Get(ctx, rkey).Result()
+	switch {
+	case gerr == nil:
+		n, convErr := strconv.Atoi(strings.TrimSpace(v))
+		if convErr != nil || n < 0 {
+			// Corrupt cache value: never treat as zero usage. Fall
+			// through to the DB SUM, same as a miss.
+			slog.Warn("quota cache corrupt, refetching from DB", "client_id", clientID, "value", v, "err", convErr)
+		} else {
+			used, fromCache = n, true
+		}
+	case errors.Is(gerr, redis.Nil):
+		// Normal miss: fall through to the DB SUM below.
+		slog.Debug("quota cache miss", "client_id", clientID)
+	default:
+		slog.Warn("quota cache unavailable, using DB", "client_id", clientID, "err", gerr)
+	}
+	if !fromCache {
+		var err error
+		used, err = sumMonthUsage(ctx, db, clientID)
+		if err != nil {
+			slog.Error("quota sum failed, denying", "client_id", clientID, "err", err)
+			return 0, time.Time{}, fmt.Errorf("quota sum: %w", err)
+		}
+		if used < 0 {
+			used = 0
+		}
+		if err := rdb.Set(ctx, rkey, used, cacheTTL).Err(); err != nil {
+			slog.Warn("quota cache repopulate", "client_id", clientID, "err", err)
+		}
+	}
+
 	remaining := limit - used
 	if remaining < 0 {
 		remaining = 0

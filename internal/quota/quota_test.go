@@ -116,3 +116,33 @@ func TestCheck_CacheHit(t *testing.T) {
 		t.Errorf("remaining=%d want 500", remaining)
 	}
 }
+
+// TestCheck_CorruptCacheFallsBackToDB: a garbage cached value must never
+// read as zero usage. The DB SUM wins.
+func TestCheck_CorruptCacheFallsBackToDB(t *testing.T) {
+	ctx, pool, rdb, id := setup(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO usage (client_id, tokens_in, tokens_out, model, kind) VALUES ($1, 700, 100, 'm', 'chat')`, id); err != nil {
+		t.Fatal(err)
+	}
+	monthKey := time.Now().UTC().Format("200601")
+	rdb.Set(ctx, "quota:"+id+":"+monthKey, "garbage!!", time.Minute)
+	remaining, _, err := Check(ctx, pool, rdb, id, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 200 {
+		t.Errorf("remaining=%d want 200 (800 used from DB, not 0 from corrupt cache)", remaining)
+	}
+}
+
+// TestCheck_NonPositiveLimitDenies: quota math must never grant on a
+// zero/negative limit.
+func TestCheck_NonPositiveLimitDenies(t *testing.T) {
+	ctx, pool, rdb, id := setup(t)
+	if _, _, err := Check(ctx, pool, rdb, id, 0); !IsExceeded(err) {
+		t.Errorf("limit 0 err=%v want QuotaExceeded", err)
+	}
+	if _, _, err := Check(ctx, pool, rdb, id, -5); !IsExceeded(err) {
+		t.Errorf("limit -5 err=%v want QuotaExceeded", err)
+	}
+}

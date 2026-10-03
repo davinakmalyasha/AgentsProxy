@@ -629,6 +629,54 @@ func TestAdmin_Usage(t *testing.T) {
 	}
 }
 
+// TestAdmin_UsageRejectsBadDates: garbage from/to must 400, never silently
+// unfilter into a lifetime report. Inverted range must 400 too.
+func TestAdmin_UsageRejectsBadDates(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	for _, q := range []string{
+		"?from=garbage",
+		"?to=2026-13-99",
+		"?from=2026-03-01T00:00:00Z&to=2026-01-01T00:00:00Z",
+	} {
+		req, _ := http.NewRequest("GET", srv.URL+"/v1/admin/usage"+q, nil)
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		resp := mustReq(t, req)
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("usage%s status=%d body=%s want 400", q, resp.StatusCode, raw)
+		}
+	}
+}
+
+// TestAdmin_CreateRejectsBadShape: malformed tenant ids and out-of-range
+// quotas must 400, never become RLS key material or silent unlimited.
+func TestAdmin_CreateRejectsBadShape(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	bodies := []string{
+		`{"name":"x","tenant_id":"CENTRUM"}`,
+		`{"name":"x","tenant_id":"has space"}`,
+		`{"name":"x","tenant_id":"a' OR 1=1"}`,
+		`{"name":"x","tenant_id":"t","monthly_quota_tokens":-1}`,
+		`{"name":"x","tenant_id":"t","monthly_quota_tokens":100000001}`,
+	}
+	for i, b := range bodies {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(b)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		resp := mustReq(t, req)
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("case %d status=%d body=%s want 400", i, resp.StatusCode, raw)
+		}
+	}
+}
+
 func lookupClientID(t *testing.T, pool *pgxpool.Pool, tenant string) string {
 	t.Helper()
 	var id string

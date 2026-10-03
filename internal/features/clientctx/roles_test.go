@@ -6,7 +6,7 @@
 //
 // IsStaffOwner() is false for it. A client token is one static secret,
 // usually embedded in a site or an integration; letting it promote a
-// staff account or rewrite a bot's allow_chat_ids would turn a leaked
+// staff account would turn a leaked
 // integration credential into persistent human-level access.
 //
 // These tests pin both halves, because the failure mode of each is the

@@ -2,6 +2,7 @@ package agentstools
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -20,6 +21,10 @@ func CapKey(tenantID string) string {
 }
 
 // CostCapAllowedForRole checks per-tenant+role daily cap (20/80/150). Single LLM_API_KEY shared.
+//
+// Fail-closed: a Redis error denies, because this guards money (the shared
+// key). Unlimited spend on an outage is worse than blocked chat. The nil-RDB
+// bypass is test-harness only; production always wires CapRDB in main.go.
 func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	if CapRDB == nil {
 		return true
@@ -36,13 +41,18 @@ func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	key := CapKeyForRole(tenantID, role)
 	n, err := CapRDB.Incr(ctx, key).Result()
 	if err != nil {
-		return true
+		slog.Error("cost cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
+		return false
 	}
 	if n == 1 {
-		CapRDB.Expire(ctx, key, 24*time.Hour)
+		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
+			slog.Warn("cost cap expire", "tenant", tenantID, "role", role, "err", err)
+		}
 	}
 	// Also increment legacy global key for backward compat / total view
-	CapRDB.Incr(ctx, CapKey(tenantID))
+	if err := CapRDB.Incr(ctx, CapKey(tenantID)).Err(); err != nil {
+		slog.Warn("cost cap legacy incr", "tenant", tenantID, "err", err)
+	}
 	return n <= int64(cap)
 }
 
@@ -60,7 +70,8 @@ func RPDKeyForUser(tenantID, role, userID string) string {
 }
 
 // RPDCapAllowedForUser checks per-person daily cap (client 30, pegawai 80, owner 150)
-// Returns false when the person has hit the cap.
+// Returns false when the person has hit the cap -- or when Redis is
+// unavailable (fail-closed, same money reasoning as CostCapAllowedForRole).
 func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bool {
 	if CapRDB == nil {
 		return true
@@ -77,18 +88,22 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 	key := RPDKeyForUser(tenantID, role, userID)
 	n, err := CapRDB.Incr(ctx, key).Result()
 	if err != nil {
-		return true
+		slog.Error("rpd cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
+		return false
 	}
 	if n == 1 {
-		CapRDB.Expire(ctx, key, 24*time.Hour)
+		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
+			slog.Warn("rpd cap expire", "tenant", tenantID, "role", role, "err", err)
+		}
 	}
 	return n <= int64(cap)
 }
 
 // DefaultOwnerContact is the fallback when a tenant names no contact in
-// its project.json. Per-tenant contact overrides it via ScopeReplyFor /
-// AbuseReplyFor.
-const DefaultOwnerContact = "0815-9408-136 (Owner)"
+// its project.json. It is deliberately NOT a real person's number: a tenant
+// without its own contact must never route its visitors to another tenant.
+// Every tenant sets its own contact in memory/project.json.
+const DefaultOwnerContact = "kontak resmi venue"
 
 // ScopeReplyFor is the client-tier refusal for out-of-scope messages,
 // addressed to the tenant's own venue and contact. With the centrum

@@ -2,11 +2,40 @@
 package records
 
 import (
+	"fmt"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+// TenantSlugRe bounds a tenant id before it reaches a query, and keeps it
+// to the lowercase-slug shape tenants actually use. Single source: identity
+// (query param) and admin (provisioning) validate against this.
+var TenantSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// ValidateTenantSlug rejects empty, over-long, or non-slug tenant ids.
+func ValidateTenantSlug(t string) error {
+	if !TenantSlugRe.MatchString(t) {
+		return fmt.Errorf("invalid tenant_id")
+	}
+	return nil
+}
+
+// MaxQuotaTokens caps monthly_quota_tokens: above this the SUM never trips,
+// which is unlimited billing by typo.
+const MaxQuotaTokens = 100_000_000
+
+// ValidateQuota rejects negative quotas and absurd ones. Zero means
+// "unset" at creation (default applies); on PATCH zero is rejected by the
+// caller passing requireNonZero.
+func ValidateQuota(q int) error {
+	if q < 0 || q > MaxQuotaTokens {
+		return fmt.Errorf("invalid monthly_quota_tokens")
+	}
+	return nil
+}
 
 // WithValidID decorates an endpoint whose route contains {id}: a
 // non-UUID id is rejected with 400 before the handler runs (otherwise
