@@ -56,11 +56,19 @@ func exportReportExcelTool(pool *pgxpool.Pool) agentstools.Tool {
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			rel, err := agentstools.SaveReportFile(tenantID, from, to, typ, f)
+			raw, err := agentstools.WriteWorkbook(f)
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			token, err := agentstools.MintReportToken(tenantID, rel)
+			name, err := agentstools.ReportFilename(from, to, typ)
+			if err != nil {
+				return "error: " + err.Error()
+			}
+			key, err := agentstools.SaveReport(ctx, tenantID, name, raw)
+			if err != nil {
+				return "error: " + err.Error()
+			}
+			token, err := agentstools.MintReportToken(ctx, pool, tenantID, key, len(raw))
 			if err != nil {
 				return "error: " + err.Error()
 			}

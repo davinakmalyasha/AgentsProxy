@@ -1,22 +1,21 @@
 // Chat-generated Excel revenue reports (owner-only).
 //
-// Flow: owner asks in Telegram/staff webapp â†’ export_report_excel Tool
-// builds a .xlsx under data/reports/{tenant}/ â†’ mints a 32-byte download
-// token in Redis (30 min TTL, tenant-scoped) â†’ returns an
-// "XLSX:/v1/reports/{token}.xlsx" marker the LLM presents as a link and
-// the Telegram handler turns into a document attachment.
+// Flow: owner asks in the app → export_report_excel Tool builds a .xlsx
+// under durable report storage → mints a 32-byte download token in Redis
+// (30 min TTL, tenant-scoped) → returns an
+// "XLSX:/v1/reports/{token}.xlsx" marker the LLM presents as a link.
 //
 // DONE: WS2 (xlsx via chat)
 package agentstools
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -50,10 +49,10 @@ var (
 	DateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 )
 
-// reportTicket binds a download token to one tenant + one file.
+// reportTicket binds a download token to one tenant + one object key.
 type reportTicket struct {
 	Tenant string `json:"tenant"`
-	File   string `json:"file"` // base name only, under ReportsDir/tenant/
+	File   string `json:"file"` // opaque object key in the active ReportStorage
 }
 
 // ---- marker (agent reply â†” channels) ----
@@ -98,40 +97,16 @@ func lookupTicket(token string) (reportTicket, error) {
 	return t, nil
 }
 
-// ticketPath confines a ticket to reportsDir/tenant/, base name only.
-func ticketPath(t reportTicket) string {
-	return filepath.Join(ReportsDir, t.Tenant, filepath.Base(t.File))
-}
-
-// OpenReportFile validates a token and opens the file for streaming
-// (HTTP downloads). Caller must Close.
-func OpenReportFile(token string) (*os.File, string, error) {
-	t, err := lookupTicket(token)
-	if err != nil {
-		return nil, "", err
-	}
-	p := ticketPath(t)
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, "", fmt.Errorf("file gone")
-	}
-	return f, filepath.Base(t.File), nil
-}
-
-// ResolveReportDownload validates a token from the download path and
-// returns the file name + bytes. Used by the Telegram handler (server-side,
-// no HTTP round-trip) and the HTTP download route.
-func ResolveReportDownload(token string) (filename string, data []byte, err error) {
+// LoadReport validates a token and returns the download filename + bytes
+// from the active ReportStorage backend.
+func LoadReport(token string) (filename string, data []byte, err error) {
 	t, err := lookupTicket(token)
 	if err != nil {
 		return "", nil, err
 	}
-	// Never trust the ticket blindly: confine to ReportsDir/tenant/, base name only.
-	b, err := os.ReadFile(ticketPath(t))
-	if err != nil {
-		return "", nil, fmt.Errorf("file gone")
-	}
-	return filepath.Base(t.File), b, nil
+	// Never trust the ticket blindly: the store confines keys to its own
+	// tenant/object layout.
+	return ReportStorage.Load(context.Background(), t.Tenant, t.File)
 }
 
 // ---- Tool ----
@@ -185,7 +160,7 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 			        COALESCE(SUM(amount) FILTER (WHERE method='qris'),0),
 			        COUNT(*)
 			   FROM sports_payments
-			  WHERE tenant_id=$1 AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
+			  WHERE tenant_id=$1 AND deleted_at IS NULL AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
 			    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date < $3::date
 			  GROUP BY 1 ORDER BY 1`,
 			tenantID, from, to)
@@ -212,7 +187,7 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 		// Expenses detail.
 		r, err = tx.Query(ctx,
 			`SELECT spent_at, category, note, amount FROM sports_expenses
-			  WHERE tenant_id=$1 AND spent_at >= $2::date AND spent_at < $3::date
+			  WHERE tenant_id=$1 AND deleted_at IS NULL AND spent_at >= $2::date AND spent_at < $3::date
 			  ORDER BY spent_at`,
 			tenantID, from, to)
 		if err != nil {
@@ -320,6 +295,21 @@ func Rp(v float64) string {
 		return "-Rp" + Idr(-v)
 	}
 	return "Rp" + Idr(v)
+}
+
+// safeCell neutralizes spreadsheet-formula injection: user-controlled
+// text starting with =,+,-,@ (after whitespace) is prefixed with a
+// literal quote so Excel/Sheets render it as text, never execute it.
+func safeCell(s string) string {
+	t := strings.TrimLeft(s, " \t\r\n")
+	if t == "" {
+		return s
+	}
+	switch t[0] {
+	case '=', '+', '-', '@', '|', '%':
+		return "'" + s
+	}
+	return s
 }
 
 func headerStyle(f *excelize.File) int {
@@ -434,8 +424,8 @@ func BuildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File,
 	f.SetCellValue(kan, fmt.Sprintf("B%d", topStart), "Qty")
 	f.SetCellStyle(kan, fmt.Sprintf("A%d", topStart), fmt.Sprintf("B%d", topStart), hs)
 	for i, t := range d.KantinTop {
-		f.SetCellValue(kan, fmt.Sprintf("A%d", topStart+1+i), t.Name)
-		f.SetCellValue(kan, fmt.Sprintf("B%d", topStart+1+i), t.Qty)
+		_ = f.SetCellStr(kan, fmt.Sprintf("A%d", topStart+1+i), safeCell(t.Name))
+		_ = f.SetCellValue(kan, fmt.Sprintf("B%d", topStart+1+i), t.Qty)
 	}
 	f.SetColWidth(kan, "A", "A", 16)
 	f.SetColWidth(kan, "B", "D", 16)
@@ -453,10 +443,14 @@ func BuildReportWorkbook(d reportData, tenant, from, to string) (*excelize.File,
 	}
 	for i, r := range d.Expenses {
 		n := i + 2
-		vals := []any{r.Date, r.Category, r.Note, r.Amount}
+		vals := []any{r.Date, safeCell(r.Category), safeCell(r.Note), r.Amount}
 		for j, v := range vals {
 			cell, _ := excelize.CoordinatesToCellName(j+1, n)
-			f.SetCellValue(exp, cell, v)
+			if s, ok := v.(string); ok {
+				_ = f.SetCellStr(exp, cell, s)
+			} else {
+				_ = f.SetCellValue(exp, cell, v)
+			}
 		}
 	}
 	etot := len(d.Expenses) + 2
@@ -487,38 +481,114 @@ func SafeTenant(tenant string) string {
 	return t
 }
 
-func SaveReportFile(tenant, from, to, typ string, f *excelize.File) (string, error) {
-	t := SafeTenant(tenant)
-	dir := filepath.Join(ReportsDir, t)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", err
+// ReportFilename builds the server-side download filename. Random suffix
+// avoids collisions; it is not auth (the ticket is).
+func ReportFilename(from, to, typ string) (string, error) {
+	if !DateRe.MatchString(from) || !DateRe.MatchString(to) {
+		return "", fmt.Errorf("from/to must be YYYY-MM-DD")
 	}
 	var rb [8]byte
 	if _, err := rand.Read(rb[:]); err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("laporan-%s_%s-%s-%s.xlsx", from, to, typ, hex.EncodeToString(rb[:])[:8])
-	if err := f.SaveAs(filepath.Join(dir, name)); err != nil {
-		return "", err
-	}
-	return name, nil
+	return fmt.Sprintf("laporan-%s_%s-%s-%s.xlsx", from, to, typ, hex.EncodeToString(rb[:])[:8]), nil
 }
 
-func MintReportToken(tenant, file string) (string, error) {
+// WriteWorkbook serializes a workbook to bytes for the storage backend.
+func WriteWorkbook(f *excelize.File) ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := f.WriteTo(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// SaveReport persists report bytes through the active ReportStorage
+// backend and returns the opaque object key for the ticket.
+func SaveReport(ctx context.Context, tenant, name string, data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("empty report")
+	}
+	if len(data) > ReportMaxBytes {
+		return "", fmt.Errorf("report too large (%d bytes, max %d)", len(data), ReportMaxBytes)
+	}
+	return ReportStorage.Save(ctx, tenant, name, data)
+}
+
+func reportTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// MintReportToken binds an object key to a download token: Redis holds the
+// hot ticket (30 min TTL), Postgres holds the manifest row the sweeper
+// uses to reclaim the object. On manifest failure the ticket is revoked
+// and the object removed so no orphan survives.
+func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey string, size int) (string, error) {
 	if ReportRDB == nil {
 		return "", fmt.Errorf("report store unavailable (Redis)")
+	}
+	if pool == nil {
+		return "", fmt.Errorf("report store unavailable (database)")
 	}
 	var rb [32]byte
 	if _, err := rand.Read(rb[:]); err != nil {
 		return "", err
 	}
 	token := hex.EncodeToString(rb[:])
-	t := reportTicket{Tenant: SafeTenant(tenant), File: filepath.Base(file)}
+	t := reportTicket{Tenant: SafeTenant(tenant), File: objectKey}
 	b, _ := json.Marshal(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := ReportRDB.Set(ctx, reportTokenPrefix+token, string(b), reportTTL).Err(); err != nil {
+	if err := ReportRDB.Set(rctx, reportTokenPrefix+token, string(b), reportTTL).Err(); err != nil {
+		return "", err
+	}
+	_, err := pool.Exec(ctx,
+		`INSERT INTO report_objects (token_hash, tenant_id, object_key, size_bytes, expires_at)
+		 VALUES ($1,$2,$3,$4,now() + make_interval(secs => $5))
+		 ON CONFLICT (token_hash) DO NOTHING`,
+		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds()))
+	if err != nil {
+		_ = ReportRDB.Del(rctx, reportTokenPrefix+token).Err()
+		_ = ReportStorage.Delete(ctx, SafeTenant(tenant), objectKey)
 		return "", err
 	}
 	return token, nil
+}
+
+// PurgeExpiredReports deletes expired manifest rows and their objects.
+// Idempotent: safe for concurrent sweepers and for either backend.
+func PurgeExpiredReports(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	if pool == nil {
+		return 0, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT token_hash, tenant_id, object_key FROM report_objects
+		  WHERE expires_at < now() LIMIT 100`)
+	if err != nil {
+		return 0, err
+	}
+	type expired struct{ hash, tenant, key string }
+	var batch []expired
+	for rows.Next() {
+		var e expired
+		if err := rows.Scan(&e.hash, &e.tenant, &e.key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		batch = append(batch, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range batch {
+		_ = ReportStorage.Delete(ctx, e.tenant, e.key)
+		if _, err := pool.Exec(ctx, `DELETE FROM report_objects WHERE token_hash=$1`, e.hash); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
