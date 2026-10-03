@@ -4,7 +4,7 @@
 
 ## Naming
 
-- Folder: `internal/features/clients/<tenant-slug>/`
+- Folder: `tenants/<slug>/backend/<name>/`
 - The folder name is a tenant slug, **not** a feature name. Two tenants
   may use the same feature (e.g. "loyalty") but each gets its own folder
   if their contracts differ.
@@ -81,4 +81,5 @@ to move it to `internal/features/shared/{name}/`. Steps:
 2. Update `feature.go` to remove the tenant-specific name in the README.
 3. Run the full test suite; cover the vertical-defaults map in
    `internal/features/defaults.go` if the feature should be on by default.
-4. Update `DONE.md` with the new shared feature.
+4. Record the promotion in `docs/refinementNotes.md` §3.1 (shipped scope) and update
+   `internal/features/defaults.go` if the feature should be on by default.

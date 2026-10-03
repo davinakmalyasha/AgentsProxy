@@ -49,9 +49,6 @@ type Layers struct {
 	Display string
 	// ToolDefs is the role-filtered tool list, already narrowed.
 	ToolDefs []string
-	// Message is the user's turn. Kept on the struct because a future layer
-	// (retrieval, per-message skills) will need it; today nothing reads it.
-	Message string
 	// Vertical names the domain when the tenant has no project config.
 	Vertical string
 	Now      time.Time

@@ -21,9 +21,8 @@ func init() { Register() }
 // after features.ResetForTest().
 func Register() {
 	features.Register(features.Feature{
-		Name:      featureName,
-		Kind:      "booking",
-		DefaultOn: true,
+		Name: featureName,
+		Kind: "booking",
 		ValidatePayload: func(raw json.RawMessage) error {
 			var p struct {
 				Date     string `json:"date"`
