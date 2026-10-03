@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -85,6 +86,21 @@ func New(cfg Config) (*Runner, error) {
 		if _, err := adaptTool(t, "boot-check"); err != nil {
 			return nil, err
 		}
+	}
+	// Log the live tool surface per tenant: names plus total schema
+	// bytes. This is the one place a human can see exactly what each
+	// tenant's model gets to call -- the declarations themselves only
+	// exist on the wire otherwise.
+	for _, tenant := range agentstools.Tenants() {
+		ts := agentstools.NewToolSetFor(cfg.Pool, tenant, "owner")
+		schemaBytes := 0
+		for _, name := range ts.Names() {
+			if t, ok := ts.Get(name); ok {
+				schemaBytes += len(t.Parameters)
+			}
+		}
+		slog.Info("adkrunner: tenant tools live",
+			"tenant", tenant, "tools", len(ts.Names()), "schema_bytes", schemaBytes)
 	}
 	return &Runner{cfg: cfg, model: m, newToolSet: agentstools.NewToolSetFor}, nil
 }

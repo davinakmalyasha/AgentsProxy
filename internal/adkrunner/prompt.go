@@ -109,9 +109,18 @@ func Assemble(l Layers) string {
 	fmt.Fprintf(&b, "Today's date is %s (WIB, Asia/Jakarta). Resolve relative dates from it, and never state a different \"today\".\n",
 		wibToday(l.Now))
 	if len(l.ToolDefs) > 0 {
+		// Names only, not the full "name: description" lines. The function
+		// declarations already carry every description, so repeating them
+		// here costs input tokens on every turn for zero new information.
+		// This list exists so the model (and a human reading the prompt)
+		// can see the available surface at a glance.
 		b.WriteString("\nTools you can call right now:\n")
 		for _, d := range l.ToolDefs {
-			b.WriteString("- " + d + "\n")
+			name := d
+			if i := strings.Index(d, ":"); i > 0 {
+				name = strings.TrimSpace(d[:i])
+			}
+			b.WriteString("- " + name + "\n")
 		}
 		b.WriteString("\n")
 	}
