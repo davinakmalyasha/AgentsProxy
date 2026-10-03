@@ -12,7 +12,7 @@ package features
 //  3. blank-import it from cmd/server/main.go
 //
 // To add a custom (per-tenant) feature:
-//  1. copy internal/features/clients/_template/ to a new folder
+//  1. copy internal/features/_template/ to tenants/<slug>/backend/<name>/
 //  2. edit the feature, set VerticalSlugs to the tenant's vertical
 //  3. blank-import it from cmd/server/main.go
 func Init() {

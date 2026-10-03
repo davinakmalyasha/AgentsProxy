@@ -7,7 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// MoneyCap is the per-tenant daily LLM-call cap (Centrum's guard).
+// MoneyCap is the per-tenant daily LLM-call cap for the owner tier.
 const MoneyCap = 150
 
 // CapRDB is the Redis client used by the cost cap. Set once in

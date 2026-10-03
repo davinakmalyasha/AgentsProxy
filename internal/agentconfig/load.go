@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	agentprojects "github.com/davinakmalyasha/agents-proxy"
+	tenantembed "github.com/davinakmalyasha/agents-proxy"
 )
 
 // Load parses every tenant under tenants/<slug>/.
@@ -47,7 +47,7 @@ func Load() (map[string]*Project, error) {
 // listTenants returns the non-template directories under a folder of the
 // embedded tree (tenants/ at top level, _template skipped).
 func listTenants(folder string) (map[string]bool, error) {
-	entries, err := fs.ReadDir(agentprojects.AgentsFS, folder)
+	entries, err := fs.ReadDir(tenantembed.AgentsFS, folder)
 	if err != nil {
 		return nil, fmt.Errorf("read %s/: %w", folder, err)
 	}
@@ -70,7 +70,7 @@ func loadOne(dir string) (*Project, error) {
 	p := &Project{Slug: strings.ToLower(dir), Display: dir}
 	memoryRoot := path.Join("tenants", dir, "memory")
 
-	if raw, err := fs.ReadFile(agentprojects.AgentsFS, path.Join(memoryRoot, "project.json")); err == nil {
+	if raw, err := fs.ReadFile(tenantembed.AgentsFS, path.Join(memoryRoot, "project.json")); err == nil {
 		var doc struct {
 			Slug     string `json:"slug"`
 			Display  string `json:"display"`
@@ -92,7 +92,7 @@ func loadOne(dir string) (*Project, error) {
 		return nil, fmt.Errorf("tenant %q: read project.json: %w", dir, err)
 	}
 
-	if b, err := fs.ReadFile(agentprojects.AgentsFS, path.Join(memoryRoot, "SystemPrompt.md")); err == nil {
+	if b, err := fs.ReadFile(tenantembed.AgentsFS, path.Join(memoryRoot, "SystemPrompt.md")); err == nil {
 		p.SystemPrompt = string(b)
 	} else if !isNotExist(err) {
 		return nil, fmt.Errorf("tenant %q: read SystemPrompt.md: %w", dir, err)
@@ -110,7 +110,7 @@ func loadOne(dir string) (*Project, error) {
 	}
 	p.Skills = skills
 
-	if raw, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("tenants", dir, "mcp", "mcp.json")); err == nil {
+	if raw, err := fs.ReadFile(tenantembed.AgentsFS, path.Join("tenants", dir, "mcp", "mcp.json")); err == nil {
 		// Object form, not a bare array, so the file can carry a comment
 		// explaining why the list is empty -- which is the first question
 		// anyone asks when they open it.
@@ -130,7 +130,7 @@ func loadOne(dir string) (*Project, error) {
 // loadDocs reads every .md under dir as one knowledge document each, in
 // sorted order so the assembled prompt is deterministic.
 func loadDocs(dir string) ([]Document, error) {
-	entries, err := fs.ReadDir(agentprojects.AgentsFS, dir)
+	entries, err := fs.ReadDir(tenantembed.AgentsFS, dir)
 	if err != nil {
 		if isNotExist(err) {
 			return nil, nil
@@ -142,7 +142,7 @@ func loadDocs(dir string) ([]Document, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
-		b, err := fs.ReadFile(agentprojects.AgentsFS, path.Join(dir, e.Name()))
+		b, err := fs.ReadFile(tenantembed.AgentsFS, path.Join(dir, e.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("read %s/%s: %w", dir, e.Name(), err)
 		}
@@ -163,7 +163,7 @@ func loadDocs(dir string) ([]Document, error) {
 // follows only sometimes. If the file ever grows noisy enough that always-on
 // hurts, split it -- do not add a matching layer on top.
 func loadSkills(dir string) ([]Skill, error) {
-	entries, err := fs.ReadDir(agentprojects.AgentsFS, path.Join("tenants", dir, "skills"))
+	entries, err := fs.ReadDir(tenantembed.AgentsFS, path.Join("tenants", dir, "skills"))
 	if err != nil {
 		if isNotExist(err) {
 			return nil, nil
@@ -175,7 +175,7 @@ func loadSkills(dir string) ([]Skill, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
-		b, err := fs.ReadFile(agentprojects.AgentsFS, path.Join("tenants", dir, "skills", e.Name()))
+		b, err := fs.ReadFile(tenantembed.AgentsFS, path.Join("tenants", dir, "skills", e.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("read tenants/%s/skills/%s: %w", dir, e.Name(), err)
 		}

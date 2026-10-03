@@ -1,4 +1,4 @@
-package api
+package records
 
 import (
 	"net/http"
@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-
-	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
 // WithValidID must wrap the ENDPOINT: chi only populates URLParams after
@@ -16,7 +14,7 @@ import (
 func TestWithValidIDAtEndpoint(t *testing.T) {
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
-		r.Get("/bookings/{id}", records.WithValidID(func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/bookings/{id}", WithValidID(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 	})

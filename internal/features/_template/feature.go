@@ -1,5 +1,5 @@
-// Package _template is the Phase 3 starter for a per-tenant custom
-// feature. Copy this folder to internal/features/clients/<slug>/
+// Package _template is the starter for a per-tenant custom
+// feature. Copy this folder to tenants/<slug>/backend/<name>/
 // and edit the three places marked TODO.
 //
 // DONE: PRD 6.5 (custom feature template) / STANDARDS A, F, H

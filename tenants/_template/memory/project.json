@@ -1,6 +1,7 @@
 {
-  "comment": "Identity of this project. `slug` is the tenant id it serves - it must match clients.tenant_id, because that is what every WHERE tenant_id filter and RLS policy keys on. The DIRECTORY name is only a label.",
+  "comment": "Identity of this project. `slug` is the tenant id it serves - it must match clients.tenant_id, because that is what every WHERE tenant_id filter and RLS policy keys on. The DIRECTORY name is only a label. `vertical` must be one of the builder's AllowedVerticals (fnb, salon, laundry, klinik, gym, bimbel, bengkel, beauty, travel, property, katering, photo, sports). `contact` is the owner contact quoted in refusal and quota replies.",
   "slug": "tenant-slug-here",
   "display": "Tenant Display Name",
-  "vertical": "sports"
+  "vertical": "sports",
+  "contact": ""
 }

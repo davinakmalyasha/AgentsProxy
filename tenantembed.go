@@ -1,4 +1,4 @@
-// Package agentprojects embeds the tenants/ tree into the binary.
+// Package tenantembed embeds the tenants/ tree into the binary.
 //
 // It exists for one mechanical reason: go:embed patterns are relative to
 // the source file and may not use "..", so only a file at the repository
@@ -9,7 +9,7 @@
 // folder that only exists on one machine is a deployment accident, not a
 // configuration -- and because reading tenant-controlled paths at runtime
 // is the file-traversal class ARCHITECTURE.md already records the CVE for.
-package agentprojects
+package tenantembed
 
 import "embed"
 

@@ -1,4 +1,4 @@
-// Exported helpers so custom features (internal/features/clients/*)
+// Exported helpers so custom features (tenants/<slug>/backend/*)
 // can reuse the tenant-transaction and JSON plumbing without living
 // in this package.
 //
