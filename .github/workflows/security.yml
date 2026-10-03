@@ -15,6 +15,11 @@ on:
 permissions:
   contents: read
   security-events: write
+  # Declaring any scope sets every unlisted scope to none. gitleaks-action
+  # scans the pull request itself on pull_request, which reads the PR's commits
+  # through the API; without this it fails 403 "Resource not accessible by
+  # integration" before it ever reaches the scan.
+  pull-requests: read
 
 jobs:
   govulncheck:
