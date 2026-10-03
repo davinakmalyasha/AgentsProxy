@@ -159,11 +159,11 @@ func NewToolSetFor(pool *pgxpool.Pool, tenant, role string) *ToolSet {
 			continue
 		}
 		if role == "owner" {
-			ts.tools[t.Name] = applyToolMeta(t)
+			ts.tools[t.Name] = t
 			continue
 		}
 		if AllowedToolsFor(role)[t.Name] {
-			ts.tools[t.Name] = applyToolMeta(t)
+			ts.tools[t.Name] = t
 		}
 	}
 	return ts

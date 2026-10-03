@@ -12,10 +12,11 @@ import (
 // Runtime validation of tool arguments against the JSON Schema that was
 // already being sent to the provider.
 //
-// Every tool declares a schema in meta.go and it goes out to the model,
-// but nothing ever checked the model's answer against it. A tool's Run
-// then json.Unmarshals into a struct, and that is a no-op for a field of
-// the wrong type: `{"limit": "abc"}` leaves Limit at its zero value, and
+// Every tool declares its schema inline in its own file next to the code
+// that implements it, and it goes out to the model, but nothing ever
+// checked the model's answer against it. A tool's Run then
+// json.Unmarshals into a struct, and that is a no-op for a field of the
+// wrong type: `{"limit": "abc"}` leaves Limit at its zero value, and
 // top_customers turned that into "abc" being ignored and the default
 // limit of 5 being used with no indication anything was wrong. The schema
 // was documentation the server never held itself to.

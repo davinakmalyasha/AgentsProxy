@@ -20,9 +20,10 @@ func init() { agentstools.Register("centrum", "query_income", queryIncomeTool) }
 func queryIncomeTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "query_income",
-		Description: "Income for a period: money actually received from payments plus canteen, " +
-			"with the committed booking value reported alongside. " +
-			"Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD), month? (YYYY-MM)}. Defaults to this month.",
+		Description: "Money actually received in a period (payments plus canteen), with the " +
+			"committed booking value alongside. Use for 'how much did we take' questions. " +
+			"For profit after expenses use query_net_profit; for one operating day use closing_report.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive, defaults to this month"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE, defaults to next month"},"month":{"type":"string","description":"shorthand YYYY-MM for a whole month, ignored when from/to are given"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From  string `json:"from"`

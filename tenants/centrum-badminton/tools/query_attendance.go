@@ -18,8 +18,10 @@ func init() { agentstools.Register("centrum", "query_attendance", queryAttendanc
 
 func queryAttendanceTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "query_attendance",
-		Description: "Count people who booked. Args: {date? (YYYY-MM-DD)}. Defaults to today. Returns count.",
+		Name: "query_attendance",
+		Description: "How many people are booked on one day. Use for headcount questions; " +
+			"for booking details use list_bookings.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"date":{"type":"string","format":"date"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date string `json:"date"`

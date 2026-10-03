@@ -20,7 +20,8 @@ func init() { agentstools.Register("centrum", "list_staff_payments", listStaffPa
 func listStaffPaymentsTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name:        "list_staff_payments",
-		Description: "List staff payment ledger. Args: {staff_name?, from? (YYYY-MM-DD), to? (YYYY-MM-DD)}.",
+		Description: "Staff payment history with optional filters. Use to verify past payments.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"staff_name":{"type":"string","description":"filter by staff name, may be partial"},"from":{"type":"string","format":"date","description":"paid on or after"},"to":{"type":"string","format":"date","description":"paid on or before"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				StaffName string `json:"staff_name"`

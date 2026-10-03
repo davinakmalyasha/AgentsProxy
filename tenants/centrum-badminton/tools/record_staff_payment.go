@@ -20,7 +20,9 @@ func init() { agentstools.Register("centrum", "record_staff_payment", recordStaf
 func recordStaffPaymentTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "record_staff_payment", Mutating: true,
-		Description: "Record a staff payment in the ledger (no real money moved). Args: {staff_name, amount, paid_at? (YYYY-MM-DD, default today), note?}.",
+		Description: "Record a staff payment in the ledger (no real money moves). " +
+			"Use only on explicit payroll instructions.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"staff_name":{"type":"string","description":"staff name"},"amount":{"type":"number","description":"amount, must be more than 0"},"paid_at":{"type":"string","format":"date","description":"date paid, defaults to today"},"note":{"type":"string","description":"optional note"}},"required":["staff_name","amount"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				StaffName string  `json:"staff_name"`

@@ -233,3 +233,124 @@ func TestGetPricing_NoRowVsError(t *testing.T) {
 	// A malformed date is not a DB error path, but a missing rule row is
 	// the only realistic "no pricing" case for an active tenant.
 }
+
+// TestFixedSchemasExecute pins the schema/body alignment repair: these
+// five tools' schemas used to describe arguments their bodies never read
+// (or missed the ones they required), so every agent call failed or
+// answered for the wrong period. Each case runs the tool for real and
+// asserts a non-error result -- and for kantin, the RIGHT period.
+func TestRecordStaffPayment_Runs(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	if _, err := admin.Exec(ctx, `DELETE FROM agent_staff_payments WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"staff_name": "Siti", "amount": 50000})
+	out := runTool(t, pool, "record_staff_payment").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("record_staff_payment error: %s", out)
+	}
+	if !strings.Contains(out, "recorded payment Siti 50000") {
+		t.Errorf("record_staff_payment=%q want the recorded line", out)
+	}
+}
+
+func TestTopupMember_Runs(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	if _, err := admin.Exec(ctx, `DELETE FROM sports_members WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_members (tenant_id, name, balance) VALUES ($1,'M',0) RETURNING id::text`,
+		tenant).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"member_id": id, "amount": 10000})
+	out := runTool(t, pool, "topup_member").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("topup_member error: %s", out)
+	}
+	if !strings.Contains(out, "new balance: 10000") {
+		t.Errorf("topup_member=%q want the new balance", out)
+	}
+}
+
+func TestAdjustStock_Runs(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	if _, err := admin.Exec(ctx, `DELETE FROM sports_inventory WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_inventory (tenant_id, name, quantity) VALUES ($1,'Shuttle',10) RETURNING id::text`,
+		tenant).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"item_id": id, "delta": -2})
+	out := runTool(t, pool, "adjust_stock").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("adjust_stock error: %s", out)
+	}
+	if !strings.Contains(out, "new quantity: 8") {
+		t.Errorf("adjust_stock=%q want quantity 8", out)
+	}
+}
+
+func TestSetReminder_Runs(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	if _, err := admin.Exec(ctx, `DELETE FROM agent_reminders WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	ctx = agentstools.WithChatID(ctx, 424242)
+	tomorrow := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02") + " 09:00"
+	args, _ := json.Marshal(map[string]any{"text": "test reminder", "remind_at": tomorrow})
+	out := runTool(t, pool, "set_reminder").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("set_reminder error: %s", out)
+	}
+	if !strings.Contains(out, "reminder set for") {
+		t.Errorf("set_reminder=%q want the confirmation", out)
+	}
+}
+
+func TestKantinSummary_RespectsDate(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	if _, err := admin.Exec(ctx, `DELETE FROM sports_kantin_sale_items WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `DELETE FROM sports_kantin_sales WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	seedSale := func(day string, total int) {
+		t.Helper()
+		var saleID string
+		if err := admin.QueryRow(ctx,
+			`INSERT INTO sports_kantin_sales (tenant_id, total, created_at)
+			 VALUES ($1,$2,($3::date + time '12:00') AT TIME ZONE 'Asia/Jakarta') RETURNING id::text`,
+			tenant, total, day).Scan(&saleID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := admin.Exec(ctx,
+			`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
+			 VALUES ($1,$2,'Teh',2,10000,4000)`, tenant, saleID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
+	yesterday := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, -1).Format("2006-01-02")
+	seedSale(today, 20000)
+	seedSale(yesterday, 99999)
+	args, _ := json.Marshal(map[string]string{"date": today})
+	out := runTool(t, pool, "query_kantin_summary").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("query_kantin_summary error: %s", out)
+	}
+	if !strings.Contains(out, "20000") || strings.Contains(out, "99999") {
+		t.Errorf("query_kantin_summary=%q want today's 20000, not yesterday's 99999", out)
+	}
+}

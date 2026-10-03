@@ -22,8 +22,11 @@ func init() { agentstools.Register("centrum", "query_range_summary", queryRangeS
 
 func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "query_range_summary",
-		Description: "Range summary. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Revenue cash/qris/kantin, expenses, net profit, payment and booking counts, best revenue day, and the busiest booking hours.",
+		Name: "query_range_summary",
+		Description: "Full-period dashboard: revenue split, expenses, net, counts, best day, " +
+			"busiest hours. Use when the owner asks for the whole picture; for one number " +
+			"use query_income or query_net_profit.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From string `json:"from"`

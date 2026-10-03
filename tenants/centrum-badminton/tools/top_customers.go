@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "top_customers", topCustomersTool)
 
 func topCustomersTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "top_customers",
-		Description: "Top customers by bookings. Args: {limit? (default 5)}. Returns name, visits.",
+		Name: "top_customers",
+		Description: "Customers ranked by visit count. Use for loyalty and who-visits-most " +
+			"questions; it is the only tool that reads the customers table.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"description":"how many customers, default 5"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Limit int `json:"limit"`

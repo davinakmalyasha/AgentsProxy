@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "check_stock", checkStockTool) }
 
 func checkStockTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "check_stock",
-		Description: "List inventory items with quantities. Args: {} (optional {name} to filter).",
+		Name: "check_stock",
+		Description: "Inventory levels with low-stock flags. Use to check before promising " +
+			"items; to change levels use adjust_stock.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"product or item name, may be partial"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Name string `json:"name"`

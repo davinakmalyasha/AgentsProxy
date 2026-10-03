@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "get_availability", getAvailabilit
 
 func getAvailabilityTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "get_availability",
-		Description: "Get busy slots for a date. Args: {date (YYYY-MM-DD), type? (facility type, default badminton)}. Returns facilities with busy intervals.",
+		Name: "get_availability",
+		Description: "Busy intervals per facility for a date. Use before booking, and for " +
+			"'is anything free' questions; for the booking list itself use list_bookings.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to check, defaults to today"},"type":{"type":"string","description":"facility type, defaults to badminton"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date string `json:"date"`

@@ -20,7 +20,8 @@ func init() { agentstools.Register("centrum", "topup_member", topupMemberTool) }
 func topupMemberTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "topup_member", Mutating: true,
-		Description: "Add balance to a member. Args: {member_id, amount}. Returns new balance.",
+		Description: "Add balance to a member. Use only on explicit top-up instructions.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"member_id":{"type":"string","description":"the member id"},"amount":{"type":"number","description":"amount, must be more than 0"}},"required":["member_id","amount"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				MemberID string  `json:"member_id"`

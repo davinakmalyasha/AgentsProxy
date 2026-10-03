@@ -20,8 +20,11 @@ func init() { agentstools.Register("centrum", "export_report_excel", exportRepor
 
 func exportReportExcelTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "export_report_excel",
-		Description: `Build a downloadable Excel (.xlsx) revenue report. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD), type? ("lapangan"|"kantin"|"semua", default "semua")}. Defaults to this month, max range 1 year. Returns an XLSX:/v1/reports/... download marker plus a one-line summary â€” ALWAYS present the marker to the user as the download link, never invent another URL. OWNER ONLY.`,
+		Name: "export_report_excel",
+		Description: `Build a downloadable Excel revenue report over a date range and ledger. ` +
+			`Returns an XLSX:/v1/reports/... download marker plus a one-line summary. ` +
+			`ALWAYS present the marker to the user as the download link, never invent another URL. OWNER ONLY.`,
+		Parameters: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"},"type":{"type":"string","enum":["lapangan","kantin","semua"],"description":"which ledger to export, default semua"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From string `json:"from"`

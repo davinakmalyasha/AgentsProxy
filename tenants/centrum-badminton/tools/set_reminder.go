@@ -21,7 +21,9 @@ func init() { agentstools.Register("centrum", "set_reminder", setReminderTool) }
 func setReminderTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "set_reminder", Mutating: true,
-		Description: "Set a reminder delivered via Telegram. Args: {text, remind_at (YYYY-MM-DD HH:MM WIB)}. Returns the reminder id. Only works inside a Telegram chat.",
+		Description: "Set a Telegram-delivered reminder. Only works inside a Telegram chat; " +
+			"the chat id comes from context, never from arguments.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"what to be reminded about","maxLength":500},"remind_at":{"type":"string","description":"when, YYYY-MM-DD HH:MM WIB"}},"required":["text","remind_at"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Text     string `json:"text"`

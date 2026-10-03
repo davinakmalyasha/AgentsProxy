@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "query_kantin_summary", queryKanti
 
 func queryKantinSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "query_kantin_summary",
-		Description: "Kantin (canteen) summary. Args: {date? (YYYY-MM-DD)}. Omzet, modal, gross profit, top products.",
+		Name: "query_kantin_summary",
+		Description: "Canteen P&L for one day with top products. Use for kantin-specific " +
+			"questions; kantin totals also appear inside query_income.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to summarize, defaults to today"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date string `json:"date"`

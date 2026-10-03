@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "list_bookings", listBookingsTool)
 
 func listBookingsTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "list_bookings",
-		Description: "List bookings. Args: {date? (YYYY-MM-DD), facility_id?}. Returns bookings with time, customer, facility.",
+		Name: "list_bookings",
+		Description: "Bookings with time, customer, facility and status. Use to look up " +
+			"or verify bookings; for free-vs-busy use get_availability.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to list, defaults to today"},"facility_id":{"type":"string","description":"optional facility id to filter by"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date       string `json:"date"`

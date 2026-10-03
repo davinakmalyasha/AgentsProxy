@@ -19,7 +19,9 @@ func init() { agentstools.Register("centrum", "cancel_booking", cancelBookingToo
 func cancelBookingTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "cancel_booking", Mutating: true,
-		Description: "Cancel a booking by id. Args: {booking_id}. Returns cancelled.",
+		Description: "Cancel a booking by id. Use only when the user asks to cancel; " +
+			"never volunteer it. Find the id with list_bookings first.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"booking_id":{"type":"string","description":"the booking id"}},"required":["booking_id"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				BookingID string `json:"booking_id"`

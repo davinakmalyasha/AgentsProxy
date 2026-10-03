@@ -23,9 +23,10 @@ func init() { agentstools.Register("centrum", "book_slot", bookSlotTool) }
 func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "book_slot", Mutating: true,
-		Description: "Book a facility slot. Args: {facility_id, date (YYYY-MM-DD), start_time (HH:MM), " +
-			"end_time (HH:MM), customer_name, customer_phone?}. The price is computed from the tenant's " +
-			"pricing rule and cannot be set here. Returns booking id or an error like 'slot already booked'.",
+		Description: "Book a facility slot. The price is computed from the tenant's " +
+			"pricing rule and cannot be set here. Use when the user names a facility, " +
+			"date, time and customer.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"facility_id":{"type":"string","description":"the facility (court) id, from get_availability"},"date":{"type":"string","format":"date"},"start_time":{"type":"string","description":"HH:MM, 24h"},"end_time":{"type":"string","description":"HH:MM, 24h"},"customer_name":{"type":"string"},"customer_phone":{"type":"string"}},"required":["facility_id","date","start_time","end_time","customer_name"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				FacilityID    string `json:"facility_id"`

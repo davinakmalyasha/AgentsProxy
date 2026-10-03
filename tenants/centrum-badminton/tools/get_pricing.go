@@ -19,8 +19,10 @@ func init() { agentstools.Register("centrum", "get_pricing", getPricingTool) }
 
 func getPricingTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "get_pricing",
-		Description: "Get pricing for a date. Args: {date? (YYYY-MM-DD, default today)}. Returns open/close, day/evening price.",
+		Name: "get_pricing",
+		Description: "Venue pricing rules for a date. Use for every price question; " +
+			"never state prices from memory.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date string `json:"date"`

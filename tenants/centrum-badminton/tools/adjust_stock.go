@@ -20,7 +20,9 @@ func init() { agentstools.Register("centrum", "adjust_stock", adjustStockTool) }
 func adjustStockTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
 		Name: "adjust_stock", Mutating: true,
-		Description: "Adjust stock by delta (positive=restock, negative=sale). Args: {item_id, delta}. Returns new quantity.",
+		Description: "Change an inventory level (restock or sale correction). Use only on " +
+			"explicit stock instructions; to inspect use check_stock.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"item_id":{"type":"string","description":"the item id"},"delta":{"type":"integer","description":"signed change to stock"}},"required":["item_id","delta"]}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				ItemID string `json:"item_id"`

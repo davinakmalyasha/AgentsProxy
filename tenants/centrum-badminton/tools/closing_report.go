@@ -18,8 +18,10 @@ func init() { agentstools.Register("centrum", "closing_report", closingReportToo
 
 func closingReportTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "closing_report",
-		Description: "Daily closing report (WhatsApp-ready). Args: {date? (YYYY-MM-DD)}. Revenue cash/qris, booking count, occupancy, unpaid list.",
+		Name: "closing_report",
+		Description: "One day's operations summary: revenue, bookings, unpaid count. " +
+			"Use for daily closing; for arbitrary periods use query_income.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"date":{"type":"string","format":"date","description":"the day to close, defaults to today"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				Date string `json:"date"`

@@ -18,8 +18,10 @@ func init() { agentstools.Register("centrum", "query_net_profit", queryNetProfit
 
 func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 	return agentstools.Tool{
-		Name:        "query_net_profit",
-		Description: "Net profit over a date range, on the money actually received. Args: {from? (YYYY-MM-DD), to? (YYYY-MM-DD)}. Defaults to this month. Revenue = payments + kantin, minus expenses. Also reports the committed booking value for comparison.",
+		Name: "query_net_profit",
+		Description: "Profit actually received over a range: income minus expenses. " +
+			"Use for 'laba/untung' questions. For received money without expenses use query_income.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"from":{"type":"string","format":"date","description":"start date, inclusive"},"to":{"type":"string","format":"date","description":"end date, EXCLUSIVE"}}}`),
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			var p struct {
 				From string `json:"from"`
