@@ -17,7 +17,6 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
-	"github.com/davinakmalyasha/agents-proxy/internal/mcp"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
 )
@@ -28,14 +27,12 @@ type Deps struct {
 	Redis *redis.Client
 	Cache *cache.Client
 	LLM   *llm.Client
-	// ADK is the cutover loop. Non-nil in production; tests that only
-	// exercise pre-loop rejections may leave it nil, in which case the
-	// not-yet-migrated call sites fall back to the old loop.
+	// ADK is the agent loop. Boot is fatal without it.
 	ADK     *adkrunner.Runner
 	Auth    *authapi.Auth
 	Version string
 	TGBots  *telegram.Manager // nil when vault not configured
-	// Admin (super-operator) wiring for the MCP admin tools + health.
+	// Admin (super-operator) wiring for the REST /admin surface.
 	AdminPool *pgxpool.Pool // nil when the app pool doubles for it
 	AdminKey  string        // ADMIN_API_KEY
 	// Projects is the per-tenant agent configuration from
@@ -97,12 +94,6 @@ func NewRouter(d Deps) http.Handler {
 		// WS2: chat-generated .xlsx downloads — token IS the auth (tenant-scoped, 30-min TTL)
 		reportsH := &Reports{RDB: d.Redis}
 		r.Get("/reports/{token}", reportsH.Download)
-
-		// MCP — Go-only, thin adapter so new client "just setup mcp/tool".
-		// Exposes role ToolSets + admin_* cross-tenant tools (Bearer key).
-		mcpSrv := mcp.New(d.Pool, d.Cache, d.Auth, d.AdminPool, d.AdminKey)
-		r.Handle("/mcp", mcpSrv)
-		r.Handle("/mcp/*", mcpSrv)
 
 		// Staff login (Phase 7): email+password → session token.
 		if d.Auth != nil {
