@@ -77,12 +77,20 @@ type spikeIncomeResult struct {
 // spikeEnv carries the live gateway coordinates. The spike needs the real
 // endpoint because the question it answers -- do our custom fields survive
 // ADK's request builder -- cannot be answered against a mock.
+//
+// Reaching the gateway at all is not enough to opt in: cmd/mockllm answers
+// /chat/completions with a canned "echo:" reply, and against that the agent
+// never runs a tool, so the test fails on its own assertion rather than
+// telling us anything. RUN_LIVE_SPIKE=1 is the explicit opt-in for a real key.
 func spikeEnv(t *testing.T) (key, base, modelName string) {
 	t.Helper()
 	key = os.Getenv("LLM_API_KEY")
 	base = os.Getenv("LLM_BASE_URL")
 	if key == "" || base == "" {
 		t.Skip("LLM_API_KEY / LLM_BASE_URL not set; the spike needs the live gateway")
+	}
+	if os.Getenv("RUN_LIVE_SPIKE") != "1" {
+		t.Skip("RUN_LIVE_SPIKE != 1; the spike needs a real gateway, not mockllm")
 	}
 	modelName = os.Getenv("LLM_MODEL")
 	if modelName == "" {

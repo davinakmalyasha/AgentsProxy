@@ -128,6 +128,8 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
 		`GRANT SELECT ON sports_pricing_rules TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
