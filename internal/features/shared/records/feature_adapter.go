@@ -102,7 +102,9 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	_ = usage.Record(r.Context(), a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0)
+	if err := usage.Record(r.Context(), a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
+		slog.Error("usage record failed", "client_id", cm.ID, "err", err)
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -118,6 +120,10 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 	}
 	status := "active"
 	if s := r.URL.Query().Get("status"); s != "" {
+		if s != "active" && s != "deleted" {
+			writeJSONError(w, http.StatusBadRequest, "invalid status")
+			return
+		}
 		status = s
 	}
 	limit := parseLimit(r.URL.Query().Get("limit"))

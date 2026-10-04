@@ -213,14 +213,16 @@ func (q *Queue) Drain(ctx context.Context, s Sender) (sent, failed int) {
 
 func (q *Queue) delete(ctx context.Context, id int64) {
 	if _, err := q.pool.Exec(ctx, `DELETE FROM notify_jobs WHERE id = $1`, id); err != nil {
-		slog.Warn("notify delete", "id", id, "err", err)
+		// Sent but not deleted: at-least-once becomes duplicate send.
+		slog.Error("notify delete failed, may resend", "id", id, "err", err)
 	}
 }
 
 func (q *Queue) archive(ctx context.Context, id int64) {
 	if _, err := q.pool.Exec(ctx,
 		`UPDATE notify_jobs SET archived_at = now() WHERE id = $1 AND archived_at IS NULL`, id); err != nil {
-		slog.Warn("notify archive", "id", id, "err", err)
+		// Doomed job never archived: retried forever, burning budget.
+		slog.Error("notify archive failed, job retries forever", "id", id, "err", err)
 	}
 }
 

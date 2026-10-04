@@ -4,6 +4,7 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -90,6 +91,10 @@ func Allow(ctx context.Context, rdb *redis.Client, perMinute int, scope, key str
 
 	n, err := rdb.Incr(ctx, redisKey).Result()
 	if err != nil {
+		// Deliberately fail-open AND quiet: a cache outage must never
+		// block traffic, and Warn here would page every minute during
+		// an outage for a non-money throttle.
+		slog.Warn("rate limit redis, failing open", "scope", scope, "err", err)
 		return true, 0 // fail open
 	}
 	if n == 1 {

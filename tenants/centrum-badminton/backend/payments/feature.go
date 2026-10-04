@@ -31,7 +31,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -91,6 +90,29 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "method must be cash or qris")
 		return
 	}
+	// Idempotency-Key (optional phase): a repeated key returns the original
+	// payment instead of inserting a second charge. Absent header behaves
+	// exactly as before.
+	idemKey, haveIdem, idemErr := records.IdempotencyKey(w, r)
+	if idemErr != nil {
+		return
+	}
+	if haveIdem {
+		var existing string
+		qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+			return tx.QueryRow(r.Context(),
+				`SELECT id::text FROM sports_payments WHERE tenant_id=$1 AND idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&existing)
+		})
+		if qerr == nil {
+			records.WriteJSON(w, http.StatusOK, map[string]any{"id": existing, "deduplicated": true})
+			return
+		}
+		if qerr != pgx.ErrNoRows {
+			records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
 	var id string
 	var overpayErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -109,7 +131,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		var paid float64
 		if err := tx.QueryRow(r.Context(),
-			`SELECT COALESCE(SUM(amount),0) FROM sports_payments WHERE booking_id=$1::uuid AND tenant_id=$2`,
+			`SELECT COALESCE(SUM(amount),0) FROM sports_payments WHERE booking_id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 			req.BookingID, idn.TenantID()).Scan(&paid); err != nil {
 			return err
 		}
@@ -136,9 +158,9 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			recordedByArg = recordedBy
 		}
 		return tx.QueryRow(r.Context(),
-			`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, note, recorded_by)
-			 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
-			idn.TenantID(), req.BookingID, req.Amount, req.Method, req.Note, recordedByArg,
+			`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, note, recorded_by, idempotency_key)
+			 VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,'')) RETURNING id::text`,
+			idn.TenantID(), req.BookingID, req.Amount, req.Method, req.Note, recordedByArg, idemKey,
 		).Scan(&id)
 	})
 	if overpayErr != nil {
@@ -146,6 +168,19 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Lost the insert race with a duplicate key: return the winner.
+		if haveIdem && records.IsUniqueViolation(err) {
+			var existing string
+			qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+				return tx.QueryRow(r.Context(),
+					`SELECT id::text FROM sports_payments WHERE tenant_id=$1 AND idempotency_key=$2`,
+					idn.TenantID(), idemKey).Scan(&existing)
+			})
+			if qerr == nil {
+				records.WriteJSON(w, http.StatusOK, map[string]any{"id": existing, "deduplicated": true})
+				return
+			}
+		}
 		if err == pgx.ErrNoRows {
 			records.WriteJSONError(w, http.StatusNotFound, "booking not found")
 			return
@@ -210,7 +245,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
-		          FROM sports_payments WHERE tenant_id = $1`
+		          FROM sports_payments WHERE tenant_id = $1 AND deleted_at IS NULL`
 		args := []any{idn.TenantID()}
 		idx := 2
 		if bookingID != "" {
@@ -282,7 +317,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
-			   FROM sports_payments WHERE id=$1::uuid AND tenant_id=$2`,
+			   FROM sports_payments WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&p.ID, &p.TenantID, &p.BookingID, &p.Amount, &p.Method, &paidAt, &p.Note, &createdAt)
 	})
@@ -341,7 +376,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_payments SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
+	sql := fmt.Sprintf("UPDATE sports_payments SET %s WHERE id=$%d::uuid AND tenant_id=$%d AND deleted_at IS NULL",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	var overpayErr error
@@ -364,7 +399,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 			var bookingID string
 			if err := tx.QueryRow(r.Context(),
 				`SELECT booking_id::text FROM sports_payments
-				  WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
+				  WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`,
 				id, idn.TenantID()).Scan(&bookingID); err != nil {
 				return err
 			}
@@ -384,7 +419,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 			var paid float64
 			if err := tx.QueryRow(r.Context(),
 				`SELECT COALESCE(SUM(amount),0) FROM sports_payments
-				  WHERE booking_id=$1::uuid AND tenant_id=$2 AND id<>$3::uuid`,
+				  WHERE booking_id=$1::uuid AND tenant_id=$2 AND id<>$3::uuid AND deleted_at IS NULL`,
 				bookingID, idn.TenantID(), id).Scan(&paid); err != nil {
 				return err
 			}
@@ -424,9 +459,16 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Tombstone, not DELETE: the ledger row is preserved with who/when,
+		// hidden from lists/reads/totals. The UPDATE fires the recalc
+		// trigger, so the booking's payment_status drops back by itself.
+		// The idempotency key is freed so a corrected re-payment can reuse
+		// the client's key.
+		deletedBy := idn.UserID
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_payments WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID())
+			`UPDATE sports_payments SET deleted_at = now(), deleted_by = $3, idempotency_key = NULL
+			  WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+			id, idn.TenantID(), deletedBy)
 		if err != nil {
 			return err
 		}

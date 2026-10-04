@@ -14,6 +14,13 @@
 --   psql "$DATABASE_ADMIN_URL" -f ops/verify-schedule-delivery.sql
 --
 -- DONE: Vercel/Supabase split / STANDARDS A
+--
+-- PENDING-REPAIR (2026-10-03): the `deliver-reminders` Edge Function is
+-- deleted (042_drop_telegram.sql), so `private.tick_due_reminders()` posts to
+-- a missing function. The `reminder-tick` schedule is KEPT (do NOT delete the
+-- cron) and marked scheduled-for-repair. This file still exercises the wrapper
+-- bodies as the executable proof; the '/deliver-reminders' assertions below
+-- document the pre-repair target, not a live delivery path.
 
 \set ON_ERROR_STOP on
 
@@ -69,6 +76,7 @@ BEGIN
     FROM vault.decrypted_secrets WHERE name = 'delivery_auth_token';
 
   v_id := net.http_post(
+    -- PENDING-REPAIR: '/deliver-reminders' function is deleted; assertion below is pre-repair target
     url     := v_url || '/deliver-reminders',
     headers := jsonb_build_object(
                  'Content-Type',  'application/json',

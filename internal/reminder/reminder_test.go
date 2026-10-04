@@ -1,6 +1,6 @@
 // Reminder scheduler tests with a fake sender.
 //
-// DONE: Phase 5 (telegram agentic) / STANDARDS A
+// DONE: Phase 5 (reminders) / STANDARDS A
 package reminder
 
 import (
@@ -84,7 +84,7 @@ func TestScheduler_SendsDue(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ('rem-test','rem-test','hash-rem',1000,'active','sports',ARRAY['records','telegram'])`); err != nil {
+		 VALUES ('rem-test','rem-test','hash-rem',1000,'active','sports',ARRAY['records'])`); err != nil {
 		t.Fatal(err)
 	}
 	var dueID string
@@ -132,7 +132,7 @@ func TestScheduler_SendsDue(t *testing.T) {
 	_, _ = pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id='rem-test'`)
 }
 
-// slowSender simulates a Telegram bot that takes ~500ms per send.
+// slowSender simulates a slow delivery destination that takes ~500ms per send.
 // Tick fans out with a semaphore + per-row deadline, so N due rows
 // must complete near-parallel — far under N×500ms serial time.
 //
@@ -181,7 +181,7 @@ func TestScheduler_DeliversConcurrently(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ('rem-par','rem-par','hash-remp',1000,'active','sports',ARRAY['records','telegram'])`); err != nil {
+		 VALUES ('rem-par','rem-par','hash-remp',1000,'active','sports',ARRAY['records'])`); err != nil {
 		t.Fatal(err)
 	}
 	const n = 4
@@ -263,7 +263,7 @@ func TestScheduler_TwoDriversDeliverEachRowOnce(t *testing.T) {
 	})
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ('rem-two','rem-two','hash-remt',1000,'active','sports',ARRAY['records','telegram'])`); err != nil {
+		 VALUES ('rem-two','rem-two','hash-remt',1000,'active','sports',ARRAY['records'])`); err != nil {
 		t.Fatal(err)
 	}
 	const n = 8

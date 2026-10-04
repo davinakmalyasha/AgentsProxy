@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -294,5 +295,90 @@ func TestPricing_Isolation(t *testing.T) {
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
 		t.Errorf("B saw %d rules, want 0", len(items))
+	}
+}
+
+// TestPricing_TombstoneDelete: DELETE tombstones instead of removing the
+// row — getOne 404s, list excludes it, patch 404s, price resolution no
+// longer sees it, but the row survives with deleted_at/deleted_by.
+func TestPricing_TombstoneDelete(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
+		`{"valid_from":"2026-03-01","price_day":20000,"price_evening":40000}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	// Delete keeps the 200 {"id","status":"deleted"} contract.
+	delResp := doReq(t, h.router, "DELETE", "/pricing/"+id, "tok-pr-a", "")
+	if delResp.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", delResp.StatusCode, readAll(t, delResp))
+	}
+	dm := readJSON(t, delResp)
+	if dm["id"] != id || dm["status"] != "deleted" {
+		t.Errorf("delete body=%v want {id,status:deleted}", dm)
+	}
+
+	// getOne on the tombstone → 404, exactly as a hard delete read.
+	if r := doReq(t, h.router, "GET", "/pricing/"+id, "tok-pr-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// Deleted rows can't be edited.
+	if r := doReq(t, h.router, "PATCH", "/pricing/"+id, "tok-pr-a", `{"price_day":1}`); r.StatusCode != 404 {
+		t.Errorf("patch deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// List excludes the row.
+	mL := readJSON(t, doReq(t, h.router, "GET", "/pricing", "tok-pr-a", ""))
+	items, _ := mL["items"].([]any)
+	for _, it := range items {
+		if it.(map[string]any)["id"] == id {
+			t.Error("deleted rule still listed")
+		}
+	}
+
+	// Price resolution no longer sees the tombstoned rule: with no other
+	// rule covering the date, the booking-time lookup reports ErrNoRule
+	// instead of pricing from a deleted row.
+	pool, err := db.NewPool(ctx, toAppDSN(os.Getenv("DATABASE_URL")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	date, _ := time.Parse("2006-01-02", "2026-06-10")
+	err = records.WithTenantTx(ctx, pool, "pr-a", func(tx pgx.Tx) error {
+		_, e := PriceFor(ctx, tx, "pr-a", date, mustTime("10:00"), mustTime("11:00"))
+		return e
+	})
+	if !errors.Is(err, ErrNoRule) {
+		t.Errorf("PriceFor after delete err=%v want ErrNoRule", err)
+	}
+
+	// The row is still in the DB with who/when. Client-token callers
+	// carry no staff UserID, so deleted_by is "" — the caller identity,
+	// exactly as the payments tombstone stores it.
+	var delBy string
+	var delAt time.Time
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT deleted_by, deleted_at FROM sports_pricing_rules WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if delAt.IsZero() {
+		t.Error("deleted_at not set")
+	}
+	if delBy != "" {
+		t.Errorf("deleted_by=%q want caller identity (empty for client token)", delBy)
+	}
+
+	// Second delete finds no live row → 404.
+	if r := doReq(t, h.router, "DELETE", "/pricing/"+id, "tok-pr-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
 	}
 }

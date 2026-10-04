@@ -12,7 +12,7 @@ import (
 
 func TestRequireFeature_OffReturns403(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "x", Kind: "x", DefaultOn: false})
+	Register(Feature{Name: "x", Kind: "x"})
 	h := RequireFeature("x")(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
 	)
@@ -30,7 +30,7 @@ func TestRequireFeature_OffReturns403(t *testing.T) {
 
 func TestRequireFeature_OnPasses(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "x", Kind: "x", DefaultOn: true})
+	Register(Feature{Name: "x", Kind: "x"})
 	called := false
 	h := RequireFeature("x")(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -55,7 +55,7 @@ func TestRequireFeature_OnPasses(t *testing.T) {
 
 func TestRequireFeature_VerticalMismatch403(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "klinikonly", Kind: "k", VerticalSlugs: []string{"klinik"}, DefaultOn: true})
+	Register(Feature{Name: "klinikonly", Kind: "k", VerticalSlugs: []string{"klinik"}})
 	h := RequireFeature("klinikonly")(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
 	)
@@ -73,7 +73,7 @@ func TestRequireFeature_VerticalMismatch403(t *testing.T) {
 
 func TestRequireFeature_NoClientReturns403(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "x", Kind: "x", DefaultOn: true})
+	Register(Feature{Name: "x", Kind: "x"})
 	h := RequireFeature("x")(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
 	)

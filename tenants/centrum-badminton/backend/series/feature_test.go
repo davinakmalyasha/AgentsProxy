@@ -279,3 +279,72 @@ func TestSeries_Isolation(t *testing.T) {
 		t.Errorf("B saw %d series, want 0", len(items))
 	}
 }
+
+// TestSeries_TombstoneDelete: DELETE tombstones instead of removing the
+// row — getOne 404s, list excludes it, patch 404s, but the row survives
+// with deleted_at/deleted_by.
+func TestSeries_TombstoneDelete(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fac := facilityID(t, ctx, h.adminPool, "se-a")
+
+	resp := doReq(t, h.router, "POST", "/series", "tok-se-a",
+		`{"facility_id":"`+fac+`","customer_name":"Tomb Komunitas","weekday":0,"start_time":"19:00","end_time":"21:00","start_date":"2026-09-01"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	// Delete keeps the 200 {"id","status":"deleted"} contract.
+	delResp := doReq(t, h.router, "DELETE", "/series/"+id, "tok-se-a", "")
+	if delResp.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", delResp.StatusCode, readAll(t, delResp))
+	}
+	dm := readJSON(t, delResp)
+	if dm["id"] != id || dm["status"] != "deleted" {
+		t.Errorf("delete body=%v want {id,status:deleted}", dm)
+	}
+
+	// getOne on the tombstone → 404, exactly as a hard delete read.
+	if r := doReq(t, h.router, "GET", "/series/"+id, "tok-se-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// Deleted rows can't be edited.
+	if r := doReq(t, h.router, "PATCH", "/series/"+id, "tok-se-a", `{"status":"paused"}`); r.StatusCode != 404 {
+		t.Errorf("patch deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// List excludes the row.
+	mL := readJSON(t, doReq(t, h.router, "GET", "/series", "tok-se-a", ""))
+	items, _ := mL["items"].([]any)
+	for _, it := range items {
+		if it.(map[string]any)["id"] == id {
+			t.Error("deleted series still listed")
+		}
+	}
+
+	// The row is still in the DB with who/when. Client-token callers
+	// carry no staff UserID, so deleted_by is "" — the caller identity,
+	// exactly as the payments tombstone stores it.
+	var delBy string
+	var delAt time.Time
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT deleted_by, deleted_at FROM sports_recurring_series WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if delAt.IsZero() {
+		t.Error("deleted_at not set")
+	}
+	if delBy != "" {
+		t.Errorf("deleted_by=%q want caller identity (empty for client token)", delBy)
+	}
+
+	// Second delete finds no live row → 404.
+	if r := doReq(t, h.router, "DELETE", "/series/"+id, "tok-se-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+}

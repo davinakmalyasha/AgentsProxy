@@ -17,7 +17,7 @@ is active per environment.
 | | Long-running host | Serverless |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `true` (default) | `false` |
-| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → `deliver-reminders` |
+| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → reminder function (**PENDING-REPAIR**: `deliver-reminders` is deleted; `reminder-tick` fires with no function — cron kept, scheduled-for-repair) |
 | Notification drain | Go ticker, `internal/notify` | DB Webhook → `deliver-notification`, + cron backstop |
 | Stale-claim reaper | Go boot path | `pg_cron` → `reap_stale_claims` (pure SQL) |
 
@@ -29,14 +29,13 @@ is active per environment.
    DATABASE_URL=... DATABASE_ADMIN_URL=... go run ./cmd/server
    ```
 
-2. Two Edge Functions deployed:
+2. One Edge Function deployed (`deliver-reminders` is deleted):
 
    ```bash
-   supabase functions deploy deliver-reminders
    supabase functions deploy deliver-notification
    ```
 
-3. Three secrets. Two in Supabase Vault (read by `pg_cron`/`pg_net`),
+3. Secrets. One in Supabase Vault (read by `pg_cron`/`pg_net`),
    one as an Edge Function secret (used by Deno):
 
    ```sql
@@ -51,9 +50,8 @@ is active per environment.
    ```
 
    ```bash
-   # Edge Function secrets (read by Deno at request time)
+   # Edge Function secret (read by Deno at request time)
    supabase secrets set \
-     TELEGRAM_VAULT_KEY=<64 hex chars - same value as the Go env var> \
      DELIVERY_DATABASE_URL='postgresql://delivery_caller:<password>@db.<ref>.supabase.co:5432/postgres'
    ```
 
@@ -82,6 +80,11 @@ This installs three `pg_cron` jobs (`reminder-tick` every 2 min,
 gated on an `exists()` probe, so an idle system spends one indexed query
 per tick and no Edge Function invocations at all.
 
+> **PENDING-REPAIR:** `reminder-tick` calls `private.tick_due_reminders()`,
+> which posts to the deleted `deliver-reminders` function. The cron is kept
+> (do NOT delete it) and marked scheduled-for-repair until a replacement
+> delivery target lands. See `ops/schedule-delivery.sql`.
+
 ## Verify
 
 ```sql
@@ -96,7 +99,7 @@ select jobname, status, start_time from cron.job_run_details
 select * from net._http_response order by id desc limit 5;
 ```
 
-End to end:
+End to end (reminders — PENDING-REPAIR):
 
 ```sql
 -- with BACKGROUND_TICKERS=false on the running app
@@ -104,12 +107,15 @@ insert into agent_reminders (tenant_id, chat_id, text, remind_at)
 values ('centrum', '<chat_id>', 'DELIVERY SMOKE TEST', now() + interval '2 minutes');
 ```
 
-A Telegram message should arrive within ~2 minutes. Then:
+> No delivery is expected until the reminder repair lands: `reminder-tick`
+> currently posts to the deleted `deliver-reminders` function. The row
+> should stay `pending`/`sending`, proving the claim path still enqueues.
+> Do NOT delete the `reminder-tick` cron — it is scheduled-for-repair.
 
 ```sql
 select text, status, attempts, claimed_at
   from agent_reminders where text = 'DELIVERY SMOKE TEST';
--- status = 'sent', claimed_at = null
+-- status = 'pending' (or 'sending' while claimed), claimed_at set while claimed
 ```
 
 For notifications, book a court as owner and watch the webhook drain it

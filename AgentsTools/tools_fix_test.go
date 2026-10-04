@@ -49,6 +49,12 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
+	// Apply migrations here rather than relying on another package having done
+	// it: Go runs this package first (capital A sorts before cmd/ and internal/),
+	// so on a fresh CI database the sports_* tables do not exist yet.
+	if err := db.Migrate(ctx, adminPool); err != nil {
+		t.Fatal(err)
+	}
 	for _, stmt := range []string{
 		`DELETE FROM sports_bookings WHERE tenant_id=$1`,
 		`DELETE FROM sports_customers WHERE tenant_id=$1`,
@@ -179,6 +185,55 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 	}
 }
 
+func TestCancelBooking_PaidRequiresOfflineNote(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
+	var id string
+	err := admin.QueryRow(ctx,
+		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 SELECT $1, id, $2::date, '11:00'::time, '12:00'::time, 'Paid Guy', 'confirmed', 100
+		   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1
+		 RETURNING id::text`,
+		tenant, today).Scan(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method) VALUES ($1,$2::uuid,100,'cash')`,
+		tenant, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Paid without a note must be refused: payment is offline, cancelling
+	// never refunds automatically.
+	out := runTool(t, pool, "cancel_booking").Run(ctx, tenant, json.RawMessage(`{"booking_id":"`+id+`"}`))
+	if !strings.Contains(out, "requires a cancellation note") {
+		t.Fatalf("paid cancel without note=%q want note requirement", out)
+	}
+	var status string
+	if err := admin.QueryRow(ctx, `SELECT status FROM sports_bookings WHERE id=$1`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "confirmed" {
+		t.Fatalf("status=%q want confirmed (refused cancel must not write)", status)
+	}
+
+	// With the offline-cash note it cancels and records the note.
+	out = runTool(t, pool, "cancel_booking").Run(ctx, tenant,
+		json.RawMessage(`{"booking_id":"`+id+`","note":"cash refunded offline at the till"}`))
+	if !strings.Contains(out, "note recorded") {
+		t.Fatalf("paid cancel with note=%q want note recorded", out)
+	}
+	var notes string
+	if err := admin.QueryRow(ctx, `SELECT status, notes FROM sports_bookings WHERE id=$1`, id).Scan(&status, &notes); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" || !strings.Contains(notes, "cash refunded offline") {
+		t.Errorf("status=%q notes=%q want cancelled with the offline note", status, notes)
+	}
+}
+
 func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
@@ -299,21 +354,10 @@ func TestAdjustStock_Runs(t *testing.T) {
 	}
 }
 
-func TestSetReminder_Runs(t *testing.T) {
-	ctx, pool, admin := toolTestPool(t)
-	tenant := "tool-test"
-	if _, err := admin.Exec(ctx, `DELETE FROM agent_reminders WHERE tenant_id=$1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	ctx = agentstools.WithChatID(ctx, 424242)
-	tomorrow := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02") + " 09:00"
-	args, _ := json.Marshal(map[string]any{"text": "test reminder", "remind_at": tomorrow})
-	out := runTool(t, pool, "set_reminder").Run(ctx, tenant, args)
-	if strings.Contains(out, "error:") {
-		t.Fatalf("set_reminder error: %s", out)
-	}
-	if !strings.Contains(out, "reminder set for") {
-		t.Errorf("set_reminder=%q want the confirmation", out)
+func TestSetReminder_RemovedUntilPWATransport(t *testing.T) {
+	_, pool, _ := toolTestPool(t)
+	if _, ok := agentstools.NewToolSetFor(pool, "centrum", "owner").Get("set_reminder"); ok {
+		t.Fatal("set_reminder must stay unregistered until the PWA delivery transport lands")
 	}
 }
 

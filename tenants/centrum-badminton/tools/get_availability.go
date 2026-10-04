@@ -51,7 +51,7 @@ func getAvailabilityTool(pool *pgxpool.Pool) agentstools.Tool {
 					   LEFT JOIN sports_bookings b
 					          ON b.facility_id = f.id AND b.tenant_id = f.tenant_id
 					         AND b.date = $3::date AND b.status NOT IN ('cancelled','no_show')
-					  WHERE f.tenant_id=$1 AND f.status='active' AND f.type=$2
+					  WHERE f.tenant_id=$1 AND f.deleted_at IS NULL AND f.status='active' AND f.type=$2
 					  GROUP BY f.id, f.name
 					  ORDER BY f.name`,
 					tenantID, typ, p.Date)

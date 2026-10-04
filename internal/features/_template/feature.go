@@ -22,17 +22,12 @@ const (
 	// TODO: which vertical this feature is allowed for. Empty
 	// slice = all 12 verticals.
 	VerticalSlugs = []string{} // e.g. {"fnb"}
-
-	// TODO: the tenant(s) this feature is built for. Used only
-	// in the README; no code references this.
-	OwnerTenant = "TODO-tenant-slug"
 )
 
 func init() {
 	features.Register(features.Feature{
 		Name:          Name,
 		Kind:          "TODO_kind_value", // e.g. "loyalty_point"
-		DefaultOn:     false,             // opt-in only
 		VerticalSlugs: VerticalSlugs,
 		Routes:        nil, // defaults to records-based adapter routes
 		ValidatePayload: func(raw json.RawMessage) error {

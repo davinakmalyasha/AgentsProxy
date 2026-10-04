@@ -27,6 +27,12 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: agents_proxy_ci
+          # Migration 005 creates `app_runtime LOGIN` with no password, and the
+          # RBAC tests rewrite the DSN to that role while keeping the postgres
+          # password, so pgx does a SASL handshake as a passwordless role and
+          # fails 28P01. Trust auth is for this throwaway container only; it
+          # must never be used for a real database.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -53,6 +59,8 @@ jobs:
       ADMIN_API_KEY: test-admin-key
       LLM_BASE_URL: http://127.0.0.1:18081
       LLM_MODEL: mock-model
+      # mockllm's port is configurable so it can match LLM_BASE_URL above.
+      MOCKLLM_ADDR: ":18081"
       MAX_TOKENS_PER_REQUEST: "2048"
       RATE_LIMIT_PER_MINUTE: "60"
       ALLOW_ORIGINS: "*"
@@ -94,7 +102,20 @@ jobs:
       - name: go test (with coverage)
         # -p 1: DB-backed packages share one Postgres service; parallel
         # execution races across packages. Mirrors `make test`.
-        run: go test -p 1 ./... -cover -count=1
+        #
+        # mockllm is started here rather than in its own step so the process
+        # shares this step's lifetime: the spike tests are skipped when
+        # LLM_BASE_URL is unset, but the dummy values above exist to make the
+        # integration tests run, so without a server they fail on a refused
+        # connection instead.
+        run: |
+          go build -o /tmp/mockllm ./cmd/mockllm
+          /tmp/mockllm &
+          for _ in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break
+            sleep 0.5
+          done
+          go test -p 1 ./... -cover -count=1
 
       - name: Coverage summary
         if: always()

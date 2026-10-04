@@ -12,7 +12,7 @@ $map = @{
     "internal\api\healthz.go"       = "// DONE: PRD 6.4 / STANDARDS H (ping DB+Redis, 500 if down)"
     "internal\api\chat.go"          = "// DONE: PRD 6.1 (chat handler, quota, usage) / STANDARDS A, D, F"
     "internal\api\admin.go"         = "// DONE: PRD 6.3 (admin CRUD) / STANDARDS A, D, F"
-    "internal\api\business.go"      = "// DONE: PRD 6.2 (business monolith, RLS via GUC) / STANDARDS A, D, F"
+    "internal\features\builder.go"      = "// DONE: PRD 6.2 (vertical builder, AllowedVerticals) / STANDARDS A, D, F"
     "internal\api\json.go"          = "// DONE: PRD 6 (json helpers) / STANDARDS B"
 
     "internal\auth\tokens.go"       = "// DONE: PRD 6.1, 6.3 (GenerateToken, HashToken, ConstantTimeCompare) / STANDARDS D"

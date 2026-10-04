@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
-	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	adksession "google.golang.org/adk/v2/session"
@@ -23,11 +22,6 @@ type AgentChat struct {
 	Auth *authapi.Auth
 	// ADK is the agent loop. Boot is fatal without it.
 	ADK *adkrunner.Runner
-	// Projects is the per-tenant agent configuration from
-	// internal/agentconfig, keyed by tenant id. nil is supported and means
-	// "no tenant has an agent config", in which case agents run on the
-	// platform base prompt alone.
-	Projects map[string]*agentconfig.Project
 }
 
 type agentChatRequest struct {
@@ -71,7 +65,8 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		tenant = strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 	}
 	if tenant == "" {
-		tenant = "centrum"
+		writeJSONError(w, http.StatusBadRequest, "tenant_id required")
+		return
 	}
 	// Tenant arrives from user input: must be a real active client,
 	// never an arbitrary string (history keys, RLS context, tool reads).
@@ -118,7 +113,8 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 	if tenant == "" {
-		tenant = "centrum"
+		writeJSONError(w, http.StatusBadRequest, "tenant_id required")
+		return
 	}
 	// Same guard as Chat: the tenant prefixes the Redis history keys, so
 	// an unvalidated value lets a caller enumerate or wipe another

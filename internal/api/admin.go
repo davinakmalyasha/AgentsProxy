@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
 type Admin struct {
@@ -79,6 +81,16 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "name and tenant_id required")
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.TenantID = strings.TrimSpace(req.TenantID)
+	if len(req.Name) == 0 || len(req.Name) > 120 {
+		writeJSONError(w, http.StatusBadRequest, "invalid name")
+		return
+	}
+	if err := records.ValidateTenantSlug(req.TenantID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Default vertical.
 	if req.Vertical == "" {
 		req.Vertical = "fnb"
@@ -105,6 +117,10 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MonthlyQuotaTokens == 0 {
 		req.MonthlyQuotaTokens = 500000
+	}
+	if err := records.ValidateQuota(req.MonthlyQuotaTokens); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	tok, hash, err := auth.GenerateToken()
 	if err != nil {
@@ -214,6 +230,16 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 	args := []any{}
 	idx := 1
 	if req.MonthlyQuotaTokens != nil {
+		// Zero would silently un-meter the client; negatives and absurd
+		// values corrupt quota math. Creation defaults instead of zeroing.
+		if *req.MonthlyQuotaTokens <= 0 {
+			writeJSONError(w, http.StatusBadRequest, "invalid monthly_quota_tokens")
+			return
+		}
+		if err := records.ValidateQuota(*req.MonthlyQuotaTokens); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		q += fmt.Sprintf(", monthly_quota_tokens = $%d", idx)
 		args = append(args, *req.MonthlyQuotaTokens)
 		idx++
@@ -260,7 +286,9 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Evict cache so the next request picks up new vertical/features.
-	_ = a.Cache.EvictByHash(r.Context(), hash)
+	if err := a.Cache.EvictByHash(r.Context(), hash); err != nil {
+		slog.Warn("admin cache evict failed", "client_id", id, "err", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       id,
 		"status":   "updated",
@@ -277,21 +305,38 @@ func (a *Admin) Usage(w http.ResponseWriter, r *http.Request) {
 	      WHERE 1=1`
 	args := []any{}
 	idx := 1
+	var from, to time.Time
 	if v := r.URL.Query().Get("from"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			q += fmt.Sprintf(" AND u.created_at >= $%d", idx)
-			args = append(args, t)
-			idx++
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid from")
+			return
 		}
+		from = t
+		q += fmt.Sprintf(" AND u.created_at >= $%d", idx)
+		args = append(args, t)
+		idx++
 	}
 	if v := r.URL.Query().Get("to"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			q += fmt.Sprintf(" AND u.created_at < $%d", idx)
-			args = append(args, t)
-			idx++
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid to")
+			return
 		}
+		to = t
+		q += fmt.Sprintf(" AND u.created_at < $%d", idx)
+		args = append(args, t)
+		idx++
+	}
+	if !from.IsZero() && !to.IsZero() && !from.Before(to) {
+		writeJSONError(w, http.StatusBadRequest, "invalid range")
+		return
 	}
 	if v := r.URL.Query().Get("client"); v != "" {
+		if err := records.ValidateTenantSlug(strings.TrimSpace(v)); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		q += fmt.Sprintf(" AND c.tenant_id = $%d", idx)
 		args = append(args, v)
 		idx++

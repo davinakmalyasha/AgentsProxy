@@ -68,15 +68,15 @@ func jsonString(s string) string {
 }
 
 // TestCtxReachesTool is the proof the whole cutover rests on: values the
-// caller puts in ctx (chat ID for Telegram delivery) must be visible inside
-// the tool handler, the tenant must arrive from the closure (never the
-// model), and the tool's result must flow into the final reply.
+// caller puts in ctx (recipient ID for out-of-chat delivery) must be visible
+// inside the tool handler, the tenant must arrive from the closure (never
+// the model), and the tool's result must flow into the final reply.
 func TestCtxReachesTool(t *testing.T) {
 	trip := &stubTripper{bodies: []string{
 		toolCallBody("probe_tool", `{"q":"lapangan satu"}`),
 		finalBody("Ada, lapangan satu kosong jam 19."),
 	}}
-	var sawTenant, sawChat, sawArgs string
+	var sawTenant, sawRecipient, sawArgs string
 	var runs int
 	probe := agentstools.Tool{
 		Name:        "probe_tool",
@@ -85,14 +85,14 @@ func TestCtxReachesTool(t *testing.T) {
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			runs++
 			sawTenant = tenantID
-			sawChat = agentstools.ChatIDFromCtx(ctx)
+			sawRecipient = agentstools.RecipientIDFromCtx(ctx)
 			sawArgs = string(args)
 			return "PROBE-OK"
 		},
 	}
 	r := testRunner(t, trip, probe)
 
-	ctx := agentstools.WithChatID(context.Background(), 123)
+	ctx := agentstools.WithRecipientID(context.Background(), 123)
 	reply, err := r.RunWithToolsRole(ctx, "t1", "sports", "user1", "owner", "owner", "halo")
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -103,8 +103,8 @@ func TestCtxReachesTool(t *testing.T) {
 	if sawTenant != "t1" {
 		t.Errorf("tenant = %q, want t1 (must come from the closure, not the model)", sawTenant)
 	}
-	if sawChat != "123" {
-		t.Errorf("chatID = %q, want 123 (ctx did not reach the tool)", sawChat)
+	if sawRecipient != "123" {
+		t.Errorf("recipientID = %q, want 123 (ctx did not reach the tool)", sawRecipient)
 	}
 	if !strings.Contains(sawArgs, "lapangan satu") {
 		t.Errorf("args = %s, want the model's q", sawArgs)

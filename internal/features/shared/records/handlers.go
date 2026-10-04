@@ -139,7 +139,9 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		_ = usage.Record(r.Context(), h.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0)
+		if err := usage.Record(r.Context(), h.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
+			slog.Error("usage record failed", "client_id", cm.ID, "err", err)
+		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	}
 }
@@ -155,6 +157,10 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		if status == "" {
 			status = "active" // hardening #1: soft-delete leak fix
+		}
+		if status != "active" && status != "deleted" {
+			writeJSONError(w, http.StatusBadRequest, "invalid status")
+			return
 		}
 		limit := parseLimit(r.URL.Query().Get("limit"))
 		cur, err := decodeCursor(r.URL.Query().Get("before"))

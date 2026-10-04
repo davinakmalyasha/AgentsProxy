@@ -8,7 +8,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -145,11 +144,11 @@ func RequireOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identity {
 // is one static secret, typically embedded in a site or an integration.
 // Business writes are quota-bounded and auditable, so letting that
 // token make them is the platform's API-integration model and stays.
-// But letting the same token rewrite a Telegram bot's allow_chat_ids or
-// promote a staff account would turn a leaked integration secret into
-// persistent human-level access, and no quota limits that.
+// But letting the same token promote a staff account would turn a leaked
+// integration secret into persistent human-level access, and no quota
+// limits that.
 //
-// Use this on: staff identity/role changes, the bot registry, and
+// Use this on: staff identity/role changes and
 // anything else that alters access rather than data.
 func RequireStaffOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identity {
 	id := RequireIdentity(w, r)
@@ -239,16 +238,12 @@ func tenantFromQuery(w http.ResponseWriter, r *http.Request) (string, bool) {
 		writeJSONError(w, http.StatusBadRequest, "tenant_id required")
 		return "", false
 	}
-	if !tenantSlugRe.MatchString(t) {
+	if !TenantSlugRe.MatchString(t) {
 		writeJSONError(w, http.StatusBadRequest, "invalid tenant_id")
 		return "", false
 	}
 	return t, true
 }
-
-// tenantSlugRe bounds the value before it reaches a query, and keeps it to
-// the lowercase-slug shape tenants actually use.
-var tenantSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // publicIdentity builds the read-only landing identity, validating the
 // tenant against the clients table. Unknown tenants get a 400 (and nil)

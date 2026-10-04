@@ -33,7 +33,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -89,7 +88,7 @@ func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, d
 	err := tx.QueryRow(ctx,
 		`SELECT valid_from, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening
 		   FROM sports_pricing_rules
-		  WHERE tenant_id=$1 AND is_active AND valid_from <= $2::date
+		  WHERE tenant_id=$1 AND is_active AND deleted_at IS NULL AND valid_from <= $2::date
 		  ORDER BY valid_from DESC LIMIT 1`,
 		tenantID, date).Scan(&validFrom, &r.OpenTime, &r.CloseTime, &r.DayStart, &r.DayEnd, &r.PriceDay, &r.PriceEvening)
 	if err != nil {
@@ -258,7 +257,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
-			   FROM sports_pricing_rules WHERE tenant_id=$1 ORDER BY valid_from DESC LIMIT $2`,
+			   FROM sports_pricing_rules WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY valid_from DESC LIMIT $2`,
 			idn.TenantID(), limit)
 		if err != nil {
 			return err
@@ -294,7 +293,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
-			   FROM sports_pricing_rules WHERE id=$1::uuid AND tenant_id=$2`,
+			   FROM sports_pricing_rules WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&rr.ID, &rr.TenantID, &rr.ValidFrom, &rr.OpenTime, &rr.CloseTime, &rr.DayStart, &rr.DayEnd,
 			&rr.PriceDay, &rr.PriceEvening, &rr.IsActive, &createdAt)
@@ -373,7 +372,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		idx++
 	}
 	args = append(args, id, idn.TenantID())
-	sql := fmt.Sprintf("UPDATE sports_pricing_rules SET %s WHERE id=$%d::uuid AND tenant_id=$%d",
+	sql := fmt.Sprintf("UPDATE sports_pricing_rules SET %s WHERE id=$%d::uuid AND tenant_id=$%d AND deleted_at IS NULL",
 		strings.Join(sets, ", "), idx, idx+1)
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
@@ -443,7 +442,7 @@ func (h *handler) applyHours(w http.ResponseWriter, r *http.Request) {
 		// disagreeing again the day it takes effect.
 		tag, err := tx.Exec(r.Context(),
 			`UPDATE sports_pricing_rules SET open_time = $1::time, close_time = $2::time
-			  WHERE tenant_id = $3`,
+			  WHERE tenant_id = $3 AND deleted_at IS NULL`,
 			open.Format("15:04"), closeT.Format("15:04"), idn.TenantID())
 		if err != nil {
 			return err
@@ -451,7 +450,7 @@ func (h *handler) applyHours(w http.ResponseWriter, r *http.Request) {
 		rules = int(tag.RowsAffected())
 		tag2, err := tx.Exec(r.Context(),
 			`UPDATE sports_facilities SET open_time = $1::time, close_time = $2::time, updated_at = now()
-			  WHERE tenant_id = $3`,
+			  WHERE tenant_id = $3 AND deleted_at IS NULL`,
 			open.Format("15:04"), closeT.Format("15:04"), idn.TenantID())
 		if err != nil {
 			return err
@@ -480,9 +479,13 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Tombstone, not DELETE: the rule row is preserved with who/when,
+		// hidden from lists/reads/price resolution.
+		deletedBy := idn.UserID
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_pricing_rules WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID())
+			`UPDATE sports_pricing_rules SET deleted_at = now(), deleted_by = $3
+			  WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+			id, idn.TenantID(), deletedBy)
 		if err != nil {
 			return err
 		}

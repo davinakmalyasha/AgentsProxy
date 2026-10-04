@@ -42,8 +42,14 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 2. Reminder tick.
+-- 2. Reminder tick — PENDING-REPAIR (2026-10-03).
 --
+--    The `deliver-reminders` Edge Function is deleted (see 042_drop_telegram.sql).
+--    private.tick_due_reminders() below still posts to '/deliver-reminders',
+--    so `reminder-tick` currently fires with no function. The schedule is
+--    KEPT (do NOT delete the cron) and marked scheduled-for-repair until a
+--    replacement delivery target lands.
+-- ---------------------------------------------------------------------------
 --    The exists() gate is the whole point of this being a function
 --    rather than a bare net.http_post in the cron command: a bare post
 --    would spin the Edge Function 720 times a day to discover there is
@@ -76,6 +82,7 @@ BEGIN
     FROM vault.decrypted_secrets WHERE name = 'delivery_auth_token';
 
   v_id := net.http_post(
+    -- PENDING-REPAIR: '/deliver-reminders' function is deleted; kept until repair
     url     := v_url || '/deliver-reminders',
     headers := jsonb_build_object(
                  'Content-Type',  'application/json',
@@ -152,6 +159,9 @@ BEGIN
     PERFORM cron.unschedule(j);
   END LOOP;
 
+  -- PENDING-REPAIR (2026-10-03): `reminder-tick` posts to the deleted
+  -- '/deliver-reminders' function (see private.tick_due_reminders below).
+  -- Schedule is KEPT (do NOT unschedule/delete the cron); scheduled-for-repair.
   PERFORM cron.schedule('reminder-tick', '*/2 * * * *',
     $$SELECT private.tick_due_reminders()$$);
   PERFORM cron.schedule('reaper-tick', '*/5 * * * *',

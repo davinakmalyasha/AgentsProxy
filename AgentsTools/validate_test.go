@@ -144,7 +144,7 @@ func TestSchemaPropertiesAreAllReadByTheTool(t *testing.T) {
 		"book_slot": {
 			"facility_id", "date", "start_time", "end_time", "customer_name", "customer_phone",
 		},
-		"cancel_booking": {"booking_id"},
+		"cancel_booking": {"booking_id", "note"},
 		"list_bookings":  {"date", "status", "facility_id"},
 		"get_pricing":    {},
 		"check_stock":    {"name"},

@@ -29,14 +29,15 @@ type Config struct {
 	DBPoolMin          int
 	DBPoolMax          int
 	DBSimpleProtocol   bool
-	// Multi-bot Telegram (T3): public base URL for webhooks (empty = dev
-	// polling), vault key documented in .env.example (never logged).
-	PublicURL       string
-	TelegramPollDev bool
 	// Agent-chat per-IP sub-limit (router hardcodes 20/min today).
 	AgentRateLimitPerMinute int
-	// Telegram per-bot update concurrency (was hardcoded 32).
-	TelegramConcurrency int
+	// Durable report storage (Supabase Storage). Empty URL/key keeps the
+	// local-disk backend (dev/tests). Bucket must exist; objects are
+	// private and app-proxied, never public.
+	SupabaseURL        string
+	SupabaseStorageKey string
+	ReportBucket       string
+	ReportMaxBytes     int
 	// BackgroundTickers runs this process's own background loops: the
 	// 60s reminder ticker and the notify drain loop. Both mean the same
 	// thing - "am I a long-lived process that can own background work?"
@@ -77,10 +78,11 @@ func Load() (*Config, error) {
 		DBPoolMin:               getenvInt("DB_POOL_MIN", 2),
 		DBPoolMax:               getenvInt("DB_POOL_MAX", 20),
 		DBSimpleProtocol:        strings.EqualFold(getenv("DB_USE_SIMPLE_PROTOCOL", "false"), "true"),
-		PublicURL:               strings.TrimRight(getenv("PROXY_PUBLIC_URL", ""), "/"),
-		TelegramPollDev:         strings.EqualFold(getenv("TELEGRAM_POLL_DEV", "false"), "true"),
 		AgentRateLimitPerMinute: getenvInt("AGENT_RATE_LIMIT_PER_MINUTE", 20),
-		TelegramConcurrency:     getenvInt("TELEGRAM_CONCURRENCY", 32),
+		SupabaseURL:             strings.TrimRight(getenv("SUPABASE_URL", ""), "/"),
+		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),
+		ReportBucket:            getenv("REPORT_BUCKET", "reports"),
+		ReportMaxBytes:          getenvInt("REPORT_MAX_BYTES", 15000000),
 		BackgroundTickers:       !strings.EqualFold(getenv("BACKGROUND_TICKERS", "true"), "false"),
 	}
 	if c.DatabaseURL == "" {
@@ -143,12 +145,20 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t BACKGROUND_TICKERS=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d BACKGROUND_TICKERS=%t}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
-		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, c.BackgroundTickers,
+		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.BackgroundTickers,
 	)
+}
+
+// reportBackend names the report backend without leaking the key.
+func reportBackend(c *Config) string {
+	if c.SupabaseURL != "" && c.SupabaseStorageKey != "" {
+		return "supabase"
+	}
+	return "local"
 }
 
 func redact(s string, n int) string {

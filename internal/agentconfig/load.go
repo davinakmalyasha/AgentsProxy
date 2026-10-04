@@ -110,20 +110,6 @@ func loadOne(dir string) (*Project, error) {
 	}
 	p.Skills = skills
 
-	if raw, err := fs.ReadFile(tenantembed.AgentsFS, path.Join("tenants", dir, "mcp", "mcp.json")); err == nil {
-		// Object form, not a bare array, so the file can carry a comment
-		// explaining why the list is empty -- which is the first question
-		// anyone asks when they open it.
-		var doc struct {
-			Servers []MCPServer `json:"servers"`
-		}
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			return nil, fmt.Errorf("tenant %q: mcp.json is not valid JSON: %w", dir, err)
-		}
-		p.MCP = doc.Servers
-	} else if !isNotExist(err) {
-		return nil, fmt.Errorf("tenant %q: read mcp.json: %w", dir, err)
-	}
 	return p, nil
 }
 

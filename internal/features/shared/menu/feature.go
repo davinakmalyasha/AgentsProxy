@@ -21,10 +21,9 @@ func init() { Register() }
 // to call from tests after a features.ResetForTest().
 func Register() {
 	features.Register(features.Feature{
-		Name:      featureName,
-		Kind:      "menu_item",
-		DefaultOn: true,
-		Routes:    nil, // adapter handles routes
+		Name:   featureName,
+		Kind:   "menu_item",
+		Routes: nil, // adapter handles routes
 		ValidatePayload: func(raw json.RawMessage) error {
 			var p struct {
 				Name  string  `json:"name"`

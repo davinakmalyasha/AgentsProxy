@@ -37,10 +37,6 @@ type Feature struct {
 
 	// ValidatePayload runs on POST/PATCH. Nil = accept anything.
 	ValidatePayload func(json.RawMessage) error
-
-	// DefaultOn controls whether the feature is included in
-	// DefaultSetFor(vertical).
-	DefaultOn bool
 }
 
 var (

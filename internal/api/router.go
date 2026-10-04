@@ -9,7 +9,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
-	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -18,7 +17,6 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
-	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
 )
 
 type Deps struct {
@@ -31,14 +29,9 @@ type Deps struct {
 	ADK     *adkrunner.Runner
 	Auth    *authapi.Auth
 	Version string
-	TGBots  *telegram.Manager // nil when vault not configured
 	// Admin (super-operator) wiring for the REST /admin surface.
 	AdminPool *pgxpool.Pool // nil when the app pool doubles for it
 	AdminKey  string        // ADMIN_API_KEY
-	// Projects is the per-tenant agent configuration from
-	// internal/agentconfig, validated against the tool registry at boot.
-	// nil is supported: agents then run on the platform base prompt alone.
-	Projects map[string]*agentconfig.Project
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -56,13 +49,6 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Get("/healthz", (&Healthz{DB: d.Pool, RDB: d.Redis, Build: d.Version}).ServeHTTP)
 
-	// Telegram webhooks: secret-gated per bot, intentionally outside the
-	// rate-limited /v1 group (Telegram retries bursts; the webhook
-	// secret IS the auth). Nil-safe when the vault isn't configured.
-	if d.TGBots != nil {
-		r.Post("/telegram/hook/{id}", d.TGBots.ServeHook)
-	}
-
 	r.Route("/v1", func(r chi.Router) {
 		// Global per-client/IP rate limit (default 180). Chat gets stricter sub-limit below.
 		r.Use(middleware.RateLimit(d.Redis, d.Cfg.RateLimitPerMinute))
@@ -70,16 +56,15 @@ func NewRouter(d Deps) http.Handler {
 		chatH := NewChat(d.Pool, d.Cache, d.LLM, d.Redis, d.Cfg.RateLimitPerMinute)
 		r.Post("/chat", chatH.ServeHTTP)
 
-		// Agent chat — single shared LLM_API_KEY, 1 bot shared, 3 doors (client/pegawai/owner)
+		// Agent chat — single shared LLM_API_KEY, 3 doors (client/pegawai/owner)
 		// Client: public landing widget (FAQ/availability only), no money
 		// Staff/Owner: via X-Session-Token, role-aware toolsets + per-role caps
 		// Stricter per-IP limit for anon client chat to deter waste (20/min/IP)
 		agentH := &AgentChat{
-			Pool:     d.Pool,
-			RDB:      d.Redis,
-			Auth:     d.Auth,
-			Projects: d.Projects,
-			ADK:      d.ADK,
+			Pool: d.Pool,
+			RDB:  d.Redis,
+			Auth: d.Auth,
+			ADK:  d.ADK,
 		}
 		r.Route("/agent", func(r chi.Router) {
 			// Isolated bucket: chat quota must not be eaten by landing polls

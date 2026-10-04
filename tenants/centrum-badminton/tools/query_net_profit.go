@@ -38,7 +38,7 @@ func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 				}
 				return tx.QueryRow(ctx,
 					`SELECT COALESCE(SUM(amount),0) FROM sports_expenses
-					  WHERE tenant_id=$1 AND spent_at >= $2::date AND spent_at < $3::date`,
+					  WHERE tenant_id=$1 AND deleted_at IS NULL AND spent_at >= $2::date AND spent_at < $3::date`,
 					tenantID, from, to).Scan(&expenses)
 			})
 			if err != nil {

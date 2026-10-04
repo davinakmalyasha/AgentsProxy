@@ -9,44 +9,28 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CtxChatID carries the sender's chat ID (Telegram) through the agent
-// loop into tools. Tools that deliver outside the chat (reminders)
-// require it; web/landing callers have none.
+// CtxRecipientID carries the sender's recipient ID for out-of-chat
+// delivery through the agent loop into tools. Tools that deliver outside
+// the chat require it; callers without a delivery recipient have none.
 type ctxKey string
 
-const CtxChatID ctxKey = "chat_id"
+const CtxRecipientID ctxKey = "recipient_id"
 
-// ChatIDFromCtx returns the sender chat ID, or "" when the caller is
-// not a Telegram chat (webchat, MCP, tests).
-func ChatIDFromCtx(ctx context.Context) string {
-	if v, ok := ctx.Value(CtxChatID).(int64); ok && v != 0 {
+// RecipientIDFromCtx returns the sender recipient ID, or "" when the
+// caller has no delivery recipient.
+func RecipientIDFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(CtxRecipientID).(int64); ok && v != 0 {
 		return strconv.FormatInt(v, 10)
 	}
-	if v, ok := ctx.Value(CtxChatID).(string); ok {
+	if v, ok := ctx.Value(CtxRecipientID).(string); ok {
 		return v
 	}
 	return ""
 }
 
-// WithChatID stamps a context with the sender's Telegram chat ID.
-func WithChatID(ctx context.Context, chatID int64) context.Context {
-	return context.WithValue(ctx, CtxChatID, chatID)
-}
-
-// CtxBotID carries the originating bot uuid so tools and scheduler send through the owning bot.
-const CtxBotID ctxKey = "bot_id"
-
-// WithBotID stamps a context with the Telegram bot uuid.
-func WithBotID(ctx context.Context, botID string) context.Context {
-	return context.WithValue(ctx, CtxBotID, botID)
-}
-
-// BotIDFromCtx returns the bot uuid, or "" outside Telegram delivery.
-func BotIDFromCtx(ctx context.Context) string {
-	if v, ok := ctx.Value(CtxBotID).(string); ok {
-		return v
-	}
-	return ""
+// WithRecipientID stamps a context with the sender's recipient ID.
+func WithRecipientID(ctx context.Context, recipientID int64) context.Context {
+	return context.WithValue(ctx, CtxRecipientID, recipientID)
 }
 
 // WibNow returns now in WIB (UTC+7, no DST). FixedZone avoids tzdata
@@ -97,6 +81,7 @@ func LoadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (Basis
 		        COUNT(*)
 		   FROM sports_payments
 		  WHERE tenant_id=$1
+		    AND deleted_at IS NULL
 		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
 		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
 		tenantID, from, to).Scan(&b.Cash, &b.QRIS, &b.Other, &b.Count); err != nil {

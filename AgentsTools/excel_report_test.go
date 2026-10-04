@@ -61,6 +61,22 @@ func TestParseXLSXMarker(t *testing.T) {
 	}
 }
 
+func TestBuildReportWorkbook_NeutralizesFormulaCells(t *testing.T) {
+	d := sampleReportData()
+	d.Expenses = []expenseRow{{Date: "2026-09-01", Category: "=2+5", Note: "+cmd", Amount: 1}}
+	d.KantinTop = []topRow{{Name: "@evil", Qty: 1}}
+	f, err := BuildReportWorkbook(d, "centrum", "2026-09-01", "2026-10-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := f.GetCellValue("Pengeluaran", "B2"); v != "'=2+5" {
+		t.Fatalf("category = %q, want literal neutralized text", v)
+	}
+	if v, _ := f.GetCellValue("Kantin", "A5"); v != "'@evil" {
+		t.Fatalf("product = %q, want literal neutralized text", v)
+	}
+}
+
 func TestBuildReportWorkbook(t *testing.T) {
 	f, err := BuildReportWorkbook(sampleReportData(), "centrum", "2026-09-01", "2026-10-01")
 	if err != nil {

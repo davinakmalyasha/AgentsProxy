@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# ops/backup.sh — nightly pg_dump of the agents_proxy database.
+# ops/backup.sh — pg_dump of the agents_proxy database.
+# NOTE: nothing schedules this yet — wire it to a cron / GitHub Actions
+# schedule before calling it "nightly".
 # Usage:  ops/backup.sh                # uses DATABASE_URL_ADMIN from env
 #         DATABASE_URL_ADMIN=... ops/backup.sh
 # Restores: psql "$DATABASE_URL_ADMIN" < backups/agents_proxy-YYYY-MM-DDTHH-MM-SS.sql.gz

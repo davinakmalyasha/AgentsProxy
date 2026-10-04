@@ -1,6 +1,6 @@
 # RUNBOOK — D:\MyProject\AgentsProxy
 
-> Operations guide for the deployed agents-proxy. Pair with `PRD.md`, `DONE.md`, `RUNBOOK.md` lives in the repo so any operator has context.
+> Operations guide for the deployed agents-proxy. Pair with `README.md` (what it is), `ARCHITECTURE.md` (how it's built), `docs/refinementNotes.md` (known gaps + roadmap). This file lives in the repo so any operator has context.
 
 ---
 
@@ -139,17 +139,6 @@ gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADM
 | `DB_POOL_MIN` | 2 | runtime pool minimum connections |
 | `DB_POOL_MAX` | 20 | runtime pool maximum connections |
 | `DB_USE_SIMPLE_PROTOCOL` | false | **set to `true` when connecting via Supavisor 6543** |
-| `TELEGRAM_VAULT_KEY` | empty | 64-hex master key; empty = bots disabled, REST unaffected. Generate: `openssl rand -hex 32` |
-| `PROXY_PUBLIC_URL` | empty | public base URL for Telegram webhooks; empty + `TELEGRAM_POLL_DEV=1` = dev polling |
-| `TELEGRAM_POLL_DEV` | false | per-bot getUpdates polling fallback (dev only; prod uses webhooks) |
-
-## 1.5.5 Telegram multi-bot ops
-
-- **Register a bot:** `POST /v1/sports/telegram/bots {"name":"Owner","role":"owner","token":"...","allow_chat_ids":[...]}` (owner session). Token validated via `getMe`, encrypted at rest, webhook registered automatically.
-- **Revoke:** `DELETE /v1/sports/telegram/bots/{id}` (webhook dropped) or `PATCH ... {"status":"disabled"}`. BotFather revocation is separate.
-- **Find a user's chat_id:** message the bot once; check logs; or use @userinfobot. Owner/pegawai bots refuse non-allowlisted chats.
-- **Reminders:** stored in `agent_reminders` with owning `bot_id`; scheduler polls every 60s and sends via that bot. Undeliverable rows flip to `dead` (bad chat after parse fail, 5 failed attempts).
-- **Staff payments are a ledger** (`agent_staff_payments`) — no money movement. Real payouts = future phase.
 
 ## 1.6 Feature toggle (instant or ≤15 min)
 
@@ -230,7 +219,7 @@ To add a migration: drop a new file into `internal/db/migrations/00X_name.sql`; 
 
 | You want to… | Touch |
 |---|---|
-| Add a new vertical | `internal/api/business.go` — append one string to `allowedVerticals` |
+| Add a new vertical | `internal/features/builder.go` — append one string to `AllowedVerticals` |
 | Add a new business field | nothing — it's all in `payload` jsonb |
 | Add a new admin endpoint | `internal/api/admin.go` |
 | Change rate limit | `RATE_LIMIT_PER_MINUTE` env |

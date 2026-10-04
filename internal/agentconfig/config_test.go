@@ -86,8 +86,8 @@ func TestAllDiscoveredTenantsValidate(t *testing.T) {
 			t.Error("a tenant loaded with an empty slug")
 		}
 		// Same shape as the centrum check below: identity, budgets,
-		// skills, knowledge and MCP entries, no registry needed.
-		if err := Validate(p, map[string]bool{}, map[string]bool{}, RoleCeiling{}, DefaultBudget()); err != nil {
+		// skills and knowledge, no registry needed.
+		if err := Validate(p, DefaultBudget()); err != nil {
 			t.Errorf("tenant %q invalid: %v", slug, err)
 		}
 	}
@@ -97,41 +97,17 @@ func TestAllDiscoveredTenantsValidate(t *testing.T) {
 // way a tenant folder can be wrong in a way that would otherwise produce a
 // silently broken agent.
 func TestValidateCatchesConfigDrift(t *testing.T) {
-	known := map[string]bool{"list_bookings": true, "book_slot": true}
-	mut := map[string]bool{"book_slot": true}
-	ceiling := RoleCeiling{
-		"owner":   {"list_bookings": true, "book_slot": true},
-		"pegawai": {"list_bookings": true},
-	}
 	b := DefaultBudget()
 
 	good := &Project{
 		Slug:     "demo",
 		Vertical: "sports",
-		Tools:    []ToolSpec{{Name: "list_bookings"}},
 	}
-	if err := Validate(good, known, mut, ceiling, b); err != nil {
+	if err := Validate(good, b); err != nil {
 		t.Fatalf("a valid project was rejected: %v", err)
 	}
 
 	for name, mutate := range map[string]func(*Project){
-		"a tool that is not implemented": func(p *Project) {
-			p.Tools = append(p.Tools, ToolSpec{Name: "does_not_exist"})
-		},
-		"a duplicate tool": func(p *Project) {
-			p.Tools = append(p.Tools, ToolSpec{Name: "list_bookings"})
-		},
-		"mutating that contradicts the code": func(p *Project) {
-			no := false
-			// book_slot IS mutating in the registry, so claiming otherwise
-			// is the dangerous direction: the gate trusts the Go flag, and a
-			// config saying "read" would make a reviewer believe writes are
-			// unpinnable here.
-			p.Tools = append(p.Tools, ToolSpec{Name: "book_slot", Mutating: &no})
-		},
-		"a role that widens the ceiling": func(p *Project) {
-			p.Tools = append(p.Tools, ToolSpec{Name: "list_bookings", Roles: []string{"client"}})
-		},
 		"a skill with no body": func(p *Project) {
 			p.Skills = []Skill{{Name: "empty"}}
 		},
@@ -141,15 +117,12 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 		"oversized information": func(p *Project) {
 			p.Information = []Document{{Name: "big", Body: strings.Repeat("y", b.MaxInformationRunes+1)}}
 		},
-		"an unknown mcp transport": func(p *Project) {
-			p.MCP = []MCPServer{{Name: "x", URL: "http://x", Transport: "carrier-pigeon"}}
-		},
 		"no vertical":        func(p *Project) { p.Vertical = "" },
 		"a slug with spaces": func(p *Project) { p.Slug = "My Venue" },
 	} {
-		p := &Project{Slug: "demo", Vertical: "sports", Tools: []ToolSpec{{Name: "list_bookings"}}}
+		p := &Project{Slug: "demo", Vertical: "sports"}
 		mutate(p)
-		if err := Validate(p, known, mut, ceiling, b); err == nil {
+		if err := Validate(p, b); err == nil {
 			t.Errorf("%s: expected validation to fail, got nil", name)
 		}
 	}
@@ -165,9 +138,9 @@ func TestCentrumConfigIsValid(t *testing.T) {
 	p := projects["centrum"]
 	// Tool declarations live in tenants/<slug>/tools/*.go now, not in the
 	// folders, so there is no per-tool registry to check here. What this
-	// asserts is everything the folders DO own: identity, budgets, skills,
-	// knowledge and MCP entries.
-	if err := Validate(p, map[string]bool{}, map[string]bool{}, RoleCeiling{}, DefaultBudget()); err != nil {
+	// asserts is everything the folders DO own: identity, budgets, skills
+	// and knowledge.
+	if err := Validate(p, DefaultBudget()); err != nil {
 		t.Fatalf("centrum config invalid: %v", err)
 	}
 }

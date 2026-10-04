@@ -11,7 +11,8 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH}
 RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/server ./cmd/server
 
 # Stage 2: runtime

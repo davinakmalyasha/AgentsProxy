@@ -147,7 +147,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 
-	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole).ApplyProject(project)
+	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
 
 	adapted := make([]tool.Tool, 0, len(ts.Names()))
 	for _, name := range ts.Names() {
@@ -169,7 +169,6 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		Role:     role,
 		Display:  display,
 		ToolDefs: ts.Definitions(),
-		Message:  message,
 		Vertical: vertical,
 		Now:      time.Now(),
 	})

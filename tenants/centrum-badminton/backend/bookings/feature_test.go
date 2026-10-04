@@ -67,11 +67,21 @@ func setup(t *testing.T) *harness {
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
 			 DELETE FROM sports_facilities WHERE tenant_id IN ('bk-a','bk-b');
+			 DELETE FROM sports_pricing_rules WHERE tenant_id IN ('bk-a','bk-b');
 			 DELETE FROM clients WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
 			return err
 		}
 		seedClientTx(t, ctx, tx, "bk-a", "bk-a", "tok-bk-a", 1000000, "active", "records", "facilities", "bookings")
 		seedClientTx(t, ctx, tx, "bk-b", "bk-b", "tok-bk-b", 1000000, "active", "records", "facilities", "bookings")
+		// Pricing rules every booking test needs (RuleFor requires a rule
+		// covering the date). Seeded here so no test depends on another
+		// test's leftovers.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+			 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
+			        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -118,6 +128,9 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
+		`GRANT SELECT ON sports_pricing_rules TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
@@ -344,10 +357,13 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
 
 	// A pricing rule, so create gets past the price step and reaches the
-	// block check rather than stopping at ErrNoRule.
+	// block check rather than stopping at ErrNoRule. Seeded in setup; the
+	// conflict guard keeps this self-sufficient when run standalone.
 	if _, err := h.adminPool.Exec(ctx,
 		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
-		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`); err != nil {
+		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
+		        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)
+		 ON CONFLICT (tenant_id, valid_from) DO NOTHING`); err != nil {
 		t.Fatal(err)
 	}
 

@@ -26,6 +26,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/testutil"
 )
@@ -324,5 +325,77 @@ func TestFacilities_Gate(t *testing.T) {
 	resp := doReq(t, h.router, "GET", "/facilities", "tok-fac-c", "")
 	if resp.StatusCode != 403 {
 		t.Errorf("gate status=%d want 403", resp.StatusCode)
+	}
+}
+
+// TestFacilities_TombstoneDelete: DELETE tombstones instead of removing the
+// row — getOne 404s, list excludes it, patch 404s, but the row survives
+// with deleted_at/deleted_by. Uses a booking-free court so the 409 in-use
+// guard does not trigger.
+func TestFacilities_TombstoneDelete(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp := doReq(t, h.router, "POST", "/facilities", "tok-fac-a",
+		`{"name":"Tomb Court","type":"badminton"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	// Delete keeps the 200 {"id","status":"deleted"} contract.
+	delResp := doReq(t, h.router, "DELETE", "/facilities/"+id, "tok-fac-a", "")
+	if delResp.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", delResp.StatusCode, readAll(t, delResp))
+	}
+	dm := readJSON(t, delResp)
+	if dm["id"] != id || dm["status"] != "deleted" {
+		t.Errorf("delete body=%v want {id,status:deleted}", dm)
+	}
+
+	// getOne on the tombstone → 404, exactly as a hard delete read.
+	if r := doReq(t, h.router, "GET", "/facilities/"+id, "tok-fac-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// Deleted rows can't be edited.
+	if r := doReq(t, h.router, "PATCH", "/facilities/"+id, "tok-fac-a", `{"name":"x"}`); r.StatusCode != 404 {
+		t.Errorf("patch deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// List excludes the row.
+	mL := readJSON(t, doReq(t, h.router, "GET", "/facilities", "tok-fac-a", ""))
+	items, _ := mL["items"].([]any)
+	for _, it := range items {
+		if it.(map[string]any)["id"] == id {
+			t.Error("deleted facility still listed")
+		}
+	}
+
+	// The row is still in the DB with who/when. Client-token callers
+	// carry no staff UserID, so deleted_by is "" — the caller identity,
+	// exactly as the payments tombstone stores it. Read through the
+	// tenant-scoped helper since this harness keeps only the app pool.
+	var delBy string
+	var delAt time.Time
+	if err := records.WithTenantTx(ctx, h.pool, "fac-a", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT deleted_by, deleted_at FROM sports_facilities WHERE id=$1::uuid`, id).Scan(&delBy, &delAt)
+	}); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if delAt.IsZero() {
+		t.Error("deleted_at not set")
+	}
+	if delBy != "" {
+		t.Errorf("deleted_by=%q want caller identity (empty for client token)", delBy)
+	}
+
+	// Second delete finds no live row → 404.
+	if r := doReq(t, h.router, "DELETE", "/facilities/"+id, "tok-fac-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
 	}
 }

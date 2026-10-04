@@ -47,7 +47,7 @@ func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 				err := tx.QueryRow(ctx,
 					`SELECT name, open_time::text, close_time::text FROM sports_facilities
-					  WHERE id = $1::uuid AND tenant_id = $2 AND status='active'`,
+					  WHERE id = $1::uuid AND tenant_id = $2 AND status='active' AND deleted_at IS NULL`,
 					p.FacilityID, tenantID).Scan(&facName, &openStr, &closeStr)
 				if err != nil {
 					return errors.New("unknown facility")

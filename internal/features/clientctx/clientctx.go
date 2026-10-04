@@ -61,7 +61,7 @@ func (id *Identity) IsOwner() bool {
 // Narrower than IsOwner on purpose: a client API token is a single
 // static secret (usually embedded in a site or integration), and it
 // must not be able to escalate to persistent human-level access by
-// editing staff roles or a bot's allow_chat_ids. Data writes stay on
+// editing staff roles. Data writes stay on
 // IsOwner so the API-integration model keeps working; identity and
 // access changes come here.
 func (id *Identity) IsStaffOwner() bool {

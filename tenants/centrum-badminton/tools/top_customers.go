@@ -55,9 +55,9 @@ func topCustomersTool(pool *pgxpool.Pool) agentstools.Tool {
 					                 '?') AS who,
 					        MIN(COALESCE(NULLIF(c.name,''), NULLIF(b.customer_name,''), '?')) AS label,
 					        COUNT(*) AS visits
-					   FROM sports_bookings b
-					   LEFT JOIN sports_customers c
-					          ON c.tenant_id = b.tenant_id AND c.phone = b.customer_phone
+				   FROM sports_bookings b
+				   LEFT JOIN sports_customers c
+				          ON c.tenant_id = b.tenant_id AND c.phone = b.customer_phone AND c.deleted_at IS NULL
 					  WHERE b.tenant_id=$1 AND b.status IN ('confirmed','checked_in','completed')
 					    AND (b.customer_name IS NOT NULL AND b.customer_name <> ''
 					         OR c.name IS NOT NULL AND c.name <> '')

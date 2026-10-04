@@ -37,7 +37,7 @@ func getPricingTool(pool *pgxpool.Pool) agentstools.Tool {
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx,
 					`SELECT valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening
-					   FROM sports_pricing_rules WHERE tenant_id=$1 AND is_active AND valid_from <= $2::date ORDER BY valid_from DESC LIMIT 1`,
+					   FROM sports_pricing_rules WHERE tenant_id=$1 AND is_active AND deleted_at IS NULL AND valid_from <= $2::date ORDER BY valid_from DESC LIMIT 1`,
 					tenantID, p.Date).Scan(&validFrom, &open, &close, &dayStart, &dayEnd, &priceDay, &priceEvening)
 			})
 			if err != nil {

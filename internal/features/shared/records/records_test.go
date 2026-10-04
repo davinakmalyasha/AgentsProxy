@@ -419,16 +419,15 @@ func TestRecords_SearchByQuery(t *testing.T) {
 	}
 }
 
-// TestRecords_InvalidStatusFilter: status=foo is allowed (we don't
-// whitelist — clients can pass arbitrary status filters; the
-// default for list is "active", so unknown values return 0 items).
+// TestRecords_InvalidStatusFilter: unknown status values are rejected
+// (strict allowlist: active, deleted). A typo'd filter must fail loudly,
+// not silently return 0 items that look like "no data".
 func TestRecords_StatusUnknownReturnsZero(t *testing.T) {
 	h := setupRecords(t)
 	doReq(t, h.router, "POST", "/", "tok-a", `{"kind":"item","title":"x","payload":{}}`).Body.Close()
 	resp := doReq(t, h.router, "GET", "/?status=nosuch", "tok-a", "")
-	m := readJSON(t, resp)
-	items, _ := m["items"].([]any)
-	if len(items) != 0 {
-		t.Errorf("status=nosuch items=%d want 0", len(items))
+	if resp.StatusCode != 400 {
+		t.Errorf("status=nosuch code=%d want 400", resp.StatusCode)
 	}
+	resp.Body.Close()
 }

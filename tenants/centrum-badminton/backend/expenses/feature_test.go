@@ -232,6 +232,102 @@ func TestExpenses_Validation(t *testing.T) {
 	}
 }
 
+// TestExpenses_TombstoneDelete: DELETE tombstones instead of removing the
+// row — getOne 404s, list excludes it, patch 404s, but the row survives
+// with deleted_at/deleted_by, and the filtered SUM (the shape
+// query_net_profit / query_range_summary / reports use) excludes it.
+func TestExpenses_TombstoneDelete(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp := doReq(t, h.router, "POST", "/expenses", "tok-ex-a",
+		`{"category":"listrik","amount":500000,"note":"tagihan bulan"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	m := readJSON(t, resp)
+	id, _ := m["id"].(string)
+
+	respB := doReq(t, h.router, "POST", "/expenses", "tok-ex-a",
+		`{"category":"air","amount":200000}`)
+	if respB.StatusCode != 201 {
+		t.Fatalf("create2 status=%d body=%s", respB.StatusCode, readAll(t, respB))
+	}
+	mB := readJSON(t, respB)
+	keepID, _ := mB["id"].(string)
+
+	// Delete keeps the 200 {"id","status":"deleted"} contract.
+	delResp := doReq(t, h.router, "DELETE", "/expenses/"+id, "tok-ex-a", "")
+	if delResp.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", delResp.StatusCode, readAll(t, delResp))
+	}
+	dm := readJSON(t, delResp)
+	if dm["id"] != id || dm["status"] != "deleted" {
+		t.Errorf("delete body=%v want {id,status:deleted}", dm)
+	}
+
+	// getOne on the tombstone → 404, exactly as a hard delete read.
+	if r := doReq(t, h.router, "GET", "/expenses/"+id, "tok-ex-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// Deleted rows can't be edited.
+	if r := doReq(t, h.router, "PATCH", "/expenses/"+id, "tok-ex-a", `{"amount":1}`); r.StatusCode != 404 {
+		t.Errorf("patch deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// List excludes the row but keeps the survivor.
+	mL := readJSON(t, doReq(t, h.router, "GET", "/expenses", "tok-ex-a", ""))
+	items, _ := mL["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items=%d want 1 (survivor only)", len(items))
+	}
+	if items[0].(map[string]any)["id"] != keepID {
+		t.Errorf("list survivor=%v want %s", items[0].(map[string]any)["id"], keepID)
+	}
+
+	// The row is still in the DB with who/when. Client-token callers
+	// carry no staff UserID, so deleted_by is "" — the caller identity,
+	// exactly as the payments tombstone stores it.
+	var delBy string
+	var delAt time.Time
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT deleted_by, deleted_at FROM sports_expenses WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if delAt.IsZero() {
+		t.Error("deleted_at not set")
+	}
+	if delBy != "" {
+		t.Errorf("deleted_by=%q want caller identity (empty for client token)", delBy)
+	}
+
+	// Net-profit shape: the filtered SUM sees only the survivor, while
+	// the unfiltered total proves the row was preserved, not removed.
+	var filtered, all float64
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount),0) FROM sports_expenses WHERE tenant_id='ex-a' AND deleted_at IS NULL`).Scan(&filtered); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount),0) FROM sports_expenses WHERE tenant_id='ex-a'`).Scan(&all); err != nil {
+		t.Fatal(err)
+	}
+	if filtered != 200000 {
+		t.Errorf("filtered SUM=%v want 200000 (tombstone excluded)", filtered)
+	}
+	if all != 700000 {
+		t.Errorf("unfiltered SUM=%v want 700000 (row preserved)", all)
+	}
+
+	// Second delete finds no live row → 404.
+	if r := doReq(t, h.router, "DELETE", "/expenses/"+id, "tok-ex-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+}
+
 // TestExpenses_Isolation: B cannot see A's expenses.
 func TestExpenses_Isolation(t *testing.T) {
 	h := setup(t)

@@ -2,11 +2,14 @@
 //
 // GET /v1/reports/{token}[.xlsx] streams a chat-built .xlsx. The token
 // IS the auth: 64-hex, tenant-scoped, 30-min TTL in Redis. No session
-// needed, so Telegram users and logged-in staff can both download.
+// needed, so logged-in app users can download from the presented link.
 // Quota keys are never touched here.
 package api
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
@@ -21,47 +25,54 @@ import (
 
 // Reports serves token-authed report files.
 type Reports struct {
-	RDB *redis.Client
+	RDB  *redis.Client
+	Pool *pgxpool.Pool
 }
 
-// Download streams the .xlsx for a valid token (Range-capable, no
-// full-file buffering — reports can be megabytes).
+// Download streams the .xlsx for a valid token (Range-capable).
 func (h *Reports) Download(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSuffix(chi.URLParam(r, "token"), ".xlsx")
-	f, filename, err := agentstools.OpenReportFile(token)
+	filename, data, err := agentstools.LoadReport(token)
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "link kadaluarsa atau tidak dikenal — minta lagi ke bot")
-		return
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "link kadaluarsa atau tidak dikenal — minta lagi ke bot")
+		writeJSONError(w, http.StatusNotFound, "link kadaluarsa atau tidak dikenal — minta lagi ke aplikasi")
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.Header().Set("Cache-Control", "private, no-store")
-	http.ServeContent(w, r, filename, info.ModTime(), f)
+	http.ServeContent(w, r, filename, time.Now(), bytes.NewReader(data))
 }
 
-// StartSweeper runs the disk reclaim in the background every 10
-// minutes. Keeping it out of the request path matters: downloads are
-// bursty (LLM links clicked by many users) and an O(tenants × files)
-// walk on every click is wasted synchronous work. Tickets in Redis
-// expire on their own (30 min); this only reclaims disk.
+// StartSweeper runs reclaim in the background every 10 minutes:
+// manifest-driven purge of expired objects on every backend, plus the
+// legacy local-disk walk for pre-manifest files. Keeping it out of the
+// request path matters: downloads are bursty (LLM links clicked by many
+// users) and an O(tenants × files) walk on every click is wasted
+// synchronous work. Tickets in Redis expire on their own (30 min); this
+// only reclaims objects.
 func (h *Reports) StartSweeper(stop <-chan struct{}) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	sweepOldReports()
+	sweepOnce(h.Pool)
 	for {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
-			sweepOldReports()
+			sweepOnce(h.Pool)
 		}
 	}
+}
+
+func sweepOnce(pool *pgxpool.Pool) {
+	if pool != nil {
+		if _, err := agentstools.PurgeExpiredReports(context.Background(), pool); err != nil {
+			// Best-effort: never crash the sweeper on a transient DB error,
+			// but expired objects accumulating is a storage leak that must page.
+			slog.Error("report purge failed", "err", err)
+		}
+	}
+	sweepOldReports()
 }
 
 // reportsRoot is where chat-generated .xlsx files live. A var so tests

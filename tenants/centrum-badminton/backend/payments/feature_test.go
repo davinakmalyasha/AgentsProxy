@@ -159,6 +159,10 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
+	return doReqKey(t, h, method, path, token, body, "")
+}
+
+func doReqKey(t *testing.T, h http.Handler, method, path, token, body, idemKey string) *http.Response {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -171,6 +175,9 @@ func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http
 	}
 	if token != "" {
 		req.Header.Set("X-Client-Token", token)
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -262,6 +269,27 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "partial" {
 		t.Errorf("after delete: status=%s want partial", s)
 	}
+	// Tombstone, not gone: getOne 404s, list excludes, row keeps who/when.
+	if r := doReq(t, h.router, "GET", "/payments/"+payID, "tok-pay-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	mL := readJSON(t, doReq(t, h.router, "GET", "/payments", "tok-pay-a", ""))
+	items, _ := mL["items"].([]any)
+	for _, it := range items {
+		if m, _ := it.(map[string]any); m["id"] == payID {
+			t.Error("deleted payment still listed")
+		}
+	}
+	var delBy string
+	var delAt time.Time
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT deleted_by, deleted_at FROM sports_payments WHERE id=$1::uuid`, payID).Scan(&delBy, &delAt); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if delAt.IsZero() {
+		t.Error("deleted_at not set")
+	}
 }
 
 // TestPayments_Isolation: B cannot see/pay A's booking.
@@ -283,6 +311,55 @@ func TestPayments_Isolation(t *testing.T) {
 	if len(items) != 0 {
 		t.Errorf("B saw %d payments, want 0", len(items))
 	}
+}
+
+// TestPayments_Idempotency: same Idempotency-Key twice → one row, second
+// call returns the original id with deduplicated:true. No key → two rows
+// (optional phase: absent header behaves exactly as before).
+func TestPayments_Idempotency(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+
+	body := `{"booking_id":"` + bookingID + `","amount":25000,"method":"cash"}`
+	resp := doReqKey(t, h.router, "POST", "/payments", "tok-pay-a", body, "key-1")
+	if resp.StatusCode != 201 {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	first := readJSON(t, resp)
+	id1, _ := first["id"].(string)
+
+	resp2 := doReqKey(t, h.router, "POST", "/payments", "tok-pay-a", body, "key-1")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("replay status=%d want 200, body=%s", resp2.StatusCode, readAll(t, resp2))
+	}
+	second := readJSON(t, resp2)
+	if second["id"] != id1 || second["deduplicated"] != true {
+		t.Errorf("replay = %v, want same id with deduplicated:true", second)
+	}
+
+	var n int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sports_payments WHERE tenant_id='pay-a'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("payments rows = %d, want 1 (no double charge)", n)
+	}
+
+	// Same body, different key → second charge (keys scope dedup).
+	resp3 := doReqKey(t, h.router, "POST", "/payments", "tok-pay-a", body, "key-2")
+	if resp3.StatusCode != 201 {
+		t.Fatalf("new key status=%d body=%s", resp3.StatusCode, readAll(t, resp3))
+	}
+
+	// Malformed key → 400.
+	resp4 := doReqKey(t, h.router, "POST", "/payments", "tok-pay-a", body, "bad key!!")
+	if resp4.StatusCode != 400 {
+		t.Errorf("bad key status=%d want 400", resp4.StatusCode)
+	}
+	readAll(t, resp4)
 }
 
 // TestPayments_Validation: amount <= 0 → 400, bad method → 400.

@@ -9,7 +9,7 @@ import (
 
 func TestRegisterAndLookup(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "alpha", Kind: "alpha", DefaultOn: true})
+	Register(Feature{Name: "alpha", Kind: "alpha"})
 	Register(Feature{Name: "beta", Kind: "beta"})
 	if got := All(); len(got) != 2 {
 		t.Errorf("All len=%d want 2", len(got))
@@ -107,10 +107,10 @@ func TestBuildVerticalRouter_UnknownVerticalPanics(t *testing.T) {
 // build with two valid features (different names) succeeds.
 func TestBuildVerticalRouter_HappyPath(t *testing.T) {
 	ResetForTest()
-	Register(Feature{Name: "feat1", Kind: "f1", DefaultOn: true, Routes: func(r chi.Router, _ BuilderDeps) {
+	Register(Feature{Name: "feat1", Kind: "f1", Routes: func(r chi.Router, _ BuilderDeps) {
 		r.Get("/ping", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	}})
-	Register(Feature{Name: "feat2", Kind: "f2", DefaultOn: true, Routes: func(r chi.Router, _ BuilderDeps) {
+	Register(Feature{Name: "feat2", Kind: "f2", Routes: func(r chi.Router, _ BuilderDeps) {
 		r.Get("/pong", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	}})
 	// Build a router; it should not panic.

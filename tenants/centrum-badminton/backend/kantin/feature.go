@@ -33,7 +33,6 @@ func Register() {
 	features.Register(features.Feature{
 		Name:          featureName,
 		Kind:          "",
-		DefaultOn:     false,
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
 	})
@@ -555,6 +554,29 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "method must be cash or qris")
 		return
 	}
+	// Idempotency-Key (optional phase): a repeated key returns the original
+	// sale instead of charging twice. Absent header behaves as before.
+	idemKey, haveIdem, idemErr := records.IdempotencyKey(w, r)
+	if idemErr != nil {
+		return
+	}
+	if haveIdem {
+		var existingID string
+		var existingTotal float64
+		qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+			return tx.QueryRow(r.Context(),
+				`SELECT id::text, total FROM sports_kantin_sales WHERE tenant_id=$1 AND idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&existingID, &existingTotal)
+		})
+		if qerr == nil {
+			records.WriteJSON(w, http.StatusOK, map[string]any{"id": existingID, "total": existingTotal, "deduplicated": true})
+			return
+		}
+		if qerr != pgx.ErrNoRows {
+			records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
 
 	var saleID string
 	var total float64
@@ -568,9 +590,9 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		// Insert the sale header (total computed below).
 		if err := tx.QueryRow(r.Context(),
-			`INSERT INTO sports_kantin_sales (tenant_id, total, method, customer_name, note, booking_id, recorded_by)
-			 VALUES ($1,0,$2,$3,$4,NULLIF($5,'')::uuid,$6) RETURNING id::text`,
-			idn.TenantID(), req.Method, req.CustomerName, req.Note, req.BookingID, recordedByArg).Scan(&saleID); err != nil {
+			`INSERT INTO sports_kantin_sales (tenant_id, total, method, customer_name, note, booking_id, recorded_by, idempotency_key)
+			 VALUES ($1,0,$2,$3,$4,NULLIF($5,'')::uuid,$6,NULLIF($7,'')) RETURNING id::text`,
+			idn.TenantID(), req.Method, req.CustomerName, req.Note, req.BookingID, recordedByArg, idemKey).Scan(&saleID); err != nil {
 			return err
 		}
 		for _, it := range req.Items {
@@ -618,6 +640,20 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
+		// Lost the insert race with a duplicate key: return the winner.
+		if haveIdem && records.IsUniqueViolation(err) {
+			var existingID string
+			var existingTotal float64
+			qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+				return tx.QueryRow(r.Context(),
+					`SELECT id::text, total FROM sports_kantin_sales WHERE tenant_id=$1 AND idempotency_key=$2`,
+					idn.TenantID(), idemKey).Scan(&existingID, &existingTotal)
+			})
+			if qerr == nil {
+				records.WriteJSON(w, http.StatusOK, map[string]any{"id": existingID, "total": existingTotal, "deduplicated": true})
+				return
+			}
+		}
 		msg := err.Error()
 		if strings.Contains(msg, "out of stock") || strings.Contains(msg, "product not found") || msg == "bad qty" {
 			records.WriteJSONError(w, http.StatusConflict, msg)

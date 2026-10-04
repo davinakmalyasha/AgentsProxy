@@ -32,8 +32,6 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
-	"github.com/davinakmalyasha/agents-proxy/internal/telegram"
-	"github.com/davinakmalyasha/agents-proxy/internal/tgvault"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
@@ -46,7 +44,6 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/payments"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/series"
-	telegram_feature "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/telegram"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/users"
 )
 
@@ -127,7 +124,9 @@ func main() {
 	defer rdb.Close()
 	slog.Info("redis connected")
 	agentstools.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
-	agentstools.CapRDB = rdb    // per-tenant daily cost cap (unconditional â€” must not depend on Telegram)
+	agentstools.CapRDB = rdb    // per-tenant daily cost cap
+	agentstools.ReportMaxBytes = cfg.ReportMaxBytes
+	agentstools.ConfigureSupabaseReportStore(cfg.SupabaseURL, cfg.SupabaseStorageKey, cfg.ReportBucket)
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
@@ -205,66 +204,21 @@ func main() {
 		}
 	}
 
-	// ---- Multi-bot Telegram (T3): bots live in telegram_bots, tokens
-	// encrypted with TELEGRAM_VAULT_KEY. Webhooks in prod, per-bot
-	// polling fallback for dev (TELEGRAM_POLL_DEV=1).
-	tgVaultKey, vaultErr := tgvault.MasterKeyFromEnv()
-	if vaultErr != nil {
-		slog.Warn("telegram bots disabled: " + vaultErr.Error() + " (see .env.example TELEGRAM_VAULT_KEY)")
+	// Reminder scheduler (admin pool so it can see all tenants' due
+	// reminders; per-row completion UPDATEs are RLS-scoped).
+	//
+	// Telegram delivery was deleted. There is currently no PWA delivery
+	// transport, so the scheduler preserves due rows until that lands
+	// instead of dead-lettering them. BACKGROUND_TICKERS=off on
+	// serverless: the function is destroyed between requests so the 60s
+	// ticker would never tick.
+	remSched := reminder.New(adminPool, nil)
+	if cfg.BackgroundTickers {
+		remSched.Start()
+	} else {
+		slog.Info("reminder ticker disabled on serverless")
 	}
-	var tgMgr *telegram.Manager
-	var reminderStop func()
-	if vaultErr == nil {
-		telegram_feature.VaultKey = tgVaultKey
-		telegram_feature.PublicURL = cfg.PublicURL
-		// Cutover complete for Telegram: the shared ADK runner (role is
-		// per-bot from the bots table, tools filtered per role).
-		tgMgr = telegram.NewManager(adminPool, adkRunner, tgVaultKey, cfg.PublicURL, cfg.TelegramPollDev, cfg.TelegramConcurrency)
-		tgMgr.Sync(context.Background())
-		slog.Info("telegram manager started", "bots", tgMgr.Count(),
-			"webhooks", cfg.PublicURL != "", "pollDev", cfg.TelegramPollDev)
-
-		// Reconcile every minute (new/changed/disabled bots).
-		tgCtx, tgCancel := context.WithCancel(context.Background())
-		go func() {
-			t := time.NewTicker(time.Minute)
-			defer t.Stop()
-			for {
-				select {
-				case <-tgCtx.Done():
-					return
-				case <-t.C:
-					tgMgr.Sync(context.Background())
-				}
-			}
-		}()
-		reminderStop = func() {
-			tgCancel()
-		}
-
-		// Reminder scheduler (admin pool so it can see all tenants'
-		// due reminders; per-tenant UPDATEs are RLS-scoped; delivery
-		// goes through each reminder's owning bot).
-		//
-		// BACKGROUND_TICKERS=off on serverless: the function is destroyed
-		// between requests so the 60s ticker would never tick, and
-		// Supabase pg_cron + the deliver-reminders Edge Function owns
-		// delivery instead. Both drivers claim rows (migration 030) so
-		// enabling both is safe, but only one should be active.
-		remSched := reminder.NewWithKey(adminPool, nil, tgVaultKey)
-		if cfg.BackgroundTickers {
-			remSched.Start()
-		} else {
-			slog.Info("reminder ticker disabled; delivery owned by Supabase pg_cron")
-		}
-		oldStop := reminderStop
-		reminderStop = func() { oldStop(); remSched.Stop(); tgMgr.Close() }
-	}
-	defer func() {
-		if reminderStop != nil {
-			reminderStop()
-		}
-	}()
+	defer remSched.Stop()
 
 	router := api.NewRouter(api.Deps{
 		Cfg:       cfg,
@@ -273,18 +227,17 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Projects:  projects,
 		Auth:      &authapi.Auth{Pool: pool, Cache: cli},
 		Version:   Version,
-		TGBots:    tgMgr,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,
 	})
 
-	// Background disk reclaim for chat-generated .xlsx (not on the
-	// download request path).
+	// Background reclaim for chat-generated .xlsx (not on the
+	// download request path). Manifest-driven purge handles durable
+	// storage; the legacy local walk covers pre-manifest dev files.
 	reportStop := make(chan struct{})
-	reportsSweeper := &api.Reports{RDB: rdb}
+	reportsSweeper := &api.Reports{RDB: rdb, Pool: pool}
 	go reportsSweeper.StartSweeper(reportStop)
 
 	// Retention janitor: expired sessions + old sent/dead reminders

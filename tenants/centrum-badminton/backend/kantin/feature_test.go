@@ -192,6 +192,10 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
+	return doReqKey(t, h, method, path, token, body, "")
+}
+
+func doReqKey(t *testing.T, h http.Handler, method, path, token, body, idemKey string) *http.Response {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -204,6 +208,9 @@ func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http
 	}
 	if token != "" {
 		req.Header.Set("X-Client-Token", token)
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -281,6 +288,45 @@ func TestKantin_AtomicSale(t *testing.T) {
 	}
 	if mv != 2 {
 		t.Errorf("movements=%d want 2", mv)
+	}
+}
+
+// TestKantin_SaleIdempotency: same Idempotency-Key twice → one sale, no
+// double stock decrement. Second call returns the original id + total.
+func TestKantin_SaleIdempotency(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	p := seedProduct(t, ctx, h.adminPool, "ka-a", "Kopi", 6000, 10)
+
+	body := `{"method":"cash","items":[{"product_id":"` + p + `","qty":2}]}`
+	resp := doReqKey(t, h.router, "POST", "/kantin/sales", "tok-ka-a", body, "sale-key-1")
+	if resp.StatusCode != 201 {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	first := readJSON(t, resp)
+
+	resp2 := doReqKey(t, h.router, "POST", "/kantin/sales", "tok-ka-a", body, "sale-key-1")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("replay status=%d want 200, body=%s", resp2.StatusCode, readAll(t, resp2))
+	}
+	second := readJSON(t, resp2)
+	if second["id"] != first["id"] || second["deduplicated"] != true {
+		t.Errorf("replay = %v, want same id with deduplicated:true", second)
+	}
+	var stock, n int
+	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 8 {
+		t.Errorf("stock=%d want 8 (decremented once)", stock)
+	}
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sports_kantin_sales WHERE tenant_id='ka-a'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("sales rows = %d, want 1 (no double charge)", n)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -173,7 +174,11 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = usage.Record(r.Context(), h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok)
+	// Metering failure must page but never break the reply the user
+	// already paid latency for.
+	if err := usage.Record(r.Context(), h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
+		slog.Error("usage record failed", "client_id", clientModel.ID, "err", err)
+	}
 
 	cost := usage.EstimateCost(inTok, outTok)
 	writeJSON(w, http.StatusOK, chatResponse{
