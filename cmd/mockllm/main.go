@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 )
 
 type chatReq struct {
@@ -21,7 +22,12 @@ type chatReq struct {
 }
 
 func main() {
-	addr := ":18080"
+	// Configurable so a caller does not have to match a hardcoded port: CI
+	// points LLM_BASE_URL at 18081, local scripts use the 18080 default.
+	addr := os.Getenv("MOCKLLM_ADDR")
+	if addr == "" {
+		addr = ":18080"
+	}
 	log.Printf("mockllm listening on %s", addr)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {

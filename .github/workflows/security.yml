@@ -18,8 +18,10 @@ permissions:
   # Declaring any scope sets every unlisted scope to none. gitleaks-action
   # scans the pull request itself on pull_request, which reads the PR's commits
   # through the API; without this it fails 403 "Resource not accessible by
-  # integration" before it ever reaches the scan.
+  # integration" before it ever reaches the scan. CodeQL also reads the
+  # workflow run while gathering telemetry and 403s without this.
   pull-requests: read
+  actions: read
 
 jobs:
   govulncheck:
@@ -64,6 +66,14 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
+          # Go's autobuild prefers `make` when it finds a Makefile, and this
+          # repo's first target is `run:` (go run ./cmd/server), which exits
+          # non-zero without DATABASE_URL and failed the analysis before it
+          # produced results. Build explicitly. `build-command` in
+          # .github/codeql/config.yml is ignored for Go under autobuild.
+          build-mode: manual
+      - name: Build
+        run: go build ./...
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:

@@ -1,7 +1,0 @@
-# CodeQL build configuration.
-#
-# The Go extractor prefers `make` when it finds a Makefile, and this repo's
-# first target is `run:` (go run ./cmd/server). That exits non-zero on a
-# missing DATABASE_URL, so the analysis failed before it produced results.
-# Build explicitly instead of letting the extractor discover `make`.
-build-command: go build ./...
