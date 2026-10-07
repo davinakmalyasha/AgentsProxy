@@ -396,7 +396,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// forever because payment_status treats a 0 price as unpaid.
 		// Refusing the booking is the honest outcome — the owner has to
 		// set up pricing before taking money for a slot.
-		price, err := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, start, end)
+		rule, price, err := pricing.RuleAndPriceFor(r.Context(), tx, idn.TenantID(), date, start, end)
 		if err != nil {
 			return err
 		}
@@ -408,10 +408,6 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// Both are now checked and both come from the same owner setting
 		// (see applyHours), so they only diverge when a court is
 		// deliberately closed early.
-		rule, ruleErr := pricing.RuleFor(r.Context(), tx, idn.TenantID(), date)
-		if ruleErr != nil {
-			return ruleErr
-		}
 		ruleOpen, e1 := time.Parse("15:04", strings.TrimSuffix(rule.OpenTime, ":00"))
 		ruleClose, e2 := time.Parse("15:04", strings.TrimSuffix(rule.CloseTime, ":00"))
 		if e1 != nil || e2 != nil {

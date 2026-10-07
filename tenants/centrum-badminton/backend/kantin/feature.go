@@ -439,15 +439,18 @@ type movementResp struct {
 // movement recorded after this one. The ledger is append-only per product,
 // so this is exact. Returning it as a literal 0 would be worse than not
 // returning it at all — a zero on every row reads as "stock hit zero".
+//
+// One pass, not one correlated SUM per row: the window totals later
+// movements per product, so a 2000-row page costs one sort instead of
+// O(n²) index probes. The window sees every movement (not just the
+// LIMITed page), exactly like the subquery it replaces.
 const movementSelect = `SELECT m.id::text, m.tenant_id, m.product_id::text, p.name,
                                 m.delta, m.reason, m.note, m.created_at,
-                                COALESCE(p.stock, 0) - COALESCE((
-                                  SELECT SUM(m2.delta)
-                                    FROM sports_kantin_stock_movements m2
-                                   WHERE m2.tenant_id = m.tenant_id
-                                     AND m2.product_id = m.product_id
-                                     AND (m2.created_at, m2.id) > (m.created_at, m.id)
-                                ), 0)
+                                COALESCE(p.stock, 0) - COALESCE(
+                                  SUM(m.delta) OVER (
+                                    PARTITION BY m.product_id
+                                    ORDER BY m.created_at DESC, m.id DESC
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0)
                            FROM sports_kantin_stock_movements m
                            JOIN sports_kantin_products p
                              ON p.id = m.product_id AND p.tenant_id = m.tenant_id

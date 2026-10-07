@@ -162,6 +162,25 @@ func (h *handler) PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date
 	if err != nil {
 		return 0, err
 	}
+	return priceFromRule(r, start, end), nil
+}
+
+// RuleAndPriceFor resolves the active rule once and returns both the
+// rule and the computed price. Booking creates need both (the price
+// and the opening-hours window); separate PriceFor + RuleFor calls
+// would run the contract gate and the rule lookup twice per booking.
+func RuleAndPriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time, start, end time.Time) (*Rule, float64, error) {
+	h := &handler{pool: nil}
+	r, err := h.resolveRule(ctx, tx, tenantID, date)
+	if err != nil {
+		return nil, 0, err
+	}
+	return r, priceFromRule(r, start, end), nil
+}
+
+// priceFromRule prices a (start, end) window hour by hour at the
+// day/evening rate, matching the frontend's computePrice.
+func priceFromRule(r *Rule, start, end time.Time) float64 {
 	dayStart, _ := time.Parse("15:04", normTime(r.DayStart))
 	dayEnd, _ := time.Parse("15:04", normTime(r.DayEnd))
 	total := 0.0
@@ -170,18 +189,18 @@ func (h *handler) PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date
 	// one, matching the frontend, which iterates `for h = startH; h < endH`.
 	// Overlapping court slots are whole hours everywhere in this product,
 	// so a fractional end is not a case worth diverging on.
-	for h := start; h.Before(end); h = h.Add(time.Hour) {
+	for t := start; t.Before(end); t = t.Add(time.Hour) {
 		rate := r.PriceEvening
-		if !h.Before(dayStart) && h.Before(dayEnd) {
+		if !t.Before(dayStart) && t.Before(dayEnd) {
 			rate = r.PriceDay
 		}
-		segEnd := h.Add(time.Hour)
+		segEnd := t.Add(time.Hour)
 		if segEnd.After(end) {
 			segEnd = end
 		}
-		total += rate * segEnd.Sub(h).Hours()
+		total += rate * segEnd.Sub(t).Hours()
 	}
-	return total, nil
+	return total
 }
 
 func normTime(s string) string {

@@ -110,25 +110,32 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
-	// One grouped query instead of a per-row correlated count over the
-	// whole booking history. Match by name OR phone: the customer's
-	// phone is the unique key, but legacy/walk-in bookings may carry
-	// only a name — preserve the old name-based count while also
-	// counting phone-matched rows. COUNT(DISTINCT) so a booking that
-	// matches on both never double-counts.
+	// Paginate the customers FIRST, then aggregate only that page. The
+	// old shape joined every customer against the tenant's whole booking
+	// history, grouped, and discarded all but LIMIT rows — LIMIT bounded
+	// the output, not the work. Match by FK first (023), falling back to
+	// the legacy name/phone match for pre-FK rows; COUNT(DISTINCT) so a
+	// booking matching on both never double-counts.
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
-			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
+			`WITH page AS (
+			   SELECT id, tenant_id, name, phone, no_show_count, notes, created_at
+			     FROM sports_customers
+			    WHERE tenant_id = $1 AND deleted_at IS NULL
+			    ORDER BY name
+			    LIMIT $2
+			 )
+			 SELECT p.id::text, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at,
 			        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed'))
-			   FROM sports_customers c
+			   FROM page p
 			   LEFT JOIN sports_bookings b
-			          ON b.tenant_id = c.tenant_id
-			         AND (b.customer_name = c.name OR (c.phone <> '' AND b.customer_phone = c.phone))
-			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
-			  GROUP BY c.id
-			  ORDER BY c.name
-			  LIMIT $2`,
+			          ON b.tenant_id = p.tenant_id
+			         AND (b.customer_id = p.id
+			              OR b.customer_name = p.name
+			              OR (p.phone <> '' AND b.customer_phone = p.phone))
+			  GROUP BY p.id, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at
+			  ORDER BY p.name`,
 			idn.TenantID(), limit+1)
 		if err != nil {
 			return err
@@ -180,7 +187,9 @@ func (h *handler) top(w http.ResponseWriter, r *http.Request) {
 			   FROM sports_customers c
 			   LEFT JOIN sports_bookings b
 			          ON b.tenant_id = c.tenant_id
-			         AND (b.customer_name = c.name OR (c.phone <> '' AND b.customer_phone = c.phone))
+			         AND (b.customer_id = c.id
+			              OR b.customer_name = c.name
+			              OR (c.phone <> '' AND b.customer_phone = c.phone))
 			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
 			  GROUP BY c.id
 			  ORDER BY visits DESC, c.name
@@ -221,7 +230,9 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
 			        (SELECT COUNT(DISTINCT b.id) FROM sports_bookings b
 			          WHERE b.tenant_id=c.tenant_id AND b.status IN ('confirmed','checked_in','completed')
-			            AND (b.customer_name=c.name OR (c.phone <> '' AND b.customer_phone=c.phone)))
+			            AND (b.customer_id=c.id
+			                 OR b.customer_name=c.name
+			                 OR (c.phone <> '' AND b.customer_phone=c.phone)))
 			   FROM sports_customers c WHERE c.id=$1::uuid AND c.tenant_id=$2 AND c.deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits)

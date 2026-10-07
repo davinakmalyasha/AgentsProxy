@@ -341,7 +341,29 @@ func (a *Admin) Usage(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		idx++
 	}
-	q += ` GROUP BY c.id, c.name, c.tenant_id ORDER BY c.tenant_id`
+	// Bound the unbounded: with no from/to this LEFT JOINs every usage
+	// row of every tenant since day one. Default to the trailing month
+	// and cap rows — the dashboard pages by month anyway.
+	if from.IsZero() && to.IsZero() {
+		to = time.Now().UTC()
+		from = to.AddDate(0, -1, 0)
+		q += fmt.Sprintf(" AND u.created_at >= $%d AND u.created_at < $%d", idx, idx+1)
+		args = append(args, from, to)
+		idx += 2
+	}
+	limit := 500
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < 1 {
+			writeJSONError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		if n > 500 {
+			n = 500
+		}
+		limit = n
+	}
+	q += fmt.Sprintf(` GROUP BY c.id, c.name, c.tenant_id ORDER BY c.tenant_id LIMIT %d`, limit)
 	rows, err := a.Pool.Query(r.Context(), q, args...)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal")

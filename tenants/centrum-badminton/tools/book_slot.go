@@ -128,15 +128,11 @@ func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 				//
 				// So compute it exactly as the HTTP create path does, and
 				// enforce the same opening window.
-				price, err := pricing.PriceFor(ctx, tx, tenantID, date, start, end)
+				rule, price, err := pricing.RuleAndPriceFor(ctx, tx, tenantID, date, start, end)
 				if err != nil {
 					if errors.Is(err, pricing.ErrNoRule) {
 						return errors.New("no pricing rule covers that date - ask the owner to set prices first")
 					}
-					return err
-				}
-				rule, err := pricing.RuleFor(ctx, tx, tenantID, date)
-				if err != nil {
 					return err
 				}
 				ruleOpen, e1 := time.Parse("15:04", norm(rule.OpenTime))
