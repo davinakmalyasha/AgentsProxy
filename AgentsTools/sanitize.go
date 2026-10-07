@@ -129,6 +129,12 @@ func SanitiseReply(text string) string {
 	if t == "" {
 		return "Saya belum bisa menjawab itu. Coba tanya hal yang lebih spesifik tentang data usaha."
 	}
+	// Fast path: every protocol pattern needs '<' (tags) or '"'
+	// (JSON keys). Plain prose with neither can never match, so skip
+	// all 8 regex scans. No false negatives by construction.
+	if !strings.ContainsAny(t, "<\"") {
+		return t
+	}
 	hit := firstMarkupHit(t)
 	if hit == nil {
 		return t

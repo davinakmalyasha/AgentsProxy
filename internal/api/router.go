@@ -47,6 +47,9 @@ func NewRouter(d Deps) http.Handler {
 	// styles, which 404s half the matrix otherwise.
 	r.Use(middleware.StripTrailingSlash)
 	r.Use(middleware.CORS(d.Cfg.AllowOrigins))
+	// Compress JSON responses over 1KB (list endpoints); already-
+	// compressed bodies (.xlsx) and small payloads pass through.
+	r.Use(middleware.Gzip)
 
 	r.Get("/healthz", (&Healthz{DB: d.Pool, RDB: d.Redis, Build: d.Version}).ServeHTTP)
 

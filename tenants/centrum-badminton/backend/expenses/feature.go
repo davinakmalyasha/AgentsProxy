@@ -138,7 +138,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	var out []expenseResp
+	out := make([]expenseResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
 			   FROM sports_expenses WHERE tenant_id=$1 AND deleted_at IS NULL`

@@ -129,12 +129,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []itemResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]itemResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, name, sku, quantity, unit_price, low_stock_threshold, status, created_at, updated_at

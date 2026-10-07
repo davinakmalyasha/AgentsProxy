@@ -245,7 +245,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []paymentResp
+	out := make([]paymentResp, 0, limit+1)
 	truncated := false
 	bookingID := strings.TrimSpace(q.Get("booking_id"))
 	if bookingID != "" {

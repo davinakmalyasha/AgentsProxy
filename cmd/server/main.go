@@ -340,6 +340,12 @@ func main() {
 		// is strictly a backstop, derived from the same constant.
 		WriteTimeout: adkrunner.TurnTimeout + 10*time.Second,
 		IdleTimeout:  120 * time.Second,
+		// 16KB rejects junk headers early; the largest legitimate
+		// header here is a session token. ErrorLog routes net/http
+		// internal errors through slog instead of the stdlib logger,
+		// so accept failures land structured in the log drain.
+		MaxHeaderBytes: 16 << 10,
+		ErrorLog:       slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
 		// TLSConfig left nil for plain HTTP local; PQC default in 1.27 only applies to TLS.
 	}
 

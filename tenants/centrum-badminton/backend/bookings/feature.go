@@ -608,7 +608,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	var out []bookingResp
+	out := make([]bookingResp, 0, limit+1)
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,

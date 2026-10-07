@@ -3,7 +3,6 @@ package middleware
 
 import (
 	"net/http"
-	"strings"
 )
 
 // StripTrailingSlash rewrites (not redirects) "/x/" → "/x" before
@@ -16,13 +15,11 @@ import (
 // keeps POST bodies intact (a 301 redirect would drop them).
 func StripTrailingSlash(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(r.URL.Path) > 1 && strings.HasSuffix(r.URL.Path, "/") {
-			r2 := r.Clone(r.Context())
-			r2.URL = r.URL.Clone()
-			r2.URL.Path = strings.TrimSuffix(r.URL.Path, "/")
-			r2.URL.RawPath = ""
-			next.ServeHTTP(w, r2)
-			return
+		// Mutate in place: the server owns the Request, so the two
+		// Clone calls (request + URL, ~6 allocs) buy nothing.
+		if p := r.URL.Path; len(p) > 1 && p[len(p)-1] == '/' {
+			r.URL.Path = p[:len(p)-1]
+			r.URL.RawPath = ""
 		}
 		next.ServeHTTP(w, r)
 	})

@@ -94,12 +94,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []userResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]userResp, 0, limit+1)
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT ` + safeCols + ` FROM sports_users WHERE tenant_id = $1`

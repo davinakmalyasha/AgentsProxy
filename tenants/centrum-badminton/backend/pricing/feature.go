@@ -278,12 +278,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []ruleResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]ruleResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at

@@ -151,12 +151,12 @@ func (h *handler) listProducts(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []productResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]productResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
@@ -493,7 +493,7 @@ func (h *handler) listProductMovements(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) writeMovements(w http.ResponseWriter, r *http.Request, tenant, productID string, limit int) {
-	var out []movementResp
+	out := make([]movementResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, tenant, func(tx pgx.Tx) error {
 		sql := movementSelect
 		args := []any{tenant}
@@ -906,7 +906,7 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []saleResp
+	out := make([]saleResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		// Voided sales are listed, not hidden. They are excluded from money
 		// arithmetic elsewhere; this screen exists precisely to show what
@@ -1021,12 +1021,12 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	var out []saleItemResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]saleItemResp, 0, limit+1)
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		// Tenant check via the parent sale (items' tenant_id is nullable backfill).

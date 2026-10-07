@@ -104,12 +104,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []customerResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]customerResp, 0, limit+1)
 	// Paginate the customers FIRST, then aggregate only that page. The
 	// old shape joined every customer against the tenant's whole booking
 	// history, grouped, and discarded all but LIMIT rows — LIMIT bounded
@@ -179,7 +179,7 @@ func (h *handler) top(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	var out []customerResp
+	out := make([]customerResp, 0, limit)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,

@@ -315,20 +315,29 @@ func Idr(v float64) string {
 	if neg {
 		v = -v
 	}
+	// Single pass, no Sprintf, no intermediate string: append the
+	// digits reversed with separators, then reverse in place.
+	var buf []byte
 	n := int64(v + 0.5)
-	s := fmt.Sprintf("%d", n)
-	// thousands separator "."
-	var out []byte
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			out = append(out, '.')
+	if n == 0 {
+		buf = append(buf, '0')
+	}
+	digits := 0
+	for n > 0 {
+		if digits > 0 && digits%3 == 0 {
+			buf = append(buf, '.')
 		}
-		out = append(out, byte(c))
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+		digits++
 	}
 	if neg {
-		return "-" + string(out)
+		buf = append(buf, '-')
 	}
-	return string(out)
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
 }
 
 // rp renders an IDR amount with the sign in front: -Rp4.405.000, Rp95.000.

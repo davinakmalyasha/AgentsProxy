@@ -11,16 +11,15 @@ import (
 	"context"
 	"log/slog"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 )
 
-var (
-	enabled bool
-	mu      sync.RWMutex
-)
+// enabled is an atomic so the per-request Enabled check (logging
+// middleware, SlogHandler) costs no mutex.
+var enabled atomic.Bool
 
 // Options configures the Sentry client.
 type Options struct {
@@ -73,17 +72,13 @@ func Init(o Options) {
 		slog.Error("sentry init", "err", err)
 		return
 	}
-	mu.Lock()
-	enabled = true
-	mu.Unlock()
+	enabled.Store(true)
 	slog.Info("sentry initialised", "environment", env, "release", release, "traces_sample_rate", traces)
 }
 
 // Enabled reports whether Sentry is active.
 func Enabled() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return enabled
+	return enabled.Load()
 }
 
 // Flush waits up to d for queued events to send. No-op when disabled.
@@ -117,13 +112,14 @@ func AddBreadcrumb(category, message string, data map[string]any) {
 }
 
 // RecoverWith forwards a recovered panic on the given context to
-// Sentry. No-op when DSN empty.
+// Sentry. No-op when DSN empty. No synchronous flush: the deferred
+// Flush at process exit (or the next event's flush) delivers it; a
+// 2s blocking flush here would add 2s to a request already failing.
 func RecoverWith(ctx context.Context, rec interface{}) {
 	if !Enabled() {
 		return
 	}
 	sentry.CurrentHub().RecoverWithContext(ctx, rec)
-	sentry.Flush(2 * time.Second)
 }
 
 // SlogHandler wraps an inner slog handler and forwards Error-level

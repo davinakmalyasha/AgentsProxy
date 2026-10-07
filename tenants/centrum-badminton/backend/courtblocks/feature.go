@@ -126,7 +126,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
-	var out []blockResp
+	out := make([]blockResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, COALESCE(facility_id::text,''), block_date::text, start_time::text, end_time::text, reason, created_at
 		          FROM sports_court_blocks WHERE tenant_id=$1`

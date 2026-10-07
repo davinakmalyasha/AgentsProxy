@@ -181,10 +181,15 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Metering failure must page but never break the reply the user
-	// already paid latency for.
-	if err := usage.Record(r.Context(), h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
-		slog.Error("usage record failed", "client_id", clientModel.ID, "err", err)
+	// Metering must never break the reply the user already paid
+	// latency for — but it must not be lost either. Detached context:
+	// a client that disconnects after the model call still gets
+	// metered. Warn, not Error: Error records auto-forward to Sentry
+	// with a stack trace, and a metering blip must not page.
+	mctx, mcancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer mcancel()
+	if err := usage.Record(mctx, h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
+		slog.Warn("usage record failed", "client_id", clientModel.ID, "err", err)
 	}
 
 	cost := usage.EstimateCost(inTok, outTok)
