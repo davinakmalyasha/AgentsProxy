@@ -46,8 +46,7 @@ type Config struct {
 	SupabaseStorageKey string
 	ReportBucket       string
 	ReportMaxBytes     int
-	// BackgroundTickers runs this process's own background loops: the
-	// 60s reminder ticker and the notify drain loop. Both mean the same
+	// BackgroundTickers runs this process's own background loops: the	// 60s reminder ticker and the notify drain loop. Both mean the same
 	// thing - "am I a long-lived process that can own background work?"
 	//
 	// true  = long-running hosts (Laragon, VPS, Railway). The process
@@ -63,6 +62,12 @@ type Config struct {
 	// Leaving it true on serverless is not a correctness bug, but it
 	// spends Active CPU on loops that can never fire.
 	BackgroundTickers bool
+	// RunMigrations applies embedded migrations at boot. Disable on
+	// serverless (Vercel sets RUN_MIGRATIONS=false) where every cold
+	// start would otherwise replay the whole ledger inside an advisory
+	// lock; run migrations as a deploy step instead (make migrate /
+	// Docker entrypoint / CI).
+	RunMigrations bool
 }
 
 func Load() (*Config, error) {
@@ -101,6 +106,9 @@ func Load() (*Config, error) {
 	// serverless while the operator believed they were off.
 	var err error
 	if c.BackgroundTickers, err = getenvBool("BACKGROUND_TICKERS", true); err != nil {
+		return nil, err
+	}
+	if c.RunMigrations, err = getenvBool("RUN_MIGRATIONS", true); err != nil {
 		return nil, err
 	}
 	if c.DBSimpleProtocol, err = getenvBool("DB_USE_SIMPLE_PROTOCOL", false); err != nil {

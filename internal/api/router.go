@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -85,9 +86,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Mount("/auth", d.Auth.Routes())
 		}
 
-		// Per-vertical feature platform. One builder call per
-		// vertical; the builder mounts the records feature plus
-		// every registered shared feature, each gated.
+		// Per-vertical feature platform. Only verticals with live tenants
+		// mount (plus any vertical with registered custom features);
+		// the rest serve nothing today. Zero live tenants — a fresh
+		// database — mounts everything, exactly as before.
 		bDeps := features.BuilderDeps{
 			Pool:               d.Pool,
 			Cache:              d.Cache,
@@ -95,7 +97,7 @@ func NewRouter(d Deps) http.Handler {
 			Redis:              d.Redis,
 			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
 		}
-		for _, v := range features.AllowedVerticals {
+		for _, v := range features.VerticalsToMount(features.LiveVerticals(context.Background(), d.Pool)) {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}

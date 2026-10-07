@@ -45,11 +45,13 @@ Set in the dashboard, never in git.
 ```bash
 npx vercel link      # once
 npx vercel env add BACKGROUND_TICKERS production      # "false"
+npx vercel env add RUN_MIGRATIONS production          # "false" (migrations run as a deploy step: make migrate)
 npx vercel deploy --prod
 ```
 
-`maxDuration: 300` is already the Hobby maximum. It comfortably covers
-the 60s `llm.Client` cap and the server's 90s `WriteTimeout`.
+Fluid Compute defaults to a 300s cap on every plan (Hobby maximum).
+It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
+10s flush slack inside the server's `WriteTimeout`).
 
 ## What you will feel
 

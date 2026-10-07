@@ -39,6 +39,11 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // Setting UseSimpleProtocol=true is required when connecting
 // through Supabase's Supavisor 6543 transaction-mode pooler,
 // which does not support extended-query prepared statements.
+//
+// The pool connects lazily: no Ping runs here, so construction never
+// blocks on the network. Callers that need fail-fast (boot with
+// RUN_MIGRATIONS=true) get it from Migrate; everyone else surfaces
+// the first error on first use, and /healthz reports db:false.
 func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*pgxpool.Pool, error) {
 	if opts.MinConns < 0 {
 		opts.MinConns = 2
@@ -92,10 +97,6 @@ func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping: %w", err)
 	}
 	return pool, nil
 }

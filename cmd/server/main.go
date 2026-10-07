@@ -131,11 +131,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer adminPool.Close()
-	if err := db.Migrate(bootCtx, adminPool); err != nil {
-		slog.Error("migrate", "err", err)
-		os.Exit(1)
+	// Migrations are a deploy step on serverless: every cold start
+	// replaying the ledger inside an advisory lock costs 150ms+ and
+	// serializes parallel boots. Vercel sets RUN_MIGRATIONS=false;
+	// long-running hosts keep the default true.
+	if cfg.RunMigrations {
+		if err := db.Migrate(bootCtx, adminPool); err != nil {
+			slog.Error("migrate", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("migrations applied")
+	} else {
+		slog.Info("migrations skipped (RUN_MIGRATIONS=false; run as a deploy step)")
 	}
-	slog.Info("migrations applied")
 
 	rdb, err := redisx.NewClient(bootCtx, cfg.RedisURL)
 	if err != nil {
@@ -273,40 +281,53 @@ func main() {
 	// Background reclaim for chat-generated .xlsx (not on the
 	// download request path). Manifest-driven purge handles durable
 	// storage; the legacy local walk covers pre-manifest dev files.
+	// Gated like every other background loop: on serverless the
+	// function is destroyed between requests, so an ungated sweeper
+	// would fire once per cold start and never again.
 	reportStop := make(chan struct{})
-	reportsSweeper := &api.Reports{Pool: pool}
-	go reportsSweeper.StartSweeper(reportStop)
+	if cfg.BackgroundTickers {
+		reportsSweeper := &api.Reports{Pool: pool}
+		go reportsSweeper.StartSweeper(reportStop)
+	} else {
+		slog.Info("report sweeper disabled; Supabase owns reclaim")
+	}
 
 	// Retention janitor: expired sessions + old sent/dead reminders
 	// (migration 027). Hourly, best-effort, on the admin pool (sees all
 	// tenants; the deletes are by status/timestamp, not tenant-scoped).
+	// Same gate: without it the janitor fires once per cold start on
+	// serverless and then never ticks.
 	janitorStop := make(chan struct{})
-	go func() {
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		runJanitor := func() {
-			cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer ccancel()
-			if _, err := adminPool.Exec(cctx, `DELETE FROM sports_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
-				slog.Warn("janitor sessions", "err", err)
+	if cfg.BackgroundTickers {
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			runJanitor := func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer ccancel()
+				if _, err := adminPool.Exec(cctx, `DELETE FROM sports_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
+					slog.Warn("janitor sessions", "err", err)
+				}
+				if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='sent' AND created_at < now() - interval '90 days'`); err != nil {
+					slog.Warn("janitor sent reminders", "err", err)
+				}
+				if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='dead' AND created_at < now() - interval '30 days'`); err != nil {
+					slog.Warn("janitor dead reminders", "err", err)
+				}
 			}
-			if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='sent' AND created_at < now() - interval '90 days'`); err != nil {
-				slog.Warn("janitor sent reminders", "err", err)
+			runJanitor()
+			for {
+				select {
+				case <-janitorStop:
+					return
+				case <-t.C:
+					runJanitor()
+				}
 			}
-			if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='dead' AND created_at < now() - interval '30 days'`); err != nil {
-				slog.Warn("janitor dead reminders", "err", err)
-			}
-		}
-		runJanitor()
-		for {
-			select {
-			case <-janitorStop:
-				return
-			case <-t.C:
-				runJanitor()
-			}
-		}
-	}()
+		}()
+	} else {
+		slog.Info("retention janitor disabled; pg_cron owns retention")
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

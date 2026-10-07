@@ -5,7 +5,13 @@ run:
 	go run ./cmd/server
 
 build:
-	go build -ldflags="-s -w -X main.version=$$(git rev-parse --short HEAD 2>NUL || echo dev)" -o bin/server ./cmd/server
+	go build -ldflags="-s -w -X main.Version=$$(git rev-parse --short HEAD 2>NUL || echo dev)" -o bin/server ./cmd/server
+
+# migrate runs embedded migrations against DATABASE_ADMIN_URL (or
+# DATABASE_URL) without booting the server. The deploy step for
+# serverless, where RUN_MIGRATIONS=false keeps them off the cold path.
+migrate:
+	go run ./cmd/migrate
 
 test:
 	# -p 1: integration tests share one Postgres; parallel package

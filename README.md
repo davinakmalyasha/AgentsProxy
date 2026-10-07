@@ -71,8 +71,9 @@ runtime's current GC/allocator work as free performance.
 
 - Building `MainTemplates`, DFD milestones, or orders.
 - A database, server, or Redis keyspace per client — one shared schema with `tenant_id` + RLS.
-- ~~No Vercel deploy~~ — **superseded.** Vercel's 300s function ceiling comfortably covers the
-  60s `llm.Client` cap, and `vercel.json` pins `maxDuration: 300`. Vercel, Railway, and VPS
+- ~~No Vercel deploy~~ — **superseded.** Vercel's 300s function ceiling (Fluid Compute
+  default on every plan) comfortably covers one agent turn, and `regions: ["sin1"]`
+  keeps the function next to Supabase ap-southeast-1. Vercel, Railway, and VPS
   are all supported; `BACKGROUND_TICKERS` selects the delivery driver.
 
 ---
