@@ -47,10 +47,19 @@ type handler struct {
 	// going to Postgres each time — busy intervals can be up to 3s
 	// stale, which is invisible for a "free slot" board and far kinder
 	// to the DB. Per-instance is fine: it's a cache, not a source of
-	// truth (a write just isn't visible for ≤3s on this instance).
+	// truth (a write just isn't visible for ~3s on this instance).
+	//
+	// Bounded: maxAvailCacheEntries caps tenants × dates × types, and
+	// every write evicts expired entries first, so the map cannot grow
+	// without bound on a public polling endpoint.
 	cache   map[string]cachedAvail
 	cacheMu sync.Mutex
 }
+
+// maxAvailCacheEntries bounds the availability cache: one entry per
+// (tenant, date, type). A venue polls a handful of dates; 512 is far
+// above any real keyspace and keeps the cap a non-issue in practice.
+const maxAvailCacheEntries = 512
 
 type cachedAvail struct {
 	at      time.Time
@@ -116,6 +125,21 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	h.cacheMu.Lock()
 	if h.cache == nil {
 		h.cache = map[string]cachedAvail{}
+	}
+	// Evict expired entries first so the map cannot grow without bound;
+	// then enforce the cap by dropping one entry (every entry is at
+	// most seconds old, so any drop is cheap and self-healing).
+	now2 := time.Now()
+	for k, v := range h.cache {
+		if now2.Sub(v.at) >= cacheTTL {
+			delete(h.cache, k)
+		}
+	}
+	if len(h.cache) >= maxAvailCacheEntries {
+		for k := range h.cache {
+			delete(h.cache, k)
+			break
+		}
 	}
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
 	h.cacheMu.Unlock()
