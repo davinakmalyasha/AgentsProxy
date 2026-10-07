@@ -52,6 +52,13 @@ import (
 )
 
 func main() {
+	// Healthcheck probe for container orchestration (docker-compose
+	// healthcheck, k8s): exits 0 when /healthz answers 200, 1
+	// otherwise. Without this the compose healthcheck boots a whole
+	// second server that binds :8080 and hangs until timeout.
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		os.Exit(healthcheck())
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config load", "err", err)
@@ -428,4 +435,23 @@ func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, badTenant
 		slog.Error("quarantine rows failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheck probes the local /healthz endpoint for container
+// orchestration. Port follows PORT (default 8080).
+func healthcheck() int {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }

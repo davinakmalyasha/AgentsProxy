@@ -29,10 +29,16 @@ var ErrQuarantined = errors.New("tenant quarantined")
 const ResponseBody = "tenant quarantined"
 
 // Entry is one tenant's quarantine state.
+//
+// Tags pin the wire shape: /v1/admin/tenant-health serialises PascalCase
+// today (no tags = field names), while the rest of the API is snake_case.
+// Renaming the wire is a breaking change for dashboards, so the tags
+// lock the current shape explicitly instead of leaving it implicit.
+// (Unify to snake_case only as a versioned API change.)
 type Entry struct {
-	Quarantined bool
-	Reason      string
-	Since       time.Time
+	Quarantined bool      `json:"Quarantined"`
+	Reason      string    `json:"Reason"`
+	Since       time.Time `json:"Since"`
 }
 
 var (

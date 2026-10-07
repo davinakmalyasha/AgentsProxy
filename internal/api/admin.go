@@ -19,6 +19,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
 type Admin struct {
@@ -134,7 +135,7 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features,
 	).Scan(&id)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgerr.IsUniqueViolation(err) {
 			writeJSONError(w, http.StatusConflict, "tenant_id or token_hash already exists")
 			return
 		}
@@ -391,16 +392,4 @@ func (a *Admin) Usage(w http.ResponseWriter, r *http.Request) {
 		out = append(out, u)
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	type coder interface{ SQLState() string }
-	var c coder
-	if errors.As(err, &c) {
-		return c.SQLState() == "23505"
-	}
-	return false
 }

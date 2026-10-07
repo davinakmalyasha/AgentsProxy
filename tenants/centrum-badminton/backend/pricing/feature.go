@@ -24,6 +24,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
 const featureName = "pricing"
@@ -266,7 +267,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		).Scan(&id)
 	})
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgerr.IsUniqueViolation(err) {
 			records.WriteJSONError(w, http.StatusConflict, "a rule already exists for that valid_from")
 			return
 		}
@@ -548,11 +549,4 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
-}
-
-func isUniqueViolation(err error) bool {
-	if pgErr, ok := err.(interface{ SQLState() string }); ok {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
 }

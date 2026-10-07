@@ -27,6 +27,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 )
 
@@ -1030,9 +1031,17 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		// Overlap with another active booking → friendly 409, not raw PG text.
-		if strings.Contains(err.Error(), "exclusion constraint") {
-			records.WriteJSONError(w, http.StatusConflict, "slot already booked")
+		// Overlap with another active booking — friendly 409, not raw PG text.
+		// Classified by SQLSTATE: the block trigger raises the same 23P01,
+		// and message-text matching breaks on any server wording change.
+		// A named constraint is the overlap guard; an unnamed 23P01 is
+		// the block trigger.
+		if pgerr.IsExclusion(err) {
+			if pgerr.Constraint(err) != "" {
+				records.WriteJSONError(w, http.StatusConflict, "slot already booked")
+			} else {
+				records.WriteJSONError(w, http.StatusConflict, "slot is blocked")
+			}
 			return
 		}
 		// An extension cannot be repriced without a rule. Say so instead

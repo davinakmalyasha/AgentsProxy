@@ -11,6 +11,7 @@ import (
 	"fmt"
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 	"github.com/jackc/pgx/v5"
@@ -203,12 +204,12 @@ func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 				}
 				// Overlap with another active booking - the friendly
 				// message the tool Description promises (not raw PG text).
-				if strings.Contains(err.Error(), "exclusion") {
-					return "error: slot already booked"
-				}
-				// The block trigger raises the same SQLSTATE as the
-				// double-booking exclusion, so it lands here too.
-				if strings.Contains(err.Error(), "blocked") {
+				// Classified by SQLSTATE, not message text: the block
+				// trigger raises the same 23P01, so it lands here too.
+				if pgerr.IsExclusion(err) {
+					if pgerr.Constraint(err) != "" {
+						return "error: slot already booked"
+					}
 					return "error: slot is blocked - pick another time"
 				}
 				return "error: " + err.Error()
