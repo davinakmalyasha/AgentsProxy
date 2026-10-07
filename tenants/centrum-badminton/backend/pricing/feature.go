@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -180,6 +181,15 @@ func RuleAndPriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date time.
 
 // priceFromRule prices a (start, end) window hour by hour at the
 // day/evening rate, matching the frontend's computePrice.
+//
+// MONEY INVARIANT (whole-rupiah IDR): every amount in the system is a
+// whole rupiah — no sen — so float64 is exact for storage and sums
+// (all values < 2^53). The one exception is right here: rate ×
+// fractional hours (e.g. a 20-minute tail) is inexact binary, so the
+// result is rounded to cents before it leaves. Postgres numeric(12,2)
+// would round on write anyway; rounding here keeps the Go value, the
+// stored value, and the displayed value identical instead of
+// 13333.333333333334 vs 13333.33.
 func priceFromRule(r *Rule, start, end time.Time) float64 {
 	dayStart, _ := time.Parse("15:04", normTime(r.DayStart))
 	dayEnd, _ := time.Parse("15:04", normTime(r.DayEnd))
@@ -200,7 +210,7 @@ func priceFromRule(r *Rule, start, end time.Time) float64 {
 		}
 		total += rate * segEnd.Sub(t).Hours()
 	}
-	return total
+	return math.Round(total*100) / 100
 }
 
 func normTime(s string) string {

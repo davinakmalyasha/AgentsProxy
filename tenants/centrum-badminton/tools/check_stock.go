@@ -53,7 +53,7 @@ func checkStockTool(pool *pgxpool.Pool) agentstools.Tool {
 					if float64(qty) <= thr {
 						flag = " (LOW)"
 					}
-					rows = append(rows, fmt.Sprintf("%s: %d%s @ %.2f", name, qty, flag, price))
+					rows = append(rows, fmt.Sprintf("%s: %d%s @ %s", name, qty, flag, agentstools.Idr(price)))
 				}
 				return r.Err()
 			})

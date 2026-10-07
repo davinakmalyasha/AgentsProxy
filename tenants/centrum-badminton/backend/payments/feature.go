@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
@@ -146,7 +147,8 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			return overpayErr
 		}
 		if req.Amount > outstanding {
-			overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
+			overpayErr = fmt.Errorf("amount %s exceeds outstanding %s",
+				agentstools.Idr(req.Amount), agentstools.Idr(outstanding))
 			return overpayErr
 		}
 		// recorded_by is who actually took the money, which is not the same
@@ -435,8 +437,8 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if newTotal := paid + *req.Amount; newTotal > effective+1e-9 {
-				overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f",
-					*req.Amount, effective-paid)
+				overpayErr = fmt.Errorf("amount %s exceeds outstanding %s",
+					agentstools.Idr(*req.Amount), agentstools.Idr(effective-paid))
 				return overpayErr
 			}
 		}

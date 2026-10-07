@@ -95,8 +95,9 @@ func LoadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (Basis
 }
 
 // Describe renders the basis in one sentence so every tool phrases the
-// same two numbers the same way.
+// same two numbers the same way. Idr, not %.0f: one rounding rule
+// (half-up) everywhere instead of Go's half-to-even % formatting.
 func (b Basis) Describe() string {
-	return fmt.Sprintf("terima %.0f (cash %.0f, qris %.0f, kantin %.0f), teresan %.0f",
-		b.Received(), b.Cash, b.QRIS, b.Kantin, b.Booked)
+	return fmt.Sprintf("terima %s (cash %s, qris %s, kantin %s), teresan %s",
+		Idr(b.Received()), Idr(b.Cash), Idr(b.QRIS), Idr(b.Kantin), Idr(b.Booked))
 }
