@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
@@ -32,6 +34,8 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
+
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
@@ -104,7 +108,18 @@ func main() {
 	if adminDSN == "" {
 		adminDSN = cfg.DatabaseURL
 	}
-	adminPool, err := db.NewPool(bootCtx, adminDSN)
+	// Sized deliberately small: this pool talks to DIRECT 5432 in session
+	// mode, where Supabase caps sessions (pool_size 15). The old default
+	// (Min 2 / Max 20) parked idle sessions per instance and cold-start
+	// storms exhausted the cap with EMAXCONNSESSION. Min 0 parks nothing;
+	// Max 3 bounds migrate + admin endpoints + one worker. Idle sessions
+	// close after a minute so cold-start instances stop counting against
+	// the cap almost immediately.
+	adminPool, err := db.NewPoolWithOptions(bootCtx, adminDSN, db.NewPoolOptions{
+		MinConns:        cfg.DBAdminPoolMin,
+		MaxConns:        cfg.DBAdminPoolMax,
+		MaxConnIdleTime: time.Minute,
+	})
 	if err != nil {
 		slog.Error("db admin connect", "err", err)
 		os.Exit(1)
@@ -131,21 +146,32 @@ func main() {
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
 
-	// Per-tenant agent configuration, from internal/agentconfig/projects/.
-	// Loaded and validated against the tool registry here, once, and fatal
-	// on failure.
+	// Per-tenant agent configuration, collected not thrown: each tenant
+	// validates independently. A bad tenant is quarantined (fenced with
+	// an honest 503) while healthy tenants serve. Only zero healthy
+	// tenants -- or a load failure -- is fatal for everyone.
 	//
-	// Fatal is the point. Every mistake validation catches -- a tool named in
-	// tools.json that nothing implements, a role a project granted itself, a
-	// skill whose file is missing, a project claiming a write is a read --
-	// produces an agent that looks configured and quietly cannot do its job.
-	// The owner finds out at 3am as "I couldn't reach the system"; the
-	// deploy finds out in a second.
-	projects, err := agentstools.LoadProjects(agentstools.AllTools(pool))
+	// Fatal is still the point for shared mistakes: a config that cannot
+	// even be listed means no tenant can be evaluated, and the deploy
+	// must fail loudly rather than serve an empty world.
+	projects, badTenants, err := agentstools.LoadProjectsCollect(agentstools.AllTools(pool))
 	if err != nil {
-		slog.Error("agent project config is invalid", "err", err)
-		return
+		slog.Error("agent project config unloadable", "err", err)
+		os.Exit(1)
 	}
+	if len(projects) == 0 {
+		slog.Error("agent project config: zero healthy tenants")
+		os.Exit(1)
+	}
+	for slug, reason := range badTenants {
+		tenanthealth.Quarantine(slug, "boot: "+reason)
+		slog.Warn("tenant quarantined at boot", "tenant", slug, "reason", reason)
+	}
+	// Quarantine is durable (tenant_quarantine) so the Supabase driver
+	// honors it too. Reconcile both directions on the admin pool:
+	// boot-fenced rows are written, and rows fenced by a previous
+	// instance (or by hand) are loaded into this process's registry.
+	reconcileQuarantine(bootCtx, adminPool, badTenants)
 	names := make([]string, 0, len(projects))
 	for slug, p := range projects {
 		names = append(names, slug+" ("+p.Display+")")
@@ -160,12 +186,12 @@ func main() {
 	// philosophy as LoadProjects above.
 	if err := adkrunner.VerifySessionTables(bootCtx, pool); err != nil {
 		slog.Error("adk session tables", "err", err)
-		return
+		os.Exit(1)
 	}
 	sessSvc, err := adkrunner.NewSessionService(pool)
 	if err != nil {
 		slog.Error("adk session service", "err", err)
-		return
+		os.Exit(1)
 	}
 	adkRunner, err := adkrunner.New(adkrunner.Config{
 		Pool:      pool,
@@ -178,7 +204,7 @@ func main() {
 	})
 	if err != nil {
 		slog.Error("adk runner", "err", err)
-		return
+		os.Exit(1)
 	}
 	slog.Info("adk runner ready", "model", cfg.LLMModel)
 
@@ -309,6 +335,47 @@ func main() {
 	// Give Sentry a final chance to flush queued events.
 	sentry.Flush(2 * time.Second)
 	slog.Info("bye")
+}
+
+// reconcileQuarantine syncs the in-memory registry with the durable
+// tenant_quarantine table (both directions, admin pool):
+//   - rows fenced at this boot are written, so the Supabase driver honors
+//     them and a restart does not silently unfence;
+//   - rows already present (previous instance, or fenced by hand) are
+//     loaded into this process's registry.
+// A boot failure here is fatal: silent divergence between the registry
+// and the table would fence tenants for one driver but not the other.
+func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, badTenants map[string]string) {
+	for slug, reason := range badTenants {
+		if _, err := adminPool.Exec(ctx,
+			`INSERT INTO tenant_quarantine (tenant_id, reason) VALUES ($1, $2)
+			 ON CONFLICT (tenant_id) DO UPDATE SET reason = EXCLUDED.reason, quarantined_at = now()`,
+			slug, "boot: "+reason); err != nil {
+			slog.Error("quarantine persist failed", "tenant", slug, "err", err)
+			os.Exit(1)
+		}
+	}
+	rows, err := adminPool.Query(ctx, `SELECT tenant_id, reason FROM tenant_quarantine`)
+	if err != nil {
+		slog.Error("quarantine load failed", "err", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var slug, reason string
+		if err := rows.Scan(&slug, &reason); err != nil {
+			slog.Error("quarantine scan failed", "err", err)
+			os.Exit(1)
+		}
+		if _, have := badTenants[slug]; !have {
+			slog.Warn("tenant quarantined by previous state", "tenant", slug, "reason", reason)
+		}
+		tenanthealth.Quarantine(slug, reason)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("quarantine rows failed", "err", err)
+		os.Exit(1)
+	}
 }
 
 func firstNonEmpty(a, b string) string {

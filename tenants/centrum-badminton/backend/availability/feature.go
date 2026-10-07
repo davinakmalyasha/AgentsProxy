@@ -18,6 +18,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 )
 
 const featureName = "availability"
@@ -58,10 +59,6 @@ type cachedAvail struct {
 // cacheTTL bounds how long a built availability payload is reused.
 const cacheTTL = 3 * time.Second
 
-// jakartaTZ is UTC+7 with no DST. FixedZone keeps this dependency-free
-// on Windows containers, matching the agent's wibLoc().
-var jakartaTZ = time.FixedZone("WIB", 7*3600)
-
 type busyInterval struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
@@ -91,7 +88,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		// codebase already compares in Asia/Jakarta — so a UTC host would
 		// default to yesterday for seven hours a day and the landing board
 		// would quietly show the wrong day's availability.
-		date = time.Now().In(jakartaTZ).Format("2006-01-02")
+		date = agentstools.WibNow().Format("2006-01-02")
 	}
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
@@ -142,6 +139,9 @@ func (h *handler) build(ctx context.Context, tenantID, date, typ string) (map[st
 			args = append(args, typ)
 		}
 		q += ` ORDER BY name`
+		// Courts are ones, not thousands — but no query ships unbounded.
+		// 500 is far above any venue; hitting it means a different product.
+		q += ` LIMIT 500`
 		rows, err := tx.Query(ctx, q, args...)
 		if err != nil {
 			return err

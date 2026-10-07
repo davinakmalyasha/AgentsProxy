@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +26,7 @@ import (
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // Config wires one Runner: the pool tools run against, the tenant projects,
@@ -50,6 +53,44 @@ type Runner struct {
 	// NewToolSetFor call) so tests can substitute stub tools without
 	// touching the global registry.
 	newToolSet func(pool *pgxpool.Pool, tenant, role string) *agentstools.ToolSet
+	// mu guards projects: the admin reload path swaps one tenant's
+	// config while requests read. cfg.Projects is the boot snapshot and
+	// must not be read directly after New.
+	mu       sync.RWMutex
+	projects map[string]*agentconfig.Project
+}
+
+// projectFor returns one tenant's config under read lock. A nil project
+// is not an error (base prompt serves unconfigured tenants); a
+// quarantined tenant never reaches here (fail-closed above it).
+func (r *Runner) projectFor(tenantID string) *agentconfig.Project {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.projects[tenantID]
+}
+
+// UpdateProject hot-swaps one tenant's config (admin reload path). Only
+// called after the candidate passes LoadSingle + Validate + tool proof,
+// so serving config is always known-good.
+func (r *Runner) UpdateProject(p *agentconfig.Project) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.projects == nil {
+		r.projects = map[string]*agentconfig.Project{}
+	}
+	r.projects[p.Slug] = p
+}
+
+// TenantSlugs lists tenants with serving configs (for admin health).
+func (r *Runner) TenantSlugs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.projects))
+	for slug := range r.projects {
+		out = append(out, slug)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // New builds the shared model and proves every registered tool adapts.
@@ -102,7 +143,7 @@ func New(cfg Config) (*Runner, error) {
 		slog.Info("adkrunner: tenant tools live",
 			"tenant", tenant, "tools", len(ts.Names()), "schema_bytes", schemaBytes)
 	}
-	return &Runner{cfg: cfg, model: m, newToolSet: agentstools.NewToolSetFor}, nil
+	return &Runner{cfg: cfg, model: m, projects: cfg.Projects, newToolSet: agentstools.NewToolSetFor}, nil
 }
 
 // RunWithRole processes one user message and returns the reply. Same
@@ -117,10 +158,14 @@ func (r *Runner) RunWithRole(ctx context.Context, tenantID, vertical, userName, 
 // a caller-chosen tenant) with the client persona. Every other caller
 // passes the same tier twice.
 func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userName, toolsRole, role, message string) (string, error) {
-	var project *agentconfig.Project
-	if r.cfg.Projects != nil {
-		project = r.cfg.Projects[tenantID]
+	// Fail closed: a quarantined tenant never reaches the model. Silence
+	// with an honest 503 (mapped by the handler) instead of a confident
+	// reply from a half-loaded prompt.
+	if q, reason := tenanthealth.Check(tenantID); q {
+		slog.Warn("quarantined tenant blocked from agent", "tenant", tenantID, "reason", reason)
+		return "", tenanthealth.ErrQuarantined
 	}
+	project := r.projectFor(tenantID)
 	// Tenant identity for shared text: the project's display and contact,
 	// falling back to the tenant slug and the platform default. For
 	// centrum these resolve to the exact strings the hardcoded replies
@@ -170,7 +215,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		Display:  display,
 		ToolDefs: ts.Definitions(),
 		Vertical: vertical,
-		Now:      time.Now(),
+		Now:      agentstools.WibNow(),
 	})
 
 	ag, err := llmagent.New(llmagent.Config{

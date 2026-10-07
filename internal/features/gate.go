@@ -1,10 +1,12 @@
 package features
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // DONE: PRD 6.5 (feature gate) / STANDARDS D, F
@@ -25,6 +27,34 @@ func HasFeatureOnClient(name string, m *cache.ClientModel) bool {
 		}
 	}
 	return false
+}
+
+// RequireTenantHealthy returns middleware that fails closed for
+// quarantined tenants: 503 with a distinct body, before any handler
+// opens a transaction or burns quota. It runs AFTER identity middleware
+// (so unauthenticated callers still get 401 first and cannot probe
+// quarantine state) and BEFORE rate-limit and feature gates (so fenced
+// traffic neither consumes budget nor masks behind 403s).
+//
+// Unknown tenants (no identity) pass through: this gate only fences
+// explicitly quarantined slugs. Auth handlers answer those.
+func RequireTenantHealthy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var tenant string
+		if id := clientctx.From(r.Context()); id != nil {
+			tenant = id.TenantID()
+		}
+		if tenant != "" {
+			if q, reason := tenanthealth.Check(tenant); q {
+				slog.Warn("quarantined tenant blocked from REST", "tenant", tenant, "reason", reason, "path", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"` + tenanthealth.ResponseBody + `"}`))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RequireFeature returns middleware that rejects requests whose

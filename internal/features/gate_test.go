@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 func TestRequireFeature_OffReturns403(t *testing.T) {
@@ -82,5 +84,58 @@ func TestRequireFeature_NoClientReturns403(t *testing.T) {
 	h.ServeHTTP(rr, req) // no clientctx.With
 	if rr.Code != 403 {
 		t.Errorf("code=%d want 403", rr.Code)
+	}
+}
+
+func TestRequireTenantHealthy_Quarantined503(t *testing.T) {
+	tenanthealth.Quarantine("sick", "test")
+	defer tenanthealth.Release("sick")
+	called := false
+	h := RequireTenantHealthy(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(200) }),
+	)
+	ctx := clientctx.WithClient(context.Background(), &cache.ClientModel{
+		Vertical: "sports", TenantID: "sick", Features: []string{"records"},
+	})
+	req := httptest.NewRequest("GET", "/x", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+	if rr.Code != 503 {
+		t.Errorf("code=%d want 503", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, tenanthealth.ResponseBody) {
+		t.Errorf("body=%q want distinct quarantine body", body)
+	}
+	if called {
+		t.Error("handler ran for quarantined tenant")
+	}
+}
+
+func TestRequireTenantHealthy_HealthyPasses(t *testing.T) {
+	called := false
+	h := RequireTenantHealthy(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(200) }),
+	)
+	ctx := clientctx.WithClient(context.Background(), &cache.ClientModel{
+		Vertical: "sports", TenantID: "fine", Features: []string{"records"},
+	})
+	req := httptest.NewRequest("GET", "/x", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+	if rr.Code != 200 || !called {
+		t.Errorf("code=%d called=%v want 200/true", rr.Code, called)
+	}
+}
+
+func TestRequireTenantHealthy_NoIdentityPasses(t *testing.T) {
+	// No identity (auth answers those): the gate only fences explicit slugs.
+	called := false
+	h := RequireTenantHealthy(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(200) }),
+	)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/x", nil))
+	if rr.Code != 200 || !called {
+		t.Errorf("code=%d called=%v want 200/true", rr.Code, called)
 	}
 }

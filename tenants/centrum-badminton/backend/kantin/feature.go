@@ -301,15 +301,20 @@ func (h *handler) patchProduct(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) delProduct(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireIdentity(w, r)
+	idn := records.RequireOwner(w, r)
 	if idn == nil {
 		return
 	}
 	id := chi.URLParam(r, "id")
 	var affected int64
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Deactivate, not DELETE: sale_items SET NULL + movements CASCADE
+		// on delete would orphan receipts and erase the stock ledger.
+		// The row (and its history) stays; is_active=false hides it from
+		// the POS (createSale requires is_active). Re-delete → 404.
 		tag, err := tx.Exec(r.Context(),
-			`DELETE FROM sports_kantin_products WHERE id=$1::uuid AND tenant_id=$2`,
+			`UPDATE sports_kantin_products SET is_active = false
+			  WHERE id=$1::uuid AND tenant_id=$2 AND is_active`,
 			id, idn.TenantID())
 		if err != nil {
 			return err
@@ -460,6 +465,10 @@ func (h *handler) listMovements(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pid := strings.TrimSpace(r.URL.Query().Get("product_id")); pid != "" {
+		if _, err := uuid.Parse(pid); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "product_id must be a uuid")
+			return
+		}
 		h.writeMovements(w, r, idn.TenantID(), pid, limit)
 		return
 	}
@@ -546,6 +555,12 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 	if len(req.Items) == 0 {
 		records.WriteJSONError(w, http.StatusBadRequest, "items required")
 		return
+	}
+	if strings.TrimSpace(req.BookingID) != "" {
+		if _, err := uuid.Parse(strings.TrimSpace(req.BookingID)); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "booking_id must be a uuid")
+			return
+		}
 	}
 	if req.Method == "" {
 		req.Method = "cash"
@@ -655,7 +670,18 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		msg := err.Error()
-		if strings.Contains(msg, "out of stock") || strings.Contains(msg, "product not found") || msg == "bad qty" {
+		// Same messages as before (the UI matches on these substrings),
+		// split to the right codes: missing product is 404, bad qty is
+		// 400, only genuine stock contention is 409.
+		if strings.Contains(msg, "product not found") {
+			records.WriteJSONError(w, http.StatusNotFound, msg)
+			return
+		}
+		if msg == "bad qty" {
+			records.WriteJSONError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if strings.Contains(msg, "out of stock") {
 			records.WriteJSONError(w, http.StatusConflict, msg)
 			return
 		}
@@ -848,6 +874,12 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	var out []saleItemResp
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		// Tenant check via the parent sale (items' tenant_id is nullable backfill).
 		var saleTenant string
@@ -860,7 +892,7 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, product_name, qty, unit_price, unit_cost
-			   FROM sports_kantin_sale_items WHERE sale_id=$1::uuid ORDER BY product_name`, id)
+			   FROM sports_kantin_sale_items WHERE sale_id=$1::uuid ORDER BY product_name LIMIT $2`, id, limit+1)
 		if err != nil {
 			return err
 		}
@@ -871,6 +903,11 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			out = append(out, it)
+			if len(out) > limit {
+				out = out[:limit]
+				truncated = true
+				break
+			}
 		}
 		return rows.Err()
 	})
@@ -885,7 +922,7 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []saleItemResp{}
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
 }
 
 // voidSale atomically restores stock for tracked items, writes void

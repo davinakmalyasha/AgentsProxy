@@ -18,6 +18,11 @@ type NewPoolOptions struct {
 	MinConns          int
 	MaxConns          int
 	UseSimpleProtocol bool
+	// MaxConnIdleTime closes idle sessions after this long. Zero keeps
+	// the 30m default. Short values matter for pools on session-mode
+	// connections with a low server cap (Supabase direct 5432): an idle
+	// session still counts against pool_size.
+	MaxConnIdleTime time.Duration
 }
 
 // NewPool is the original signature kept for backwards compat.
@@ -27,11 +32,12 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 }
 
 // NewPoolWithOptions builds a pool with the requested sizing.
+// MinConns 0 is honored (park nothing): pass -1 for the legacy default.
 // Setting UseSimpleProtocol=true is required when connecting
 // through Supabase's Supavisor 6543 transaction-mode pooler,
 // which does not support extended-query prepared statements.
 func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*pgxpool.Pool, error) {
-	if opts.MinConns <= 0 {
+	if opts.MinConns < 0 {
 		opts.MinConns = 2
 	}
 	if opts.MaxConns <= 0 {
@@ -48,6 +54,9 @@ func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*
 	cfg.MaxConns = int32(opts.MaxConns)
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 30 * time.Minute
+	if opts.MaxConnIdleTime > 0 {
+		cfg.MaxConnIdleTime = opts.MaxConnIdleTime
+	}
 	cfg.HealthCheckPeriod = time.Minute
 	if opts.UseSimpleProtocol {
 		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol

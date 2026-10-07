@@ -143,6 +143,7 @@ func TestSchemaPropertiesAreAllReadByTheTool(t *testing.T) {
 	bodyTags := map[string][]string{
 		"book_slot": {
 			"facility_id", "date", "start_time", "end_time", "customer_name", "customer_phone",
+			"deposit", "idempotency_key",
 		},
 		"cancel_booking": {"booking_id", "note"},
 		"list_bookings":  {"date", "status", "facility_id"},

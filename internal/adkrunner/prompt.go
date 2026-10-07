@@ -213,7 +213,7 @@ token anywhere else, and never invent a download URL.`
 
 func wibToday(now time.Time) string {
 	if now.IsZero() {
-		now = time.Now()
+		return agentstools.WibNow().Format("2006-01-02")
 	}
 	return now.In(agentstools.WibLoc()).Format("2006-01-02")
 }

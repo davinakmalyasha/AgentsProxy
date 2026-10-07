@@ -12,6 +12,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	adksession "google.golang.org/adk/v2/session"
 )
 
@@ -80,6 +81,9 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return
 	}
+	if !quarantineCheck(w, tenant) {
+		return
+	}
 	vertical := req.Vertical
 	if vertical == "" {
 		vertical = "sports"
@@ -97,6 +101,9 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	// client persona). Boot is fatal without the runner, so no fallback.
 	reply, err := h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
 	if err != nil {
+		if quarantineErr(w, tenant, err) {
+			return
+		}
 		slog.Error("client chat run failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
@@ -104,6 +111,27 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, agentChatResponse{Reply: reply, Role: "client"})
 }
 
+// quarantineCheck fails closed for fenced tenants: 503 with the distinct
+// quarantine body, before any model spend. Returns false when the request
+// must stop.
+func quarantineCheck(w http.ResponseWriter, tenant string) bool {
+	if q, reason := tenanthealth.Check(tenant); q {
+		slog.Warn("quarantined tenant blocked from agent", "tenant", tenant, "reason", reason)
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
+		return false
+	}
+	return true
+}
+
+// quarantineErr maps a runner quarantine refusal to the same 503. All
+// other runner errors stay 502 provider errors.
+func quarantineErr(w http.ResponseWriter, tenant string, err error) bool {
+	if errors.Is(err, tenanthealth.ErrQuarantined) {
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
+		return true
+	}
+	return false
+}
 // clientIP lives in clientip.go (trust-boundary aware shared helper).
 // ClearHistory deletes the caller's client-bot memory (landing "Bersihkan
 // riwayat"). Client-only by design: staff/owner memory (keyed by email) is
@@ -127,6 +155,9 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	if !known {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
+		return
+	}
+	if !quarantineCheck(w, tenant) {
 		return
 	}
 	hist := &adkrunner.History{RDB: h.RDB}
@@ -181,6 +212,9 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := u.TenantID
+	if !quarantineCheck(w, tenant) {
+		return
+	}
 	vertical := req.Vertical
 	if vertical == "" {
 		vertical = "sports"
@@ -190,6 +224,9 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	// pins the tenant, so the role's own tool set is safe).
 	reply, err := h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
+		if quarantineErr(w, tenant, err) {
+			return
+		}
 		slog.Error("agent chat run failed", "tenant", tenant, "role", role, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return

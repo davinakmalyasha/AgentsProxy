@@ -19,6 +19,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 )
 
 const featureName = "series"
@@ -75,16 +76,7 @@ var terminalSeriesStatuses = map[string]bool{"paused": true, "ended": true}
 // to 14:00 WIB, so using now() there would cancel today's evening slot at
 // lunchtime.
 func todayJakarta() string {
-	return time.Now().In(jakartaLoc).Format("2006-01-02")
-}
-
-var jakartaLoc *time.Location
-
-func init() {
-	// Fixed +07:00 (WIB) rather than Asia/Jakarta: identical for the whole
-	// of Indonesian time, and it cannot fail if the zoneinfo database is
-	// missing from a minimal container.
-	jakartaLoc = time.FixedZone("WIB", 7*60*60)
+	return agentstools.WibNow().Format("2006-01-02")
 }
 
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {

@@ -109,6 +109,16 @@ func LoadReport(token string) (filename string, data []byte, err error) {
 	return ReportStorage.Load(context.Background(), t.Tenant, t.File)
 }
 
+// ReportTenant validates a token and returns its tenant, without loading
+// the object. The download handler uses it for the quarantine fence.
+func ReportTenant(token string) (string, error) {
+	t, err := lookupTicket(token)
+	if err != nil {
+		return "", err
+	}
+	return t.Tenant, nil
+}
+
 // ---- Tool ----
 
 type dayRow struct {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 )
 
 const featureName = "expenses"
@@ -84,7 +85,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// WIB, not the server's local time: a UTC host would file the
 		// expense under yesterday for seven hours a day, and every
 		// summary query in this file filters in Asia/Jakarta.
-		spentAt = time.Now().In(time.FixedZone("WIB", 7*3600)).Format("2006-01-02")
+		spentAt = agentstools.WibNow().Format("2006-01-02")
 	}
 	if _, err := time.Parse("2006-01-02", spentAt); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "spent_at must be YYYY-MM-DD")

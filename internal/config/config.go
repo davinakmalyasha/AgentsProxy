@@ -29,6 +29,13 @@ type Config struct {
 	DBPoolMin          int
 	DBPoolMax          int
 	DBSimpleProtocol   bool
+	// Admin pool (migrations + admin endpoints + workers) talks to the
+	// DIRECT 5432 connection in session mode, where Supabase caps sessions
+	// (pool_size 15 on small projects). It must park almost nothing: boot
+	// migrates, then only admin/worker traffic uses it. Min 0 parks zero
+	// idle sessions; Max 3 bounds concurrent admin users + one worker.
+	DBAdminPoolMin int
+	DBAdminPoolMax int
 	// Agent-chat per-IP sub-limit (router hardcodes 20/min today).
 	AgentRateLimitPerMinute int
 	// Durable report storage (Supabase Storage). Empty URL/key keeps the
@@ -78,6 +85,8 @@ func Load() (*Config, error) {
 		DBPoolMin:               getenvInt("DB_POOL_MIN", 2),
 		DBPoolMax:               getenvInt("DB_POOL_MAX", 20),
 		DBSimpleProtocol:        strings.EqualFold(getenv("DB_USE_SIMPLE_PROTOCOL", "false"), "true"),
+		DBAdminPoolMin:          getenvInt("DB_ADMIN_POOL_MIN", 0),
+		DBAdminPoolMax:          getenvInt("DB_ADMIN_POOL_MAX", 3),
 		AgentRateLimitPerMinute: getenvInt("AGENT_RATE_LIMIT_PER_MINUTE", 20),
 		SupabaseURL:             strings.TrimRight(getenv("SUPABASE_URL", ""), "/"),
 		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),

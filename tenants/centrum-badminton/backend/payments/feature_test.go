@@ -112,7 +112,8 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+			`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+			`GRANT SELECT ON tenant_schema_contracts TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
@@ -360,6 +361,22 @@ func TestPayments_Idempotency(t *testing.T) {
 		t.Errorf("bad key status=%d want 400", resp4.StatusCode)
 	}
 	readAll(t, resp4)
+}
+
+// TestPayments_MalformedIDs400: garbage UUIDs fail closed with 400.
+func TestPayments_MalformedIDs400(t *testing.T) {
+	h := setup(t)
+	resp := doReq(t, h.router, "GET", "/payments?booking_id=zzz", "tok-pay-a", "")
+	if resp.StatusCode != 400 {
+		t.Errorf("list booking_id garbage status=%d want 400", resp.StatusCode)
+	}
+	readAll(t, resp)
+	resp2 := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
+		`{"booking_id":"zzz","amount":1000}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("create booking_id garbage status=%d want 400", resp2.StatusCode)
+	}
+	readAll(t, resp2)
 }
 
 // TestPayments_Validation: amount <= 0 → 400, bad method → 400.

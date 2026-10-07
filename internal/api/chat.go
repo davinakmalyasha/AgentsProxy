@@ -18,6 +18,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/quota"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
 
@@ -130,6 +131,11 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientModel.Status != "active" {
 		writeJSONError(w, http.StatusForbidden, "client "+clientModel.Status)
+		return
+	}
+	if q, reason := tenanthealth.Check(clientModel.TenantID); q {
+		slog.Warn("quarantined tenant blocked from chat", "tenant", clientModel.TenantID, "reason", reason)
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
 		return
 	}
 

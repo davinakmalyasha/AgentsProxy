@@ -3,6 +3,7 @@ package agentstools
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
@@ -25,10 +26,36 @@ import (
 // tenant that registers nothing fails here -- an agent with no tools is a
 // configuration error, not a silent agent.
 func LoadProjects(all []Tool) (map[string]*agentconfig.Project, error) {
-	projects, err := agentconfig.Load()
+	good, bad, err := LoadProjectsCollect(all)
 	if err != nil {
-		return nil, fmt.Errorf("load agent projects: %w", err)
+		return nil, err
 	}
+	if len(bad) > 0 {
+		slugs := make([]string, 0, len(bad))
+		for slug := range bad {
+			slugs = append(slugs, slug)
+		}
+		sort.Strings(slugs)
+		return nil, fmt.Errorf("invalid tenant configs: %s", strings.Join(slugs, ", "))
+	}
+	return good, nil
+}
+
+// LoadProjectsCollect parses and validates every tenant, collecting
+// per-tenant failures instead of aborting. bad maps slug → reason and is
+// what boot quarantines: those tenants are fenced while the rest serve.
+// A non-nil error means the load itself failed (no tenants at all), which
+// stays fatal for every tenant.
+func LoadProjectsCollect(all []Tool) (good map[string]*agentconfig.Project, bad map[string]string, err error) {
+	projects, badLoad := agentconfig.LoadCollect()
+	bad = map[string]string{}
+	for dir, lerr := range badLoad {
+		bad[dir] = fmt.Errorf("load agent projects: %w", lerr).Error()
+	}
+	if len(projects) == 0 {
+		return nil, bad, fmt.Errorf("load agent projects: no tenants")
+	}
+	good = projects
 
 	// Group by registering tenant. Empty-Tenant tools (hand-built sets in
 	// tests) belong to every tenant.
@@ -56,12 +83,15 @@ func LoadProjects(all []Tool) (map[string]*agentconfig.Project, error) {
 			known[t.Name] = true
 		}
 		if len(known) == 0 {
-			return nil, fmt.Errorf("tenant %q has no tools registered; an agent with no tools cannot serve", slug)
+			bad[slug] = fmt.Sprintf("tenant %q has no tools registered; an agent with no tools cannot serve", slug)
+			delete(good, slug)
+			continue
 		}
 
-		if err := agentconfig.Validate(projects[slug], budget); err != nil {
-			return nil, err
+		if err := agentconfig.Validate(good[slug], budget); err != nil {
+			bad[slug] = err.Error()
+			delete(good, slug)
 		}
 	}
-	return projects, nil
+	return good, bad, nil
 }

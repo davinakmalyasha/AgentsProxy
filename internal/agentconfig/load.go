@@ -25,23 +25,84 @@ import (
 // parsed without a database, so a config error is reported as a config
 // error rather than surfacing as a connection failure.
 func Load() (map[string]*Project, error) {
+	good, bad := LoadCollect()
+	if len(bad) > 0 {
+		msgs := make([]string, 0, len(bad))
+		for dir, err := range bad {
+			msgs = append(msgs, dir+": "+err.Error())
+		}
+		sort.Strings(msgs)
+		return nil, fmt.Errorf("bad tenant folders: %s", strings.Join(msgs, "; "))
+	}
+	if len(good) == 0 {
+		return nil, fmt.Errorf("no tenants found under tenants/")
+	}
+	return good, nil
+}
+
+// LoadCollect parses every tenant, collecting per-tenant failures instead
+// of aborting on the first bad folder. Quarantine boot uses this: bad
+// tenants are fenced individually while healthy ones serve.
+func LoadCollect() (good map[string]*Project, bad map[string]error) {
 	tenantDirs, err := listTenants("tenants")
 	if err != nil {
-		return nil, err
+		return nil, map[string]error{"": err}
 	}
 
-	out := make(map[string]*Project, len(tenantDirs))
+	good = make(map[string]*Project, len(tenantDirs))
+	bad = make(map[string]error)
 	for dir := range tenantDirs {
 		p, err := loadOne(dir)
 		if err != nil {
-			return nil, err
+			// Key by the slug the tenant claims (what requests use),
+			// falling back to the directory when even that is unreadable.
+			bad[slugOf(dir)] = err
+			continue
 		}
-		out[p.Slug] = p
+		good[p.Slug] = p
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no tenants found under tenants/")
+	return good, bad
+}
+
+// slugOf is the best-effort slug for a directory whose full load failed:
+// the project.json claim if parseable, else the directory name (which is
+// the default slug per loadOne).
+func slugOf(dir string) string {
+	raw, err := fs.ReadFile(tenantembed.AgentsFS, path.Join("tenants", dir, "memory", "project.json"))
+	if err != nil {
+		return strings.ToLower(dir)
 	}
-	return out, nil
+	var doc struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || doc.Slug == "" {
+		return strings.ToLower(dir)
+	}
+	return doc.Slug
+}
+
+// LoadSingle re-parses one tenant directory (for the admin reload path).
+func LoadSingle(dir string) (*Project, error) {
+	return loadOne(dir)
+}
+
+// DirForSlug resolves a tenant slug to its directory: the directory whose
+// project.json claims the slug, or the slug itself when it names a
+// directory directly.
+func DirForSlug(slug string) (string, error) {
+	dirs, err := listTenants("tenants")
+	if err != nil {
+		return "", err
+	}
+	if dirs[slug] {
+		return slug, nil
+	}
+	for dir := range dirs {
+		if slugOf(dir) == slug {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("unknown tenant %q", slug)
 }
 
 // listTenants returns the non-template directories under a folder of the

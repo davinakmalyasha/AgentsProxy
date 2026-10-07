@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // maxConcurrentSends bounds how many reminders a single tick delivers
@@ -156,6 +157,14 @@ func (s *Scheduler) Tick() {
 	var wg sync.WaitGroup
 	for _, d := range batch {
 		d := d
+		// Quarantine fence: a fenced tenant's rows wait in pending. The
+		// claim already flipped them to sending, so release the claim
+		// without burning attempts — never send, never dead-letter.
+		if q, reason := tenanthealth.Check(d.tenant); q {
+			slog.Warn("quarantined tenant reminder held", "tenant", d.tenant, "reason", reason, "id", d.id)
+			s.releaseClaim(ctx, d)
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -254,6 +263,19 @@ func (s *Scheduler) bumpAttempts(ctx context.Context, d dueReminder) {
 		return nil
 	}); err != nil {
 		slog.Warn("reminder bump failed, will retry", "id", d.id, "err", err)
+	}
+}
+
+// releaseClaim hands a claimed row back to pending without touching
+// attempts. Used for quarantine holds: the row must wait, not retry.
+func (s *Scheduler) releaseClaim(ctx context.Context, d dueReminder) {
+	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE agent_reminders SET status='pending', claimed_at=NULL
+			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
+		return err
+	}); err != nil {
+		slog.Warn("reminder release failed, reaper will recover", "id", d.id, "err", err)
 	}
 }
 

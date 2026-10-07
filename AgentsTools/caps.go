@@ -15,9 +15,10 @@ const MoneyCap = 150
 // main.go wiring; tests leave it nil (no cap).
 var CapRDB *redis.Client
 
-// CapKey returns the Redis key for a tenant's daily call count.
+// CapKey returns the Redis key for a tenant's daily call count. The day
+// is WIB: caps reset at venue midnight, not server midnight.
 func CapKey(tenantID string) string {
-	return "agcap:" + tenantID + ":" + time.Now().Format("2006-01-02")
+	return "agcap:" + tenantID + ":" + WibNow().Format("2006-01-02")
 }
 
 // CostCapAllowedForRole checks per-tenant+role daily cap (20/80/150). Single LLM_API_KEY shared.
@@ -56,17 +57,17 @@ func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	return n <= int64(cap)
 }
 
-// CapKeyForRole is the per-role key: agcap:{tenant}:{role}:{date}
+// CapKeyForRole is the per-role key: agcap:{tenant}:{role}:{date} (WIB day).
 func CapKeyForRole(tenantID, role string) string {
-	return "agcap:" + tenantID + ":" + role + ":" + time.Now().Format("2006-01-02")
+	return "agcap:" + tenantID + ":" + role + ":" + WibNow().Format("2006-01-02")
 }
 
-// Per-person RPD: agcap:{tenant}:{role}:{user}:{date}
+// Per-person RPD: agcap:{tenant}:{role}:{user}:{date} (WIB day).
 func RPDKeyForUser(tenantID, role, userID string) string {
 	if userID == "" {
 		userID = "anon"
 	}
-	return "rpd:" + tenantID + ":" + role + ":" + userID + ":" + time.Now().Format("2006-01-02")
+	return "rpd:" + tenantID + ":" + role + ":" + userID + ":" + WibNow().Format("2006-01-02")
 }
 
 // RPDCapAllowedForUser checks per-person daily cap (client 30, pegawai 80, owner 150)

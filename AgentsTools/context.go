@@ -35,6 +35,18 @@ func WithRecipientID(ctx context.Context, recipientID int64) context.Context {
 
 // WibNow returns now in WIB (UTC+7, no DST). FixedZone avoids tzdata
 // dependency on Windows containers.
+//
+// TIME POLICY (single source of truth):
+//   - Business-day buckets (caps keys, availability default date, expense
+//     spent_at default, series "future", report months, prompt date) use
+//     WIB via this function. Server-local midnight would bill the wrong
+//     day for seven hours a day on a UTC host.
+//   - Technical buckets stay UTC by explicit decision, not by accident:
+//     quota month + resetAt wire format (quota.go), usage month
+//     (usage/store.go), rate-limit minute bucket (ratelimit.go).
+//     Migrating those to WIB needs double-write + reconciliation, because
+//     quota months and report months would otherwise disagree on the
+//     month boundary.
 func WibNow() time.Time {
 	return time.Now().In(WibLoc())
 }

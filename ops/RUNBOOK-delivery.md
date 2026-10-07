@@ -17,7 +17,7 @@ is active per environment.
 | | Long-running host | Serverless |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `true` (default) | `false` |
-| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → reminder function (**PENDING-REPAIR**: `deliver-reminders` is deleted; `reminder-tick` fires with no function — cron kept, scheduled-for-repair) |
+| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → `deliver-reminders` (`supabase/functions/deliver-reminders`, claim twin of notify) |
 | Notification drain | Go ticker, `internal/notify` | DB Webhook → `deliver-notification`, + cron backstop |
 | Stale-claim reaper | Go boot path | `pg_cron` → `reap_stale_claims` (pure SQL) |
 
@@ -29,10 +29,11 @@ is active per environment.
    DATABASE_URL=... DATABASE_ADMIN_URL=... go run ./cmd/server
    ```
 
-2. One Edge Function deployed (`deliver-reminders` is deleted):
+2. Two Edge Functions deployed:
 
    ```bash
    supabase functions deploy deliver-notification
+   supabase functions deploy deliver-reminders
    ```
 
 3. Secrets. One in Supabase Vault (read by `pg_cron`/`pg_net`),
@@ -80,10 +81,9 @@ This installs three `pg_cron` jobs (`reminder-tick` every 2 min,
 gated on an `exists()` probe, so an idle system spends one indexed query
 per tick and no Edge Function invocations at all.
 
-> **PENDING-REPAIR:** `reminder-tick` calls `private.tick_due_reminders()`,
-> which posts to the deleted `deliver-reminders` function. The cron is kept
-> (do NOT delete it) and marked scheduled-for-repair until a replacement
-> delivery target lands. See `ops/schedule-delivery.sql`.
+> `reminder-tick` calls `private.tick_due_reminders()`, which posts to
+> the `deliver-reminders` function. Deploy it (step 2) before relying on
+> serverless reminder delivery. See `ops/schedule-delivery.sql`.
 
 ## Verify
 
@@ -99,7 +99,7 @@ select jobname, status, start_time from cron.job_run_details
 select * from net._http_response order by id desc limit 5;
 ```
 
-End to end (reminders — PENDING-REPAIR):
+End to end (reminders):
 
 ```sql
 -- with BACKGROUND_TICKERS=false on the running app
@@ -107,10 +107,8 @@ insert into agent_reminders (tenant_id, chat_id, text, remind_at)
 values ('centrum', '<chat_id>', 'DELIVERY SMOKE TEST', now() + interval '2 minutes');
 ```
 
-> No delivery is expected until the reminder repair lands: `reminder-tick`
-> currently posts to the deleted `deliver-reminders` function. The row
-> should stay `pending`/`sending`, proving the claim path still enqueues.
-> Do NOT delete the `reminder-tick` cron — it is scheduled-for-repair.
+> Expect `sending` → `sent` within two `reminder-tick` runs (the sender is
+> still the wa.me-link stub — the row lifecycle is what this proves).
 
 ```sql
 select text, status, attempts, claimed_at

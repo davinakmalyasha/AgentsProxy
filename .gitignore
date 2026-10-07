@@ -41,3 +41,12 @@ shots/
 appendonlydir/
 .playwright-mcp/
 .commandcode/
+
+# Playwright/test output that lands in repo root — never commit
+page-*.yml
+console-*.log
+laporan-*.xlsx
+*.png
+
+# Vercel build output at repo root (buildCommand -o server)
+/server

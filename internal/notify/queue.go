@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // Sender delivers a message to a phone number.
@@ -154,22 +156,23 @@ func (q *Queue) Drain(ctx context.Context, s Sender) (sent, failed int) {
 			UPDATE notify_jobs j
 			   SET read_ct = j.read_ct + 1, vt = now() + $2::interval
 			  FROM ready WHERE j.id = ready.id
-			RETURNING j.id, j.read_ct, j.to_phone, j.text
+			RETURNING j.id, j.tenant_id, j.read_ct, j.to_phone, j.text
 		)
-		SELECT c.id, c.read_ct, c.to_phone, c.text FROM claimed c`, drainBatch, vtInterval)
+		SELECT c.id, c.tenant_id, c.read_ct, c.to_phone, c.text FROM claimed c`, drainBatch, vtInterval)
 	if err != nil {
 		slog.Warn("notify drain read", "err", err)
 		return 0, 0
 	}
 	type claimed struct {
 		id     int64
+		tenant string
 		readCt int32
 		job    Job
 	}
 	var batch []claimed
 	for rows.Next() {
 		var c claimed
-		if err := rows.Scan(&c.id, &c.readCt, &c.job.To, &c.job.Text); err != nil {
+		if err := rows.Scan(&c.id, &c.tenant, &c.readCt, &c.job.To, &c.job.Text); err != nil {
 			slog.Warn("notify drain scan", "err", err)
 			rows.Close()
 			return sent, failed
@@ -183,6 +186,14 @@ func (q *Queue) Drain(ctx context.Context, s Sender) (sent, failed int) {
 	}
 
 	for _, c := range batch {
+		// Quarantine fence: a fenced tenant's jobs wait. Undo the claim's
+		// read_ct bump and park visibility 5 minutes out, so the hold
+		// burns neither attempts nor CPU. Never delete, never archive.
+		if fenced, reason := tenanthealth.Check(c.tenant); fenced {
+			slog.Warn("quarantined tenant notify held", "tenant", c.tenant, "reason", reason, "id", c.id)
+			q.holdClaim(ctx, c.id)
+			continue
+		}
 		sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := s.Send(sendCtx, c.job.To, c.job.Text)
 		cancel()
@@ -215,6 +226,16 @@ func (q *Queue) delete(ctx context.Context, id int64) {
 	if _, err := q.pool.Exec(ctx, `DELETE FROM notify_jobs WHERE id = $1`, id); err != nil {
 		// Sent but not deleted: at-least-once becomes duplicate send.
 		slog.Error("notify delete failed, may resend", "id", id, "err", err)
+	}
+}
+
+// holdClaim parks a quarantined tenant's job: undo the claim's read_ct
+// bump and push visibility out, so the hold burns neither attempts nor
+// CPU. The job resumes on its own once the tenant is released.
+func (q *Queue) holdClaim(ctx context.Context, id int64) {
+	if _, err := q.pool.Exec(ctx,
+		`UPDATE notify_jobs SET read_ct = GREATEST(read_ct - 1, 0), vt = now() + interval '5 minutes' WHERE id = $1`, id); err != nil {
+		slog.Warn("notify hold failed", "id", id, "err", err)
 	}
 }
 

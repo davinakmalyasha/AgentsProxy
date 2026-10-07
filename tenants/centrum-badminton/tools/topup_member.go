@@ -33,11 +33,22 @@ func topupMemberTool(pool *pgxpool.Pool) agentstools.Tool {
 			if p.Amount <= 0 {
 				return "error: amount must be > 0"
 			}
+			// Same ledger path as the HTTP topup: every credit inserts a
+			// ledger row in the same transaction as the balance update, so
+			// agent topups are auditable exactly like form topups. No
+			// idempotency key here (the model cannot mint stable keys);
+			// the row records the credit with a NULL key.
 			var bal float64
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO sports_member_topups (tenant_id, member_id, amount, idempotency_key)
+					 VALUES ($1,$2::uuid,$3,NULL)`,
+					tenantID, p.MemberID, p.Amount); err != nil {
+					return err
+				}
 				return tx.QueryRow(ctx,
 					`UPDATE sports_members SET balance = balance + $1, updated_at=now()
-					  WHERE id=$2::uuid AND tenant_id=$3 RETURNING balance`,
+					  WHERE id=$2::uuid AND tenant_id=$3 AND deleted_at IS NULL RETURNING balance`,
 					p.Amount, p.MemberID, tenantID).Scan(&bal)
 			})
 			if err != nil {

@@ -69,6 +69,10 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 	} else {
 		r.Use(records.WithClientAuth(recDeps))
 	}
+	// Quarantine fence: after identity (401 first, no oracle for
+	// unauthenticated callers), before rate-limit and feature gates (no
+	// quota burn, no 403 masking). Covers /records and every feature.
+	r.Use(RequireTenantHealthy)
 	// Per-account limiter, mounted AFTER the identity middleware so
 	// CtxClientID is populated. The outer /v1 limiter already bounds by
 	// IP; this restores the per-client budget that IP bucketing would

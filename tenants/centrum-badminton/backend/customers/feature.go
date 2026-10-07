@@ -105,12 +105,18 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var out []customerResp
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
 	// One grouped query instead of a per-row correlated count over the
 	// whole booking history. Match by name OR phone: the customer's
 	// phone is the unique key, but legacy/walk-in bookings may carry
 	// only a name — preserve the old name-based count while also
 	// counting phone-matched rows. COUNT(DISTINCT) so a booking that
 	// matches on both never double-counts.
+	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
@@ -121,8 +127,9 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			         AND (b.customer_name = c.name OR (c.phone <> '' AND b.customer_phone = c.phone))
 			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
 			  GROUP BY c.id
-			  ORDER BY c.name`,
-			idn.TenantID())
+			  ORDER BY c.name
+			  LIMIT $2`,
+			idn.TenantID(), limit+1)
 		if err != nil {
 			return err
 		}
@@ -135,6 +142,11 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			}
 			c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			out = append(out, c)
+			if len(out) > limit {
+				out = out[:limit]
+				truncated = true
+				break
+			}
 		}
 		return rows.Err()
 	})
@@ -142,7 +154,10 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	if out == nil {
+		out = []customerResp{}
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
 }
 
 // top returns the top customers by visit count (laporan page).

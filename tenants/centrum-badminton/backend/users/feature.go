@@ -12,12 +12,14 @@ package users
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -85,7 +87,19 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	// Non-owners see ONLY themselves (layout profile lookup + is_active
 	// gate must work for pegawai, but no staff-directory enumeration).
 	onlySelf := !idn.IsOwner()
+	if filterID != "" {
+		if _, err := uuid.Parse(filterID); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "id must be a uuid")
+			return
+		}
+	}
 	var out []userResp
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT ` + safeCols + ` FROM sports_users WHERE tenant_id = $1`
 		args := []any{idn.TenantID()}
@@ -102,6 +116,9 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sql += ` ORDER BY created_at`
+		// One row past the cap detects truncation without a second COUNT.
+		args = append(args, limit+1)
+		sql += fmt.Sprintf(" LIMIT $%d", len(args))
 		rows, err := tx.Query(r.Context(), sql, args...)
 		if err != nil {
 			return err
@@ -114,6 +131,11 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			}
 			u.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			out = append(out, u)
+			if len(out) > limit {
+				out = out[:limit]
+				truncated = true
+				break
+			}
 		}
 		return rows.Err()
 	})
@@ -124,7 +146,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []userResp{}
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
 }
 
 func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
@@ -141,9 +163,22 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	var u userResp
 	var createdAt time.Time
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
+		rows, err := tx.Query(r.Context(),
 			`SELECT `+safeCols+` FROM sports_users WHERE id = $1::uuid AND tenant_id = $2`,
-			id, idn.TenantID()).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.IsActive, &createdAt)
+			id, idn.TenantID())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return pgx.ErrNoRows
+		}
+		var serr error
+		u, createdAt, serr = scanUser(rows)
+		if serr != nil {
+			return serr
+		}
+		return rows.Err()
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "no rows") {

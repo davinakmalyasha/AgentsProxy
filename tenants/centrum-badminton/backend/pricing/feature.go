@@ -27,6 +27,11 @@ import (
 
 const featureName = "pricing"
 
+// SchemaVersion is this binary's pricing contract (see tenant_schema_contracts
+// + records.CheckContractTx). Bump when the shape this code reads changes,
+// and keep the previous shape readable for one release so rollback is a row.
+const SchemaVersion = 1
+
 func init() { Register() }
 
 func Register() {
@@ -83,6 +88,12 @@ type Rule struct {
 var ErrNoRule = fmt.Errorf("no pricing rule for date")
 
 func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time) (*Rule, error) {
+	// Contract gate: a tenant rolled forward past this binary refuses
+	// here, before any price is computed — one choke point for RuleFor,
+	// PriceFor, and every caller (bookings, tools, availability).
+	if err := records.CheckContractTx(ctx, tx, tenantID, featureName, SchemaVersion); err != nil {
+		return nil, err
+	}
 	var r Rule
 	var validFrom time.Time
 	err := tx.QueryRow(ctx,
@@ -333,17 +344,24 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		val any
 	}
 	var vals []kv
-	if req.OpenTime != nil {
-		vals = append(vals, kv{"open_time", *req.OpenTime + "::time"})
-	}
-	if req.CloseTime != nil {
-		vals = append(vals, kv{"close_time", *req.CloseTime + "::time"})
-	}
-	if req.DayStart != nil {
-		vals = append(vals, kv{"day_start", *req.DayStart + "::time"})
-	}
-	if req.DayEnd != nil {
-		vals = append(vals, kv{"day_end", *req.DayEnd + "::time"})
+	for _, tf := range []struct {
+		val *string
+		col string
+	}{
+		{req.OpenTime, "open_time"},
+		{req.CloseTime, "close_time"},
+		{req.DayStart, "day_start"},
+		{req.DayEnd, "day_end"},
+	} {
+		if tf.val != nil {
+			// Fail closed on format: the raw string is concatenated with
+			// ::time below, so garbage would 500 in SQL instead of 400 here.
+			if _, err := time.Parse("15:04", normTime(*tf.val)); err != nil {
+				records.WriteJSONError(w, http.StatusBadRequest, tf.col+" must be HH:MM")
+				return
+			}
+			vals = append(vals, kv{tf.col, *tf.val + "::time"})
+		}
 	}
 	if req.PriceDay != nil {
 		if *req.PriceDay < 0 {
