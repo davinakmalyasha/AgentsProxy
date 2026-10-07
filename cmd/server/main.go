@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -52,34 +51,39 @@ import (
 )
 
 func main() {
-	// Sentry FIRST: env-gated no-op when SENTRY_DSN is empty (PRD Â§H).
-	// Re-read env directly so Init runs even before config.Load.
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config load", "err", err)
+		os.Exit(1)
+	}
+
+	// Sentry after config: a single source for DSN/env/release/rate.
+	// config.Load cannot fail on a missing DSN (empty disables), so the
+	// old direct os.Getenv reads were pure duplication.
+	release := cfg.SentryRelease
+	if release == "" {
+		release = Version
+	}
 	sentry.Init(sentry.Options{
-		DSN:                os.Getenv("SENTRY_DSN"),
-		Environment:        os.Getenv("SENTRY_ENV"),
-		Release:            firstNonEmpty(os.Getenv("SENTRY_RELEASE"), Version),
-		TracesSampleRate:   parseFloatOr(os.Getenv("TRACES_SAMPLE_RATE"), 0.1),
-		ProfilesSampleRate: parseFloatOr(os.Getenv("PROFILES_SAMPLE_RATE"), 0.1),
-		ServerName:         "agents-proxy",
+		DSN:              cfg.SentryDSN,
+		Environment:      cfg.SentryEnv,
+		Release:          release,
+		TracesSampleRate: cfg.TracesSampleRate,
+		ServerName:       "agents-proxy",
 	})
 	defer sentry.Flush(2 * time.Second)
 
-	// slog JSON handler with Authorization redaction. Wraps a Sentry-
-	// forwarding handler so Error records go to Sentry automatically.
+	// slog JSON handler with secret redaction. Uses the same sensitive-key
+	// list as the Sentry scrubber so the two can never drift apart.
 	redact := func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == "Authorization" {
-			return slog.String("Authorization", "[REDACTED]")
+		if sentry.IsSensitive(a.Key) {
+			return slog.String(a.Key, "[REDACTED]")
 		}
 		return a
 	}
 	inner := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: redact})
 	slog.SetDefault(slog.New(sentry.NewSlogHandler(inner)))
 
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("config load", "err", err)
-		os.Exit(1)
-	}
 	slog.Info("config loaded", "summary", cfg.String())
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -93,6 +97,7 @@ func main() {
 		MinConns:          cfg.DBPoolMin,
 		MaxConns:          cfg.DBPoolMax,
 		UseSimpleProtocol: cfg.DBSimpleProtocol,
+		ApplicationName:   "agentsproxy/" + cfg.Env,
 	})
 	if err != nil {
 		slog.Error("db connect", "err", err)
@@ -119,6 +124,7 @@ func main() {
 		MinConns:        cfg.DBAdminPoolMin,
 		MaxConns:        cfg.DBAdminPoolMax,
 		MaxConnIdleTime: time.Minute,
+		ApplicationName: "agentsproxy/" + cfg.Env + "-admin",
 	})
 	if err != nil {
 		slog.Error("db admin connect", "err", err)
@@ -223,9 +229,14 @@ func main() {
 		slog.Info("notify drain disabled; Supabase webhook + pg_cron own delivery")
 	}
 	defer notifyQ.Stop()
-	bookings.NotifyFunc = func(tenantID, to, text string) {
+	bookings.NotifyFunc = func(ctx context.Context, tenantID, to, text string) {
+		// Detached: the booking already committed, so a client disconnect
+		// must not drop the notification. Bounded so a hung DB cannot
+		// hold this goroutine forever.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
 		// Never let a queue hiccup fail the booking.
-		if err := notifyQ.Enqueue(context.Background(), tenantID, to, text); err != nil {
+		if err := notifyQ.Enqueue(dctx, tenantID, to, text); err != nil {
 			slog.Warn("notify enqueue", "tenant", tenantID, "to", to, "err", err)
 		}
 	}
@@ -235,7 +246,7 @@ func main() {
 	//
 	// Telegram delivery was deleted. There is currently no PWA delivery
 	// transport, so the scheduler preserves due rows until that lands
-	// instead of dead-lettering them. BACKGROUND_TICKERS=off on
+	// instead of dead-lettering them. BACKGROUND_TICKERS=false on
 	// serverless: the function is destroyed between requests so the 60s
 	// ticker would never tick.
 	remSched := reminder.New(adminPool, nil)
@@ -302,11 +313,11 @@ func main() {
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		// WriteTimeout bounds slow responses/hijacked streams; agent
-		// LLM calls (â‰¤60s in llm.Client) exceed it, but those paths
-		// don't block on client writes â€” they respond at the end. Set
-		// generous 90s so long provider replies still flush.
-		WriteTimeout: 90 * time.Second,
+		// WriteTimeout covers the slowest response path: one agent turn
+		// (adkrunner.TurnTimeout) plus slack to flush the reply. The
+		// turn has its own deadline and maps overruns to 504, so this
+		// is strictly a backstop, derived from the same constant.
+		WriteTimeout: adkrunner.TurnTimeout + 10*time.Second,
 		IdleTimeout:  120 * time.Second,
 		// TLSConfig left nil for plain HTTP local; PQC default in 1.27 only applies to TLS.
 	}
@@ -376,22 +387,4 @@ func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, badTenant
 		slog.Error("quarantine rows failed", "err", err)
 		os.Exit(1)
 	}
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
-func parseFloatOr(s string, def float64) float64 {
-	if s == "" {
-		return def
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return def
-	}
-	return f
 }

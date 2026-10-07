@@ -23,6 +23,9 @@ type NewPoolOptions struct {
 	// connections with a low server cap (Supabase direct 5432): an idle
 	// session still counts against pool_size.
 	MaxConnIdleTime time.Duration
+	// ApplicationName tags every session in pg_stat_activity / Supabase
+	// Query Insights. Empty keeps the pgx default.
+	ApplicationName string
 }
 
 // NewPool is the original signature kept for backwards compat.
@@ -58,6 +61,31 @@ func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*
 		cfg.MaxConnIdleTime = opts.MaxConnIdleTime
 	}
 	cfg.HealthCheckPeriod = time.Minute
+	// Bound every session so one pathological plan can never pin a pool
+	// connection (and bill Supabase Active CPU) forever. statement_timeout
+	// is the backstop for queries that outlive their HTTP handler;
+	// idle_in_transaction_session_timeout reclaims connections a handler
+	// forgot to commit; lock_timeout keeps DDL/admin from queueing
+	// forever behind a held lock. Handlers that legitimately need longer
+	// raise their own limit with SET LOCAL (see FetchReportData).
+	// ConnectTimeout bounds the TCP+TLS handshake itself (pgx default is
+	// none), so a hung network fails the dial instead of the boot.
+	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["statement_timeout"]; !ok {
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = "30000"
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"]; !ok {
+		cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "15000"
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["lock_timeout"]; !ok {
+		cfg.ConnConfig.RuntimeParams["lock_timeout"] = "4000"
+	}
+	if opts.ApplicationName != "" {
+		cfg.ConnConfig.RuntimeParams["application_name"] = opts.ApplicationName
+	}
 	if opts.UseSimpleProtocol {
 		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	}

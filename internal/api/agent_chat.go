@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -104,6 +105,10 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		if quarantineErr(w, tenant, err) {
 			return
 		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSONError(w, http.StatusGatewayTimeout, "agent timeout — coba lagi")
+			return
+		}
 		slog.Error("client chat run failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
@@ -161,7 +166,7 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hist := &adkrunner.History{RDB: h.RDB}
-	if err := hist.ClearForRole(tenant, "client", "client:"+clientIP(r)); err != nil {
+	if err := hist.ClearForRole(r.Context(), tenant, "client", "client:"+clientIP(r)); err != nil {
 		writeJSONError(w, http.StatusBadGateway, "clear failed")
 		return
 	}
@@ -225,6 +230,10 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	reply, err := h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
 		if quarantineErr(w, tenant, err) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSONError(w, http.StatusGatewayTimeout, "agent timeout — coba lagi")
 			return
 		}
 		slog.Error("agent chat run failed", "tenant", tenant, "role", role, "err", err)

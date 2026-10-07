@@ -2,14 +2,18 @@
 // Seed exhaustive 5-10 data per entity for Centrum (tenant centrum) via proxy
 // Uses X-Session-Token (owner) — single source, RLS via app.tenant_id
 // Run: node --env-file=.env scripts/seed_centrum_exhaustive.mjs
-// Requires: PROXY_URL=http://localhost:8080, ADMIN creates owner if missing, or use existing owner@centrumbadminton.id / test123
+// Requires: PROXY_URL=http://localhost:8080, ADMIN creates owner if missing,
+// or set SEED_OWNER_EMAIL/SEED_OWNER_PASS (+ SEED_PEGAWAI_*) to log in as
+// existing users.
 
 const PROXY = process.env.PROXY_URL || "http://localhost:8080";
-const TENANT = "centrum";
-const OWNER_EMAIL = "owner@centrumbadminton.id";
-const OWNER_PASS = "test123";
-const PEGAWAI_EMAIL = "pegawai@centrum.id";
-const PEGAWAI_PASS = "test123";
+const TENANT = process.env.SEED_TENANT || "centrum";
+// Credentials come from the environment so real passwords never land in
+// git history. Defaults are dev-only placeholders for a local database.
+const OWNER_EMAIL = process.env.SEED_OWNER_EMAIL || "owner@centrumbadminton.id";
+const OWNER_PASS = process.env.SEED_OWNER_PASS || "test123";
+const PEGAWAI_EMAIL = process.env.SEED_PEGAWAI_EMAIL || "pegawai@centrum.id";
+const PEGAWAI_PASS = process.env.SEED_PEGAWAI_PASS || "test123";
 
 async function login(email, pass) {
   const r = await fetch(`${PROXY}/v1/auth/login`, {

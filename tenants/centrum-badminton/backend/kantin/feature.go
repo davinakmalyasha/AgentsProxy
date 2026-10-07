@@ -8,6 +8,7 @@
 package kantin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -525,7 +526,47 @@ func (h *handler) writeMovements(w http.ResponseWriter, r *http.Request, tenant,
 	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
-// ---- sales ----
+// outOfStockNow re-reads stock after the guarded UPDATE affected fewer
+// rows than expected — meaning a concurrent sale grabbed stock between
+// validation and write — and names the first short product in ticket
+// order. Runs only on the race path, never on the happy path.
+func outOfStockNow(ctx context.Context, tx pgx.Tx, tenant string, items []saleItemReq, stockIDs []string) error {
+	type stock struct {
+		name  string
+		stock int
+	}
+	have := make(map[string]stock, len(stockIDs))
+	rows, err := tx.Query(ctx,
+		`SELECT id::text, name, stock FROM sports_kantin_products
+		  WHERE id = ANY($1::uuid[]) AND tenant_id=$2`,
+		stockIDs, tenant)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		var s stock
+		if err := rows.Scan(&id, &s.name, &s.stock); err != nil {
+			rows.Close()
+			return err
+		}
+		have[id] = s
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	need := make(map[string]int, len(stockIDs))
+	for _, it := range items {
+		need[it.ProductID] += it.Qty
+	}
+	for _, it := range items {
+		if s, ok := have[it.ProductID]; ok && s.stock < need[it.ProductID] {
+			return fmt.Errorf("out of stock: %s", s.name)
+		}
+	}
+	return errors.New("stock changed during sale")
+}
 
 type saleItemReq struct {
 	ProductID string `json:"product_id"`
@@ -540,8 +581,34 @@ type saleReq struct {
 	Items        []saleItemReq `json:"items"`
 }
 
+// maxSaleItems bounds a single sale request. The write path is set-based
+// (one statement per concern), but an unbounded item list still builds an
+// unbounded INSERT — and no real kantin ticket has 50 lines.
+const maxSaleItems = 50
+
+var errTooManyItems = errors.New("too many items (max 50)")
+
+// kantinProduct is the validated snapshot of one product for a sale.
+type kantinProduct struct {
+	name       string
+	price      float64
+	cost       float64
+	trackStock bool
+	stock      int
+}
+
 // createSale is the ATOMIC sale. Total is computed from DB prices;
 // stock is decremented; movements logged. One transaction.
+//
+// The write path is set-based: one SELECT for all products, one INSERT
+// for all line items, one UPDATE for all stock, one INSERT for all
+// movements, one UPDATE for the total. A 20-item basket costs 6
+// statements instead of 81 round trips.
+//
+// Retry-safety: WithTenantTx retries the closure on deadlock (40P01).
+// Nothing inside accumulates across attempts — products are validated
+// read-only, and total/saleID are assigned (=), never accumulated (+=).
+// A retry re-runs the same statements against rolled-back state.
 func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireIdentity(w, r)
 	if idn == nil {
@@ -603,6 +670,60 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		recordedByArg = recordedBy
 	}
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if len(req.Items) > maxSaleItems {
+			return errTooManyItems
+		}
+		for _, it := range req.Items {
+			if it.Qty < 1 || it.Qty > 99 {
+				return errors.New("bad qty")
+			}
+		}
+		// One SELECT for every product on the ticket.
+		ids := make([]string, 0, len(req.Items))
+		for _, it := range req.Items {
+			ids = append(ids, it.ProductID)
+		}
+		prods := make(map[string]kantinProduct, len(ids))
+		rows, err := tx.Query(r.Context(),
+			`SELECT id::text, name, price, cost_price, track_stock, stock
+			   FROM sports_kantin_products
+			  WHERE id = ANY($1::uuid[]) AND tenant_id=$2 AND is_active`,
+			ids, idn.TenantID())
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			var p kantinProduct
+			if err := rows.Scan(&id, &p.name, &p.price, &p.cost, &p.trackStock, &p.stock); err != nil {
+				rows.Close()
+				return err
+			}
+			prods[id] = p
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Validate in ticket order so the first failure matches the old
+		// per-item behavior: unknown product before stock shortage.
+		// Quantities are aggregated per product so a repeated line can
+		// never oversell past a per-line check.
+		need := make(map[string]int, len(prods))
+		for _, it := range req.Items {
+			p, ok := prods[it.ProductID]
+			if !ok {
+				return fmt.Errorf("product not found: %s", it.ProductID)
+			}
+			need[it.ProductID] += it.Qty
+			_ = p
+		}
+		for _, it := range req.Items {
+			p := prods[it.ProductID]
+			if p.trackStock && p.stock < need[it.ProductID] {
+				return fmt.Errorf("out of stock: %s", p.name)
+			}
+		}
 		// Insert the sale header (total computed below).
 		if err := tx.QueryRow(r.Context(),
 			`INSERT INTO sports_kantin_sales (tenant_id, total, method, customer_name, note, booking_id, recorded_by, idempotency_key)
@@ -610,49 +731,69 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 			idn.TenantID(), req.Method, req.CustomerName, req.Note, req.BookingID, recordedByArg, idemKey).Scan(&saleID); err != nil {
 			return err
 		}
+		// One INSERT for all line items. Duplicated product lines stay
+		// duplicated rows, exactly as before.
+		qtys := make([]int32, 0, len(req.Items))
 		for _, it := range req.Items {
-			if it.Qty < 1 || it.Qty > 99 {
-				return errors.New("bad qty")
-			}
-			var name string
-			var price, cost float64
-			var trackStock bool
-			var stock int
-			err := tx.QueryRow(r.Context(),
-				`SELECT name, price, cost_price, track_stock, stock FROM sports_kantin_products
-				  WHERE id=$1::uuid AND tenant_id=$2 AND is_active`,
-				it.ProductID, idn.TenantID()).Scan(&name, &price, &cost, &trackStock, &stock)
-			if err != nil {
-				return fmt.Errorf("product not found: %s", it.ProductID)
-			}
-			if trackStock && stock < it.Qty {
-				return fmt.Errorf("out of stock: %s", name)
-			}
-			total += price * float64(it.Qty)
-			// Sale item (tenant-scoped).
-			if _, err := tx.Exec(r.Context(),
-				`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_id, product_name, qty, unit_price, unit_cost)
-				 VALUES ($1,$2::uuid,$3::uuid,$4,$5,$6,$7)`,
-				idn.TenantID(), saleID, it.ProductID, name, it.Qty, price, cost); err != nil {
-				return err
-			}
-			if trackStock {
-				if _, err := tx.Exec(r.Context(),
-					`UPDATE sports_kantin_products SET stock = stock - $1 WHERE id=$2::uuid AND tenant_id=$3`,
-					it.Qty, it.ProductID, idn.TenantID()); err != nil {
-					return err
-				}
-				if _, err := tx.Exec(r.Context(),
-					`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason) VALUES ($1,$2::uuid,$3,'sale')`,
-					idn.TenantID(), it.ProductID, -it.Qty); err != nil {
-					return err
-				}
+			qtys = append(qtys, int32(it.Qty))
+		}
+		tag, err := tx.Exec(r.Context(),
+			`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_id, product_name, qty, unit_price, unit_cost)
+			 SELECT $1, $2::uuid, p.id, p.name, x.qty, p.price, p.cost_price
+			   FROM unnest($3::uuid[], $4::int[]) AS x(id, qty)
+			   JOIN sports_kantin_products p ON p.id = x.id AND p.tenant_id = $1 AND p.is_active`,
+			idn.TenantID(), saleID, ids, qtys)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != int64(len(req.Items)) {
+			return fmt.Errorf("product not found: changed during sale")
+		}
+		// One guarded UPDATE for all tracked stock. The stock >= qty
+		// predicate is the backstop against a concurrent sale that
+		// landed between the SELECT above and this statement; the
+		// Go-side check is the primary path with the exact message.
+		var stockIDs []string
+		var stockQtys []int32
+		for pid, qty := range need {
+			if prods[pid].trackStock {
+				stockIDs = append(stockIDs, pid)
+				stockQtys = append(stockQtys, int32(qty))
 			}
 		}
-		// Set the server-computed total.
-		_, err := tx.Exec(r.Context(),
-			`UPDATE sports_kantin_sales SET total=$1 WHERE id=$2::uuid`, total, saleID)
-		return err
+		if len(stockIDs) > 0 {
+			tag, err := tx.Exec(r.Context(),
+				`UPDATE sports_kantin_products p
+				    SET stock = p.stock - x.qty
+				   FROM unnest($1::uuid[], $2::int[]) AS x(id, qty)
+				  WHERE p.id = x.id AND p.tenant_id = $3 AND p.track_stock AND p.stock >= x.qty`,
+				stockIDs, stockQtys, idn.TenantID())
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != int64(len(stockIDs)) {
+				return outOfStockNow(r.Context(), tx, idn.TenantID(), req.Items, stockIDs)
+			}
+			// One INSERT for all stock movements.
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason)
+				 SELECT $1, x.id, -x.qty, 'sale'
+				   FROM unnest($2::uuid[], $3::int[]) AS x(id, qty)`,
+				idn.TenantID(), stockIDs, stockQtys); err != nil {
+				return err
+			}
+		}
+		// Set the server-computed total from the inserted lines — no
+		// Go-side accumulator, so a deadlock retry cannot double-count.
+		if err := tx.QueryRow(r.Context(),
+			`UPDATE sports_kantin_sales SET total = (
+				SELECT COALESCE(SUM(unit_price * qty), 0)
+				  FROM sports_kantin_sale_items WHERE sale_id = $2::uuid
+			) WHERE id = $2::uuid RETURNING total`,
+			idn.TenantID(), saleID).Scan(&total); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		// Lost the insert race with a duplicate key: return the winner.
@@ -679,6 +820,10 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		}
 		if msg == "bad qty" {
 			records.WriteJSONError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if errors.Is(err, errTooManyItems) {
+			records.WriteJSONError(w, http.StatusBadRequest, errTooManyItems.Error())
 			return
 		}
 		if strings.Contains(msg, "out of stock") {
@@ -1007,17 +1152,28 @@ func (h *handler) voidSale(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		// Restore stock + write void movements.
-		for _, it := range items {
+		// Restore stock + write void movements — one statement each,
+		// not one pair per line item.
+		if len(items) > 0 {
+			voidIDs := make([]string, 0, len(items))
+			voidQtys := make([]int32, 0, len(items))
+			for _, it := range items {
+				voidIDs = append(voidIDs, it.productID)
+				voidQtys = append(voidQtys, int32(it.qty))
+			}
 			if _, err := tx.Exec(r.Context(),
-				`UPDATE sports_kantin_products SET stock = stock + $1 WHERE id=$2::uuid AND tenant_id=$3`,
-				it.qty, it.productID, idn.TenantID()); err != nil {
+				`UPDATE sports_kantin_products p
+				    SET stock = stock + x.qty
+				   FROM unnest($1::uuid[], $2::int[]) AS x(id, qty)
+				  WHERE p.id = x.id AND p.tenant_id = $3`,
+				voidIDs, voidQtys, idn.TenantID()); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(r.Context(),
 				`INSERT INTO sports_kantin_stock_movements (tenant_id, product_id, delta, reason, note)
-				 VALUES ($1,$2::uuid,$3,'void', 'void sale')`,
-				idn.TenantID(), it.productID, it.qty); err != nil {
+				 SELECT $1, x.id, x.qty, 'void', 'void sale'
+				   FROM unnest($2::uuid[], $3::int[]) AS x(id, qty)`,
+				idn.TenantID(), voidIDs, voidQtys); err != nil {
 				return err
 			}
 		}

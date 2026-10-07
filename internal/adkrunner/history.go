@@ -34,8 +34,8 @@ func histKey(tenantID, role, userID string) string {
 }
 
 // ClearForRole deletes the stored turns for tenant+role+user.
-func (h *History) ClearForRole(tenantID, role, userID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (h *History) ClearForRole(ctx context.Context, tenantID, role, userID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	return h.RDB.Del(ctx, histKey(tenantID, role, userID)).Err()
 }

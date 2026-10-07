@@ -24,12 +24,11 @@ var (
 
 // Options configures the Sentry client.
 type Options struct {
-	DSN                string
-	Environment        string
-	Release            string
-	TracesSampleRate   float64
-	ProfilesSampleRate float64
-	ServerName         string
+	DSN              string
+	Environment      string
+	Release          string
+	TracesSampleRate float64
+	ServerName       string
 }
 
 // Init configures the global Sentry client. If DSN is empty, Init is
@@ -49,7 +48,9 @@ func Init(o Options) {
 		release = "dev"
 	}
 	traces := o.TracesSampleRate
-	if traces == 0 {
+	// 0 is a valid explicit choice (disables tracing); only negative
+	// values are clamped, and config already rejects those.
+	if traces < 0 {
 		traces = 0.1
 	}
 	err := sentry.Init(sentry.ClientOptions{
@@ -177,7 +178,7 @@ type slogRecordError struct {
 
 func (e *slogRecordError) Error() string { return e.record.Message }
 
-// scrubPII removes Authorization, X-Client-Token, and raw token
+// scrubPII removes auth tokens, session tokens, cookies, and secret-ish
 // values from a Sentry event before transmission.
 func scrubPII(e *sentry.Event) {
 	if e == nil {
@@ -210,10 +211,19 @@ func scrubPII(e *sentry.Event) {
 	}
 }
 
+// IsSensitive reports whether a log/event key carries a secret value.
+// Exported so the server's slog redactor and this package agree on one
+// list instead of drifting into two.
+func IsSensitive(k string) bool {
+	return isSensitive(k)
+}
+
 func isSensitive(k string) bool {
 	kl := strings.ToLower(k)
 	switch kl {
-	case "authorization", "x-client-token", "client_token", "x-admin-key", "cookie":
+	case "authorization", "x-client-token", "client_token", "x-admin-key",
+		"x-session-token", "session_token", "cookie", "set-cookie",
+		"api_key", "apikey", "dsn", "database_url", "token":
 		return true
 	}
 	return strings.Contains(kl, "password") || strings.Contains(kl, "secret")

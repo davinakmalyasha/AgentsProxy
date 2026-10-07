@@ -146,6 +146,14 @@ func New(cfg Config) (*Runner, error) {
 	return &Runner{cfg: cfg, model: m, projects: cfg.Projects, newToolSet: agentstools.NewToolSetFor}, nil
 }
 
+// TurnTimeout bounds one agent turn end to end. Worst case without it
+// is maxModelCalls × the per-model-call HTTP timeout (5 × 60s = 300s),
+// which exceeds both the HTTP WriteTimeout and Vercel's function cap —
+// the server would kill the connection mid-write. 80s fits a full
+// 5-call turn at typical provider latency with headroom, and leaves
+// 10s of slack inside the 90s WriteTimeout derived from it in main.
+const TurnTimeout = 80 * time.Second
+
 // RunWithRole processes one user message and returns the reply. Same
 // signature as the old loop: role selects both the persona and the tool
 // set.
@@ -165,6 +173,11 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		slog.Warn("quarantined tenant blocked from agent", "tenant", tenantID, "reason", reason)
 		return "", tenanthealth.ErrQuarantined
 	}
+	// Bound the whole turn. Without this the worst case is maxModelCalls
+	// × the per-call provider timeout, which outlives both WriteTimeout
+	// and the platform cap. Handlers map DeadlineExceeded to 504.
+	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
+	defer cancel()
 	project := r.projectFor(tenantID)
 	// Tenant identity for shared text: the project's display and contact,
 	// falling back to the tenant slug and the platform default. For

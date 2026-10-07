@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -75,24 +76,35 @@ func Load() (*Config, error) {
 		LLMAPIKey:               os.Getenv("LLM_API_KEY"),
 		LLMModel:                getenv("LLM_MODEL", "deepseek-chat"),
 		AdminAPIKey:             os.Getenv("ADMIN_API_KEY"),
-		MaxTokensPerReq:         getenvInt("MAX_TOKENS_PER_REQUEST", 2048),
+		MaxTokensPerReq:         getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
 		RateLimitPerMinute:      getenvInt("RATE_LIMIT_PER_MINUTE", 180),
 		AllowOrigins:            splitCSV(getenv("ALLOW_ORIGINS", "*")),
 		SentryDSN:               os.Getenv("SENTRY_DSN"),
 		SentryEnv:               getenv("SENTRY_ENV", ""),
 		SentryRelease:           getenv("SENTRY_RELEASE", ""),
 		TracesSampleRate:        getenvFloat("TRACES_SAMPLE_RATE", 0.1),
-		DBPoolMin:               getenvInt("DB_POOL_MIN", 2),
-		DBPoolMax:               getenvInt("DB_POOL_MAX", 20),
-		DBSimpleProtocol:        strings.EqualFold(getenv("DB_USE_SIMPLE_PROTOCOL", "false"), "true"),
-		DBAdminPoolMin:          getenvInt("DB_ADMIN_POOL_MIN", 0),
-		DBAdminPoolMax:          getenvInt("DB_ADMIN_POOL_MAX", 3),
+		DBPoolMin:               getenvPositiveInt("DB_POOL_MIN", 2),
+		DBPoolMax:               getenvPositiveInt("DB_POOL_MAX", 20),
+		DBSimpleProtocol:        false, // set below (strict parse, may error)
+		DBAdminPoolMin:          getenvPositiveInt("DB_ADMIN_POOL_MIN", 0),
+		DBAdminPoolMax:          getenvPositiveInt("DB_ADMIN_POOL_MAX", 3),
 		AgentRateLimitPerMinute: getenvInt("AGENT_RATE_LIMIT_PER_MINUTE", 20),
 		SupabaseURL:             strings.TrimRight(getenv("SUPABASE_URL", ""), "/"),
 		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),
 		ReportBucket:            getenv("REPORT_BUCKET", "reports"),
-		ReportMaxBytes:          getenvInt("REPORT_MAX_BYTES", 15000000),
-		BackgroundTickers:       !strings.EqualFold(getenv("BACKGROUND_TICKERS", "true"), "false"),
+		ReportMaxBytes:          getenvPositiveInt("REPORT_MAX_BYTES", 15000000),
+		BackgroundTickers:       true, // set below (strict parse, may error)
+	}
+	// Strict booleans: an unrecognised value is a boot error, not a
+	// silent default. BACKGROUND_TICKERS=off used to leave the loops ON
+	// (only the literal "false" disabled them), burning Active CPU on
+	// serverless while the operator believed they were off.
+	var err error
+	if c.BackgroundTickers, err = getenvBool("BACKGROUND_TICKERS", true); err != nil {
+		return nil, err
+	}
+	if c.DBSimpleProtocol, err = getenvBool("DB_USE_SIMPLE_PROTOCOL", false); err != nil {
+		return nil, err
 	}
 	if c.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL is required")
@@ -113,7 +125,26 @@ func getenv(k, def string) string {
 	return def
 }
 
+// getenvInt parses an integer knob where 0 is meaningful (e.g. a rate
+// limit where 0 disables the check). Negative or unparsable values fall
+// back to def.
 func getenvInt(k string, def int) int {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
+// getenvPositiveInt parses an integer knob where 0 is not a valid value
+// (pool sizes, byte caps). Zero, negative, or unparsable values fall back
+// to def, so a kill switch can never be expressed — and can never be
+// thrown by accident — through these knobs.
+func getenvPositiveInt(k string, def int) int {
 	v := strings.TrimSpace(os.Getenv(k))
 	if v == "" {
 		return def
@@ -125,13 +156,33 @@ func getenvInt(k string, def int) int {
 	return n
 }
 
+// getenvBool parses a boolean knob strictly. Empty means def; recognised
+// true/false spellings (case-insensitive, with common synonyms) apply;
+// anything else is an error so a typo can never silently enable
+// background CPU burn or silently disable a protocol flag.
+func getenvBool(k string, def bool) (bool, error) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+	if v == "" {
+		return def, nil
+	}
+	switch v {
+	case "1", "true", "yes", "y", "on", "enable", "enabled":
+		return true, nil
+	case "0", "false", "no", "n", "off", "disable", "disabled":
+		return false, nil
+	default:
+		return def, fmt.Errorf("invalid boolean for %s: %q", k, strings.TrimSpace(os.Getenv(k)))
+	}
+}
+
 func getenvFloat(k string, def float64) float64 {
 	v := strings.TrimSpace(os.Getenv(k))
 	if v == "" {
 		return def
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f < 0 || f > 1 {
+	// Exactly 0 is valid (disables sampling); NaN never is.
+	if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
 		return def
 	}
 	return f

@@ -73,7 +73,7 @@ func ParseXLSXMarker(reply string) (path, rest string) {
 }
 
 // lookupTicket validates a token and returns its ticket.
-func lookupTicket(token string) (reportTicket, error) {
+func lookupTicket(ctx context.Context, token string) (reportTicket, error) {
 	var t reportTicket
 	token = strings.TrimSuffix(token, ".xlsx")
 	if !hexTokenRe.MatchString(token) {
@@ -82,9 +82,9 @@ func lookupTicket(token string) (reportTicket, error) {
 	if ReportRDB == nil {
 		return t, fmt.Errorf("report store unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	raw, err := ReportRDB.Get(ctx, reportTokenPrefix+token).Result()
+	raw, err := ReportRDB.Get(rctx, reportTokenPrefix+token).Result()
 	if err != nil {
 		return t, fmt.Errorf("expired or unknown link")
 	}
@@ -99,24 +99,43 @@ func lookupTicket(token string) (reportTicket, error) {
 
 // LoadReport validates a token and returns the download filename + bytes
 // from the active ReportStorage backend.
-func LoadReport(token string) (filename string, data []byte, err error) {
-	t, err := lookupTicket(token)
+func LoadReport(ctx context.Context, token string) (filename string, data []byte, err error) {
+	t, err := lookupTicket(ctx, token)
 	if err != nil {
 		return "", nil, err
 	}
 	// Never trust the ticket blindly: the store confines keys to its own
 	// tenant/object layout.
-	return ReportStorage.Load(context.Background(), t.Tenant, t.File)
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return ReportStorage.Load(lctx, t.Tenant, t.File)
 }
 
 // ReportTenant validates a token and returns its tenant, without loading
 // the object. The download handler uses it for the quarantine fence.
-func ReportTenant(token string) (string, error) {
-	t, err := lookupTicket(token)
+func ReportTenant(ctx context.Context, token string) (string, error) {
+	t, err := lookupTicket(ctx, token)
 	if err != nil {
 		return "", err
 	}
 	return t.Tenant, nil
+}
+
+// ResolveTicket validates a token once and returns the tenant plus the
+// download payload. The handler uses this instead of ReportTenant +
+// LoadReport so one download costs one ticket lookup, not two.
+func ResolveTicket(ctx context.Context, token string) (tenant, filename string, data []byte, err error) {
+	t, err := lookupTicket(ctx, token)
+	if err != nil {
+		return "", "", nil, err
+	}
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	filename, data, err = ReportStorage.Load(lctx, t.Tenant, t.File)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return t.Tenant, filename, data, nil
 }
 
 // ---- Tool ----
@@ -162,7 +181,16 @@ type reportData struct {
 
 func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to string) (reportData, error) {
 	var d reportData
+	// Build into a local and assign once at the end: WithTenantTx
+	// retries the closure on deadlock, and accumulating (+=) into the
+	// outer struct would double-count every total on a retry.
 	err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		var local reportData
+		// A 370-day export legitimately outlives the pool-wide
+		// statement_timeout: raise it for this transaction only.
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '120s'`); err != nil {
+			return err
+		}
 		// Lapangan income per day (WIB calendar day, same convention as laporan page).
 		r, err := tx.Query(ctx,
 			`SELECT (paid_at AT TIME ZONE 'Asia/Jakarta')::date AS d,
@@ -185,10 +213,10 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.Days = append(d.Days, row)
-			d.Cash += row.Cash
-			d.Qris += row.Qris
-			d.Bookings += row.Bookings
+			local.Days = append(local.Days, row)
+			local.Cash += row.Cash
+			local.Qris += row.Qris
+			local.Bookings += row.Bookings
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -211,8 +239,8 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.Expenses = append(d.Expenses, row)
-			d.ExpensesTot += row.Amount
+			local.Expenses = append(local.Expenses, row)
+			local.ExpensesTot += row.Amount
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -242,9 +270,9 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.KantinDays = append(d.KantinDays, row)
-			d.KantinOmzet += row.Omzet
-			d.KantinModal += row.Modal
+			local.KantinDays = append(local.KantinDays, row)
+			local.KantinOmzet += row.Omzet
+			local.KantinModal += row.Modal
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -268,10 +296,14 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				r.Close()
 				return err
 			}
-			d.KantinTop = append(d.KantinTop, row)
+			local.KantinTop = append(local.KantinTop, row)
 		}
 		r.Close()
-		return r.Err()
+		if err := r.Err(); err != nil {
+			return err
+		}
+		d = local
+		return nil
 	})
 	return d, err
 }

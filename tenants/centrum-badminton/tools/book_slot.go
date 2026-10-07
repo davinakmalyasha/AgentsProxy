@@ -218,7 +218,7 @@ func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 				return "error: " + err.Error()
 			}
 			if notify := bookings.NotifyFunc; notify != nil {
-				notify(tenantID, p.CustomerPhone, fmt.Sprintf(
+				notify(ctx, tenantID, p.CustomerPhone, fmt.Sprintf(
 					"Booking confirmed: %s at %s, %s %s-%s",
 					p.CustomerName, facName, p.Date, p.StartTime, p.EndTime))
 			}

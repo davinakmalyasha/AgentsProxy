@@ -33,16 +33,15 @@ type Reports struct {
 // Download streams the .xlsx for a valid token (Range-capable).
 func (h *Reports) Download(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSuffix(chi.URLParam(r, "token"), ".xlsx")
-	if tenant, terr := agentstools.ReportTenant(token); terr == nil {
-		if q, reason := tenanthealth.Check(tenant); q {
-			slog.Warn("quarantined tenant blocked from reports", "tenant", tenant, "reason", reason)
-			writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
-			return
-		}
-	}
-	filename, data, err := agentstools.LoadReport(token)
+	// One ticket lookup serves both the quarantine fence and the load.
+	tenant, filename, data, err := agentstools.ResolveTicket(r.Context(), token)
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "link kadaluarsa atau tidak dikenal — minta lagi ke aplikasi")
+		return
+	}
+	if q, reason := tenanthealth.Check(tenant); q {
+		slog.Warn("quarantined tenant blocked from reports", "tenant", tenant, "reason", reason)
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

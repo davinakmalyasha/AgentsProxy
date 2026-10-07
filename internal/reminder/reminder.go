@@ -11,7 +11,7 @@
 //
 // TWO DRIVERS, ONE CLAIM. This ticker is the driver for long-running
 // hosts (Laragon, VPS, Railway). On serverless (Vercel) it is disabled
-// via REMINDER_TICKER=off and a Supabase Edge Function driven by
+// via BACKGROUND_TICKERS=false and a Supabase Edge Function driven by
 // pg_cron delivers instead. Every path claims a row by atomically
 // flipping status to 'sending' and stamping claimed_at; drivers only
 // read status='pending', so the other driver can never see a claimed
