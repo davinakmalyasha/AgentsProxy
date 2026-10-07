@@ -150,6 +150,11 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		Vertical:           req.Vertical,
 		Features:           req.Features,
 	})
+	// A fresh tenant must resolve immediately: clear any negative
+	// tenant-known entry so public reads don't 404 it for 30s.
+	if err := records.EvictTenantKnown(r.Context(), cache.RDBOf(a.Cache), req.TenantID); err != nil {
+		slog.Warn("admin tenant evict failed", "tenant", req.TenantID, "err", err)
+	}
 }
 
 func (a *Admin) List(w http.ResponseWriter, r *http.Request) {
@@ -212,12 +217,13 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 	}
 	// Read current row for cache eviction + cross-field validation.
 	var (
-		hash    string
-		curVert string
+		hash     string
+		curVert  string
+		tenantID string
 	)
 	if err := a.Pool.QueryRow(r.Context(),
-		`SELECT token_hash, vertical FROM clients WHERE id = $1::uuid`, id,
-	).Scan(&hash, &curVert); err != nil {
+		`SELECT token_hash, vertical, tenant_id FROM clients WHERE id = $1::uuid`, id,
+	).Scan(&hash, &curVert, &tenantID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "not found")
 			return
@@ -288,6 +294,11 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 	// Evict cache so the next request picks up new vertical/features.
 	if err := a.Cache.EvictByHash(r.Context(), hash); err != nil {
 		slog.Warn("admin cache evict failed", "client_id", id, "err", err)
+	}
+	// Evict the tenant-known cache too: a paused tenant must fence
+	// now, not when the 30s TTL lapses.
+	if err := records.EvictTenantKnown(r.Context(), cache.RDBOf(a.Cache), tenantID); err != nil {
+		slog.Warn("admin tenant evict failed", "client_id", id, "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       id,

@@ -73,7 +73,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Tenant arrives from user input: must be a real active client,
 	// never an arbitrary string (history keys, RLS context, tool reads).
-	known, terr := records.CheckTenant(r.Context(), h.Pool, tenant)
+	known, terr := records.CheckTenantCached(r.Context(), h.RDB, h.Pool, tenant)
 	if terr != nil {
 		slog.Error("client chat tenant lookup failed", "tenant", tenant, "err", terr)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
@@ -153,7 +153,7 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	// Same guard as Chat: the tenant prefixes the Redis history keys, so
 	// an unvalidated value lets a caller enumerate or wipe another
 	// tenant's memory. Check it before building any key.
-	known, err := records.CheckTenant(r.Context(), h.Pool, tenant)
+	known, err := records.CheckTenantCached(r.Context(), h.RDB, h.Pool, tenant)
 	if err != nil {
 		slog.Error("clear history tenant lookup failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")

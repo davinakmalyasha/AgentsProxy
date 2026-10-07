@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
 // MoneyCap is the per-tenant daily LLM-call cap for the owner tier.
@@ -15,10 +17,14 @@ const MoneyCap = 150
 // main.go wiring; tests leave it nil (no cap).
 var CapRDB *redis.Client
 
-// CapKey returns the Redis key for a tenant's daily call count. The day
-// is WIB: caps reset at venue midnight, not server midnight.
-func CapKey(tenantID string) string {
-	return "agcap:" + tenantID + ":" + WibNow().Format("2006-01-02")
+// capTTL anchors a daily counter at next WIB midnight + 1h grace.
+// 24h-from-creation (the old TTL) lets a 23:59 key count yesterday's
+// spend for 24 more hours; midnight-anchored is both shorter and
+// semantically correct.
+func capTTL() time.Duration {
+	now := WibNow()
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	return midnight.Add(time.Hour).Sub(now)
 }
 
 // CostCapAllowedForRole checks per-tenant+role daily cap (20/80/150). Single LLM_API_KEY shared.
@@ -40,19 +46,12 @@ func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 		cap = 150
 	}
 	key := CapKeyForRole(tenantID, role)
-	n, err := CapRDB.Incr(ctx, key).Result()
+	// Atomic INCR + creator-set EXPIRE: the old split had a crash
+	// window that left immortal counters capping permanently.
+	n, err := redisx.IncrExpireRun(ctx, CapRDB, key, capTTL())
 	if err != nil {
 		slog.Error("cost cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
 		return false
-	}
-	if n == 1 {
-		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
-			slog.Warn("cost cap expire", "tenant", tenantID, "role", role, "err", err)
-		}
-	}
-	// Also increment legacy global key for backward compat / total view
-	if err := CapRDB.Incr(ctx, CapKey(tenantID)).Err(); err != nil {
-		slog.Warn("cost cap legacy incr", "tenant", tenantID, "err", err)
 	}
 	return n <= int64(cap)
 }
@@ -87,15 +86,10 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 		cap = 150
 	}
 	key := RPDKeyForUser(tenantID, role, userID)
-	n, err := CapRDB.Incr(ctx, key).Result()
+	n, err := redisx.IncrExpireRun(ctx, CapRDB, key, capTTL())
 	if err != nil {
 		slog.Error("rpd cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
 		return false
-	}
-	if n == 1 {
-		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
-			slog.Warn("rpd cap expire", "tenant", tenantID, "role", role, "err", err)
-		}
 	}
 	return n <= int64(cap)
 }

@@ -52,7 +52,6 @@ func TestWibDayBoundary(t *testing.T) {
 func TestCapKeysEmbedWibDate(t *testing.T) {
 	today := WibNow().Format("2006-01-02")
 	for name, key := range map[string]string{
-		"cap":     CapKey("t"),
 		"capRole": CapKeyForRole("t", "owner"),
 		"rpd":     RPDKeyForUser("t", "client", "u"),
 	} {

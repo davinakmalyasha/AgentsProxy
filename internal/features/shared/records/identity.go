@@ -257,7 +257,7 @@ func publicIdentity(w http.ResponseWriter, r *http.Request, deps IdentityDeps) *
 	if !ok {
 		return nil
 	}
-	known, err := CheckTenant(r.Context(), deps.Pool, tenant)
+	known, err := CheckTenantCached(r.Context(), cache.RDBOf(deps.Cache), deps.Pool, tenant)
 	if err != nil {
 		slog.Error("public tenant lookup failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")

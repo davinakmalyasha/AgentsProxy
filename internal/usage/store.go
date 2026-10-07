@@ -5,14 +5,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/quota"
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
 // Record inserts a usage row (synchronous, source of truth) and
 // best-effort increments the monthly quota cache in Redis.
+//
+// The counter write is one atomic Lua call (INCRBY + creator-set
+// EXPIREAT): the old read-the-result-then-EXPIRE split misdetected
+// creation whenever the pre-existing value happened to equal the
+// delta, leaking immortal keys — and the 30s-vs-31d dual TTL meant a
+// repopulated key silently became a 30-second key, forcing a full
+// month SUM on the next request.
 func Record(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID, model, kind string, tokensIn, tokensOut int) error {
 	costUSD := EstimateCost(tokensIn, tokensOut)
 	if _, err := db.Exec(ctx,
@@ -22,17 +31,9 @@ func Record(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID, 
 		return fmt.Errorf("insert usage: %w", err)
 	}
 	if rdb != nil {
-		monthKey := time.Now().UTC().Format("200601")
-		key := "quota:" + clientID + ":" + monthKey
-		n, err := rdb.IncrBy(ctx, key, int64(tokensIn+tokensOut)).Result()
-		if err != nil {
+		if _, err := redisx.IncrByExpireAtRun(ctx, rdb,
+			quota.MonthKey(clientID), int64(tokensIn+tokensOut), quota.MonthExpiry()); err != nil {
 			slog.Warn("quota cache incr failed", "err", err, "client_id", clientID)
-		} else if n == int64(tokensIn+tokensOut) {
-			// First increment created the key — bound its life to the
-			// month window so abandoned clients can't leak keys forever.
-			if err := rdb.Expire(ctx, key, 31*24*time.Hour).Err(); err != nil {
-				slog.Warn("quota cache expire failed", "err", err, "client_id", clientID)
-			}
 		}
 	}
 	return nil

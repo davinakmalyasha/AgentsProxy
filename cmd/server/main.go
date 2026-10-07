@@ -272,7 +272,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      &authapi.Auth{Pool: pool},
+		Auth:      &authapi.Auth{Pool: pool, RDB: rdb},
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,

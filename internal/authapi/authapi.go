@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
@@ -33,7 +34,17 @@ const SessionTTL = 30 * 24 * time.Hour
 // Auth is the staff-auth handler.
 type Auth struct {
 	Pool *pgxpool.Pool
+	// RDB caches session lookups (sess:{hash}, 60s). Nil disables the
+	// cache; the DB path always works.
+	RDB *redis.Client
 }
+
+// sessTTL bounds how long a revoked session stays usable after logout:
+// logout deletes the row AND evicts the key, so the TTL is only the
+// backstop for crashes between the two.
+const sessTTL = 60 * time.Second
+
+func sessKey(hash string) string { return "sess:" + hash }
 
 // User is the public user shape returned by login/me.
 type User struct {
@@ -281,6 +292,10 @@ func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 		// DML on sports_sessions in migration 032.
 		_, _ = a.Pool.Exec(r.Context(),
 			`SELECT private.delete_session($1)`, HashToken(tok))
+		// Evict the cached session so logout is immediate, not 60s.
+		if a.RDB != nil {
+			_ = a.RDB.Del(r.Context(), sessKey(HashToken(tok))).Err()
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
@@ -308,11 +323,24 @@ func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
 // is SECURITY DEFINER and returns only these columns, which also
 // keeps password_hash out of reach of a runtime query.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
+	hash := HashToken(tok)
+	if a.RDB != nil {
+		if b, err := a.RDB.Get(ctx, sessKey(hash)).Bytes(); err == nil {
+			var u User
+			if err := json.Unmarshal(b, &u); err == nil {
+				// Cache hit skips the session_user SELECT; the
+				// throttled touch below still runs (usually a no-op).
+				_, _ = a.Pool.Exec(ctx,
+					`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
+				return &u, nil
+			}
+		}
+	}
 	var u User
 	err := a.Pool.QueryRow(ctx,
 		`SELECT user_id::text, tenant_id, email, role, full_name, phone
 		   FROM private.session_user($1)`,
-		HashToken(tok),
+		hash,
 	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &u.FullName, &u.Phone)
 	if err != nil {
 		return nil, err
@@ -323,7 +351,12 @@ func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	// time. The threshold is passed into the function so the
 	// conditional is evaluated the same way it used to be in SQL.
 	_, _ = a.Pool.Exec(ctx,
-		`SELECT private.touch_session($1, now() - interval '1 minute')`, HashToken(tok))
+		`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
+	if a.RDB != nil {
+		if b, err := json.Marshal(&u); err == nil {
+			_ = a.RDB.Set(ctx, sessKey(hash), b, sessTTL).Err()
+		}
+	}
 	return &u, nil
 }
 

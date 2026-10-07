@@ -227,8 +227,8 @@ func TestOffTopicVerticals(t *testing.T) {
 func TestSharedKey_NotLogged(t *testing.T) {
 	// Quota keys must differ per role, or one tier's spending counts
 	// against another's.
-	if agentstools.CapKey("centrum") == agentstools.CapKeyForRole("centrum", "client") {
-		t.Errorf("cap keys should differ per role")
+	if agentstools.CapKeyForRole("centrum", "client") == agentstools.CapKeyForRole("centrum", "pegawai") {
+		t.Errorf("client vs pegawai cap keys should differ")
 	}
 	if agentstools.CapKeyForRole("centrum", "client") == agentstools.CapKeyForRole("centrum", "owner") {
 		t.Errorf("client vs owner cap keys should differ")
