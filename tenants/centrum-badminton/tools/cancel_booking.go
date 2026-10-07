@@ -51,16 +51,12 @@ func cancelBookingTool(pool *pgxpool.Pool) agentstools.Tool {
 					p.BookingID, tenantID).Scan(&status, &paymentStatus); err != nil {
 					return err
 				}
-			// Union rule (shared with the HTTP cancel): only pending/confirmed
-			// bookings cancel. checked_in means the court is really in use;
-			// completed/no_show/cancelled are terminal history. The money
-			// half stays: a paid booking needs the offline-cash note.
-			if status != "pending" && status != "confirmed" {
 				if status == "cancelled" {
 					return errors.New("booking already cancelled")
 				}
-				return errors.New("booking is " + status + " — cannot cancel (only pending/confirmed bookings can cancel)")
-			}
+				if status == "completed" || status == "no_show" {
+					return errors.New("booking already " + status + " — cannot cancel")
+				}
 				if paymentStatus != "unpaid" && note == "" {
 					return errors.New("paid booking requires a cancellation note describing the offline cash handling")
 				}

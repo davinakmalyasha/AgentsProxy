@@ -64,7 +64,8 @@ type Config struct {
 	SupabaseStorageKey string
 	ReportBucket       string
 	ReportMaxBytes     int
-		// BackgroundTickers runs this process's own background loops: the	// 60s reminder ticker and the notify drain loop. Both mean the same
+	// BackgroundTickers runs this process's own background loops: the
+	// 60s reminder ticker and the notify drain loop. Both mean the same
 	// thing - "am I a long-lived process that can own background work?"
 	//
 	// true  = long-running hosts (Laragon, VPS, Railway). The process
