@@ -101,7 +101,9 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if err := usage.Record(detachedCtx(r.Context()), a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
+	mctx, mcancel := detachedCtx(r.Context())
+	defer mcancel()
+	if err := usage.Record(mctx, a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
 		slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})

@@ -49,12 +49,6 @@ func RequestID() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := r.Header.Get(HeaderRequestID)
 			if id == "" {
-				// Prefer the platform's own ID (Vercel sets one per
-				// invocation) over minting: correlation survives the
-				// proxy hops instead of forking a second ID space.
-				id = r.Header.Get("X-Vercel-Id")
-			}
-			if id == "" {
 				id = fmt.Sprintf("%s-%d", reqPrefix(), reqIDCounter.Add(1))
 			}
 			w.Header().Set(HeaderRequestID, id)

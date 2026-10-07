@@ -29,9 +29,7 @@ var emptyPayloadJSON = []byte("{}")
 // detachedCtx returns a context for post-commit bookkeeping (metering):
 // detached from client cancellation so a disconnect after the response
 // is computed cannot drop the row, bounded to 5s so a hung DB cannot
-// hold the goroutine forever. The timer fires and releases itself;
-// no cancel func is returned by design (fire-and-forget scope).
-func detachedCtx(ctx context.Context) context.Context {
-	c, _ := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	return c
+// hold the goroutine forever. Callers defer the cancel.
+func detachedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
