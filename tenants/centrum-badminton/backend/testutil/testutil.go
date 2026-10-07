@@ -14,10 +14,16 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// testLockID serialises test setup across the sports packages. Distinct
+// from the migration lock (db package): sharing it would wedge tests
+// against a concurrent migrate.
+const testLockID = 734562
 
 // LockAndRun takes a session advisory lock (shared across the sports
 // packages) and runs fn inside a transaction. fn must use tx for all
@@ -33,7 +39,7 @@ func LockAndRun(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) erro
 			panic(p)
 		}
 	}()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(734562)`); err != nil {
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d)`, testLockID)); err != nil {
 		_ = tx.Rollback(ctx)
 		return err
 	}

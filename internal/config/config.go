@@ -150,6 +150,16 @@ func Load() (*Config, error) {
 	if c.AdminAPIKey == "" {
 		return nil, errors.New("ADMIN_API_KEY is required")
 	}
+	// ENV=production tightens CORS: a wildcard origin in production is
+	// a quota-burn hole (any site can call the public endpoints), so it
+	// fails boot instead of serving. Documented in .env.example.
+	if strings.EqualFold(c.Env, "production") {
+		for _, o := range c.AllowOrigins {
+			if o == "*" {
+				return nil, errors.New("ALLOW_ORIGINS must not contain '*' when ENV=production")
+			}
+		}
+	}
 	return c, nil
 }
 

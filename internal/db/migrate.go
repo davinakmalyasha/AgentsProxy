@@ -12,6 +12,11 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// migrationLockID serialises concurrent bootstraps. A collision with
+// any other advisory lock in the system is an invisible deadlock, so
+// it lives here as a named constant, not a literal.
+const migrationLockID = 734561
+
 // Migrate applies every embedded migration in lexical order, recording
 // each in schema_migrations. All migrations are idempotent
 // (IF NOT EXISTS / ON CONFLICT DO NOTHING), so re-running is safe.
@@ -83,12 +88,14 @@ func Migrate(ctx context.Context, pool *Pool) error {
 	// without blocking first; a loser waits, re-reads the ledger, and
 	// usually finds the winner already applied everything.
 	var locked bool
-	if err := bootTx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(734561)`).Scan(&locked); err != nil {
+	if err := bootTx.QueryRow(ctx,
+		fmt.Sprintf(`SELECT pg_try_advisory_xact_lock(%d)`, migrationLockID)).Scan(&locked); err != nil {
 		_ = bootTx.Rollback(ctx)
 		return fmt.Errorf("lock bootstrap: %w", err)
 	}
 	if !locked {
-		if _, err := bootTx.Exec(ctx, `SELECT pg_advisory_xact_lock(734561)`); err != nil {
+		if _, err := bootTx.Exec(ctx,
+			fmt.Sprintf(`SELECT pg_advisory_xact_lock(%d)`, migrationLockID)); err != nil {
 			_ = bootTx.Rollback(ctx)
 			return fmt.Errorf("lock bootstrap: %w", err)
 		}

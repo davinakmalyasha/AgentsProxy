@@ -205,3 +205,43 @@ func TestLoad_PoolSizesStayPositive(t *testing.T) {
 		t.Errorf("ReportMaxBytes = %d want default 15000000", c.ReportMaxBytes)
 	}
 }
+
+func TestLoad_ProductionRejectsWildcardCORS(t *testing.T) {
+	t.Setenv("DATABASE_URL", "x")
+	t.Setenv("LLM_API_KEY", "x")
+	t.Setenv("ADMIN_API_KEY", "x")
+	t.Setenv("ENV", "production")
+	t.Setenv("ALLOW_ORIGINS", "*")
+	if _, err := Load(); err == nil {
+		t.Error("expected error for wildcard CORS in production")
+	}
+}
+
+func TestLoad_NonProductionAllowsWildcardCORS(t *testing.T) {
+	t.Setenv("DATABASE_URL", "x")
+	t.Setenv("LLM_API_KEY", "x")
+	t.Setenv("ADMIN_API_KEY", "x")
+	t.Setenv("ENV", "development")
+	t.Setenv("ALLOW_ORIGINS", "*")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("dev wildcard CORS must load: %v", err)
+	}
+	if len(c.AllowOrigins) != 1 || c.AllowOrigins[0] != "*" {
+		t.Errorf("AllowOrigins = %v", c.AllowOrigins)
+	}
+}
+
+func TestLoad_TrustedProxiesParsed(t *testing.T) {
+	t.Setenv("DATABASE_URL", "x")
+	t.Setenv("LLM_API_KEY", "x")
+	t.Setenv("ADMIN_API_KEY", "x")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 1.2.3.4")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.TrustedProxyCIDRs) != 2 {
+		t.Errorf("TrustedProxyCIDRs = %v", c.TrustedProxyCIDRs)
+	}
+}
