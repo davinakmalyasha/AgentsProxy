@@ -29,6 +29,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	// Phase 4/6 sports-vertical custom features.
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
@@ -154,11 +155,24 @@ func main() {
 	slog.Info("redis connected")
 	agentstools.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
 	agentstools.CapRDB = rdb    // per-tenant daily cost cap
+	agentstools.CapCallsClient = cfg.CapCallsClient
+	agentstools.CapCallsStaff = cfg.CapCallsStaff
+	agentstools.CapCallsOwner = cfg.CapCallsOwner
+	agentstools.RPDCallsClient = cfg.RPDCallsClient
+	agentstools.RPDCallsStaff = cfg.RPDCallsStaff
+	agentstools.RPDCallsOwner = cfg.RPDCallsOwner
+	usage.CostInPerMtok = cfg.CostInPerMtok
+	usage.CostOutPerMtok = cfg.CostOutPerMtok
 	agentstools.ReportMaxBytes = cfg.ReportMaxBytes
 	agentstools.ConfigureSupabaseReportStore(cfg.SupabaseURL, cfg.SupabaseStorageKey, cfg.ReportBucket)
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
+
+	// Trust boundary for forwarding headers, from config (not a hidden
+	// os.Getenv): on Vercel this must list the egress ranges or every
+	// client buckets as one IP.
+	api.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
 
 	// Per-tenant agent configuration, collected not thrown: each tenant
 	// validates independently. A bad tenant is quarantined (fenced with

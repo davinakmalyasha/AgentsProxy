@@ -10,8 +10,17 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
-// MoneyCap is the per-tenant daily LLM-call cap for the owner tier.
-const MoneyCap = 150
+// Per-role daily LLM-call caps, set from config at boot (main.go).
+// They guard the single shared LLM_API_KEY: tunable per deploy
+// without recompiling. Defaults match the historical switches.
+var (
+	CapCallsClient = 20
+	CapCallsStaff  = 80
+	CapCallsOwner  = 150
+	RPDCallsClient = 30
+	RPDCallsStaff  = 80
+	RPDCallsOwner  = 150
+)
 
 // CapRDB is the Redis client used by the cost cap. Set once in
 // main.go wiring; tests leave it nil (no cap).
@@ -36,14 +45,14 @@ func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	if CapRDB == nil {
 		return true
 	}
-	cap := MoneyCap
+	cap := CapCallsOwner
 	switch role {
 	case "client":
-		cap = 20
+		cap = CapCallsClient
 	case "pegawai":
-		cap = 80
+		cap = CapCallsStaff
 	case "owner":
-		cap = 150
+		cap = CapCallsOwner
 	}
 	key := CapKeyForRole(tenantID, role)
 	// Atomic INCR + creator-set EXPIRE: the old split had a crash
@@ -76,14 +85,14 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 	if CapRDB == nil {
 		return true
 	}
-	cap := 150
+	cap := RPDCallsOwner
 	switch role {
 	case "client":
-		cap = 30
+		cap = RPDCallsClient
 	case "pegawai":
-		cap = 80
+		cap = RPDCallsStaff
 	case "owner":
-		cap = 150
+		cap = RPDCallsOwner
 	}
 	key := RPDKeyForUser(tenantID, role, userID)
 	n, err := redisx.IncrExpireRun(ctx, CapRDB, key, capTTL())

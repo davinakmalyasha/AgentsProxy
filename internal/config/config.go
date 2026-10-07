@@ -23,6 +23,24 @@ type Config struct {
 	MaxTokensPerReq    int
 	RateLimitPerMinute int
 	AllowOrigins       []string
+	// TrustedProxyCIDRs gates X-Forwarded-For/X-Real-IP trust. Moved
+	// here from a direct os.Getenv in clientip.go so the value is
+	// validated once, visible in cfg.String, and impossible to miss
+	// on Vercel (where every client buckets as one IP without it).
+	TrustedProxyCIDRs []string
+	// LLM per-million-token prices (USD): the estimate reported to
+	// every tenant. A provider swap changes the price; a recompile
+	// must not be required to keep billing honest.
+	CostInPerMtok  float64
+	CostOutPerMtok float64
+	// Daily LLM-call money caps per role: the guard on the single
+	// shared LLM_API_KEY. Tunable per deploy without recompiling.
+	CapCallsClient  int
+	CapCallsStaff   int
+	CapCallsOwner   int
+	RPDCallsClient  int
+	RPDCallsStaff   int
+	RPDCallsOwner   int
 	SentryDSN          string
 	SentryEnv          string
 	SentryRelease      string
@@ -46,7 +64,7 @@ type Config struct {
 	SupabaseStorageKey string
 	ReportBucket       string
 	ReportMaxBytes     int
-	// BackgroundTickers runs this process's own background loops: the	// 60s reminder ticker and the notify drain loop. Both mean the same
+		// BackgroundTickers runs this process's own background loops: the	// 60s reminder ticker and the notify drain loop. Both mean the same
 	// thing - "am I a long-lived process that can own background work?"
 	//
 	// true  = long-running hosts (Laragon, VPS, Railway). The process
@@ -84,6 +102,15 @@ func Load() (*Config, error) {
 		MaxTokensPerReq:         getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
 		RateLimitPerMinute:      getenvInt("RATE_LIMIT_PER_MINUTE", 180),
 		AllowOrigins:            splitCSV(getenv("ALLOW_ORIGINS", "*")),
+		TrustedProxyCIDRs:     splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
+		CostInPerMtok:         getenvFloatUnbounded("LLM_COST_IN_PER_MTOK", 0.14),
+		CostOutPerMtok:        getenvFloatUnbounded("LLM_COST_OUT_PER_MTOK", 0.28),
+		CapCallsClient:        getenvInt("CAP_CALLS_CLIENT", 20),
+		CapCallsStaff:         getenvInt("CAP_CALLS_PEGAWAI", 80),
+		CapCallsOwner:         getenvInt("CAP_CALLS_OWNER", 150),
+		RPDCallsClient:        getenvInt("RPD_CALLS_CLIENT", 30),
+		RPDCallsStaff:         getenvInt("RPD_CALLS_PEGAWAI", 80),
+		RPDCallsOwner:         getenvInt("RPD_CALLS_OWNER", 150),
 		SentryDSN:               os.Getenv("SENTRY_DSN"),
 		SentryEnv:               getenv("SENTRY_ENV", ""),
 		SentryRelease:           getenv("SENTRY_RELEASE", ""),
@@ -196,6 +223,21 @@ func getenvFloat(k string, def float64) float64 {
 	return f
 }
 
+// getenvFloatUnbounded parses a non-negative float with no upper bound
+// (prices, timeouts-as-seconds). Empty, negative, NaN, +Inf, or
+// unparsable values fall back to def.
+func getenvFloatUnbounded(k string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return def
+	}
+	return f
+}
+
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -213,11 +255,11 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d BACKGROUND_TICKERS=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
-		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins,
+		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
-		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.BackgroundTickers,
+		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.BackgroundTickers, c.RunMigrations,
 	)
 }
 
