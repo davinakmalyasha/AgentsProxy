@@ -91,11 +91,11 @@ func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID st
 }
 
 func sumMonthUsage(ctx context.Context, db *pgxpool.Pool, clientID string) (int, error) {
+	// Definer path (migration 053): usage is unreadable to app_runtime
+	// by policy, so the month total comes from a function that can only
+	// ever see this one client's rows.
 	var used int
-	err := db.QueryRow(ctx,
-		`SELECT COALESCE(SUM(tokens_in + tokens_out), 0)::int FROM usage WHERE client_id = $1 AND created_at >= date_trunc('month', now())`,
-		clientID,
-	).Scan(&used)
+	err := db.QueryRow(ctx, `SELECT private.month_tokens($1::uuid)`, clientID).Scan(&used)
 	if err != nil {
 		return 0, err
 	}

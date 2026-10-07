@@ -566,6 +566,10 @@ func reportTokenHash(token string) string {
 // hot ticket (30 min TTL), Postgres holds the manifest row the sweeper
 // uses to reclaim the object. On manifest failure the ticket is revoked
 // and the object removed so no orphan survives.
+//
+// The manifest write goes through private.mint_report (migration 053):
+// report_objects is FORCE RLS on app.tenant_id, which the runtime pool
+// never sets, so a direct INSERT fails 42501 on every export.
 func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey string, size int) (string, error) {
 	if ReportRDB == nil {
 		return "", fmt.Errorf("report store unavailable (Redis)")
@@ -585,12 +589,10 @@ func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey 
 	if err := ReportRDB.Set(rctx, reportTokenPrefix+token, string(b), reportTTL).Err(); err != nil {
 		return "", err
 	}
-	_, err := pool.Exec(ctx,
-		`INSERT INTO report_objects (token_hash, tenant_id, object_key, size_bytes, expires_at)
-		 VALUES ($1,$2,$3,$4,now() + make_interval(secs => $5))
-		 ON CONFLICT (token_hash) DO NOTHING`,
-		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds()))
-	if err != nil {
+	var minted bool
+	if err := pool.QueryRow(ctx,
+		`SELECT private.mint_report($1,$2,$3,$4,$5)`,
+		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds())).Scan(&minted); err != nil {
 		_ = ReportRDB.Del(rctx, reportTokenPrefix+token).Err()
 		_ = ReportStorage.Delete(ctx, SafeTenant(tenant), objectKey)
 		return "", err
@@ -600,18 +602,22 @@ func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey 
 
 // PurgeExpiredReports deletes expired manifest rows and their objects.
 // Idempotent: safe for concurrent sweepers and for either backend.
+//
+// Both statements go through definer functions (migration 053): the
+// manifest is FORCE RLS, so direct SELECT/DELETE on the runtime pool
+// match zero rows — a silent storage leak. Deletes are one batched
+// call, not one round trip per row.
 func PurgeExpiredReports(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	if pool == nil {
 		return 0, nil
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT token_hash, tenant_id, object_key FROM report_objects
-		  WHERE expires_at < now() LIMIT 100`)
+		`SELECT token_hash, tenant_id, object_key FROM private.expired_reports($1)`, 100)
 	if err != nil {
 		return 0, err
 	}
 	type expired struct{ hash, tenant, key string }
-	var batch []expired
+	batch := make([]expired, 0, 100)
 	for rows.Next() {
 		var e expired
 		if err := rows.Scan(&e.hash, &e.tenant, &e.key); err != nil {
@@ -625,12 +631,19 @@ func PurgeExpiredReports(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		return 0, err
 	}
 	n := 0
+	hashes := make([]string, 0, len(batch))
 	for _, e := range batch {
+		// Storage deletes stay serial: they are HTTP calls, and one
+		// slow object must not fail the whole batch.
 		_ = ReportStorage.Delete(ctx, e.tenant, e.key)
-		if _, err := pool.Exec(ctx, `DELETE FROM report_objects WHERE token_hash=$1`, e.hash); err != nil {
-			return n, err
-		}
+		hashes = append(hashes, e.hash)
 		n++
+	}
+	if len(hashes) > 0 {
+		if err := pool.QueryRow(ctx,
+			`SELECT private.delete_reports($1::text[])`, hashes).Scan(&n); err != nil {
+			return 0, err
+		}
 	}
 	return n, nil
 }
