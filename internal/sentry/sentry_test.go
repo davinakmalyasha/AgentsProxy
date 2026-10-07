@@ -3,7 +3,6 @@ package sentry
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -18,7 +17,6 @@ func TestEnabled_DefaultFalse(t *testing.T) {
 
 func TestNoOpWhenDisabled(t *testing.T) {
 	// These must never panic when DSN is empty.
-	CaptureError(errors.New("boom"))
 	CaptureMessage("hi")
 	AddBreadcrumb("cat", "msg", nil)
 	RecoverWith(context.Background(), "panic")

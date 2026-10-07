@@ -17,10 +17,6 @@ type Healthz struct {
 	DB    *pgxpool.Pool
 	RDB   *redis.Client
 	Build string
-	// HealthyTenants lists slugs serving traffic. Empty (not nil) means
-	// "report only quarantined ones". Kept as data, not a callback, so
-	// /healthz never blocks on config.
-	HealthyTenants []string
 }
 
 type healthzResponse struct {

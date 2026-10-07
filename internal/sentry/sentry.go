@@ -94,14 +94,6 @@ func Flush(d time.Duration) {
 	sentry.Flush(d)
 }
 
-// CaptureError sends an error event. No-op when disabled.
-func CaptureError(err error) {
-	if !Enabled() || err == nil {
-		return
-	}
-	sentry.CaptureException(err)
-}
-
 // CaptureMessage sends a message event. No-op when disabled.
 func CaptureMessage(msg string) {
 	if !Enabled() {
@@ -123,10 +115,6 @@ func AddBreadcrumb(category, message string, data map[string]any) {
 		Level:    sentry.LevelInfo,
 	})
 }
-
-// CurrentHub returns the process-wide Sentry hub. No-op safe —
-// callers can ignore the result when Enabled() is false.
-func CurrentHub() *sentry.Hub { return sentry.CurrentHub() }
 
 // RecoverWith forwards a recovered panic on the given context to
 // Sentry. No-op when DSN empty.

@@ -18,7 +18,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
@@ -26,7 +25,6 @@ import (
 
 // Reports serves token-authed report files.
 type Reports struct {
-	RDB  *redis.Client
 	Pool *pgxpool.Pool
 }
 
@@ -79,7 +77,12 @@ func sweepOnce(pool *pgxpool.Pool) {
 			slog.Error("report purge failed", "err", err)
 		}
 	}
-	sweepOldReports()
+	// The local-disk walk only makes sense when the active backend IS
+	// local disk. On Supabase (or any remote backend) data/reports does
+	// not exist and the walk is a guaranteed-empty ReadDir per sweep.
+	if ls, ok := agentstools.ReportStorage.(interface{ IsLocal() bool }); ok && ls.IsLocal() {
+		sweepOldReports()
+	}
 }
 
 // reportsRoot is where chat-generated .xlsx files live. A var so tests

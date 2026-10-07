@@ -19,18 +19,15 @@ const (
 
 // Message is one turn of the conversation.
 //
-// ToolCalls/ToolCallID are what make a real tool round-trip possible.
-// Without them the only way to return a result to the model is to fake it
-// as a user turn, which teaches the model that tool output is something
-// the user said â€” and leaves no id to correlate, so a model that emits two
-// calls cannot be answered unambiguously.
+// ToolCalls carries the provider's function-call request on responses.
+// This client never performs a tool round-trip itself (the ADK loop
+// does), so nothing here sets them on requests.
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// ToolCalls carries the provider's function-call request on the
+	// response path. The request path never sets it.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolCallID is set on role:"tool" messages and names the call this
-	// message answers.
-	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is one function invocation requested by the model.
@@ -90,14 +87,11 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// Completion is one model turn: either tool calls, or prose, or both.
+// Completion is one model turn: prose plus token counts. Tool calls
+// ride on Message.ToolCalls (read by the caller from the raw choice);
+// this struct carries only what the quota/metering path consumes.
 type Completion struct {
-	Content   string
-	ToolCalls []ToolCall
-	// FinishReason is the provider's own verdict ("stop",
-	// "tool_calls", "length"). Useful for telling "the model ignored the
-	// tool" apart from "the model ran out of tokens".
-	FinishReason  string
+	Content       string
 	PromptTokens  int
 	CompletionTok int
 }
@@ -178,8 +172,6 @@ func (c *Client) Complete(
 	choice0 := out.Choices[0]
 	comp := &Completion{
 		Content:       choice0.Message.Content,
-		ToolCalls:     choice0.Message.ToolCalls,
-		FinishReason:  choice0.FinishReason,
 		PromptTokens:  out.Usage.PromptTokens,
 		CompletionTok: out.Usage.CompletionTokens,
 	}

@@ -52,10 +52,8 @@ func (c *Client) GetByToken(ctx context.Context, token string) (*ClientModel, er
 	if m == nil {
 		return nil, ErrInvalidToken
 	}
-	if err := c.writeCache(ctx, hash, m); err != nil {
-		// cache failure is non-fatal
-		_ = err
-	}
+	// cache failure is non-fatal: serve from DB without caching.
+	_ = c.writeCache(ctx, hash, m)
 	return m, nil
 }
 

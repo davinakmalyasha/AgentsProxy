@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,21 +47,4 @@ func CheckTenant(ctx context.Context, q Querier, tenantID string) (bool, error) 
 		return false, fmt.Errorf("%w: %w", ErrTenantLookup, err)
 	}
 	return true, nil
-}
-
-// KnownTenant reports whether tenantID belongs to an active client.
-// Used wherever a tenant arrives from user input (public reads,
-// client-chat): arbitrary strings must not become Redis keys, RLS
-// contexts, or cross-tenant read paths. Single indexed lookup.
-//
-// Prefer CheckTenant where the caller can return a 5xx; this wrapper
-// keeps the deny-by-default behaviour and only adds logging.
-func KnownTenant(ctx context.Context, q Querier, tenantID string) bool {
-	ok, err := CheckTenant(ctx, q, tenantID)
-	if err != nil {
-		// Deny by default, but never silently: an unknown tenant is the
-		// caller's problem, this is ours.
-		slog.Error("tenant lookup failed", "tenant", tenantID, "err", err)
-	}
-	return ok
 }

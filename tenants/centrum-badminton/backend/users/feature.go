@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
 
@@ -222,7 +223,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "cannot deactivate yourself")
 		return
 	}
-	if req.Role != nil && *req.Role != "owner" && *req.Role != "pegawai" {
+	if req.Role != nil && *req.Role != clientctx.RoleOwner && *req.Role != clientctx.RoleStaff {
 		records.WriteJSONError(w, http.StatusBadRequest, "role must be owner or pegawai")
 		return
 	}

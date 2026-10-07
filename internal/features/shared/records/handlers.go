@@ -24,14 +24,13 @@ import (
 // Handler is the records-feature HTTP handler. It's stateless; the
 // dependencies travel in via Deps at construction.
 type Handler struct {
-	Pool  *pgxpool.Pool
-	Cache *cache.Client
+	Pool *pgxpool.Pool
 }
 
 // New returns a Handler. Kept as a constructor so future fields
 // (e.g. a metrics sink) can be added without changing call sites.
 func New(deps Deps) *Handler {
-	return &Handler{Pool: deps.Pool, Cache: deps.Cache}
+	return &Handler{Pool: deps.Pool}
 }
 
 // ---- payload types ----

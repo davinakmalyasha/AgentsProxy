@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
 
@@ -34,13 +34,12 @@ type FeatureSpec struct {
 
 type FeatureAdapter struct {
 	Pool     *pgxpool.Pool
-	Cache    *cache.Client
 	Spec     FeatureSpec
 	Vertical string // closed over at builder time; never read from URL
 }
 
 func NewFeatureAdapter(deps Deps, spec FeatureSpec, vertical string) *FeatureAdapter {
-	return &FeatureAdapter{Pool: deps.Pool, Cache: deps.Cache, Spec: spec, Vertical: vertical}
+	return &FeatureAdapter{Pool: deps.Pool, Spec: spec, Vertical: vertical}
 }
 
 func (a *FeatureAdapter) Routes() http.Handler {
@@ -274,7 +273,7 @@ func (a *FeatureAdapter) patch(w http.ResponseWriter, r *http.Request) {
 		idx++
 	}
 	args = append(args, id, vertical, kind)
-	sql := "UPDATE tenant_records SET " + joinComma(sets) +
+	sql := "UPDATE tenant_records SET " + strings.Join(sets, ", ") +
 		" WHERE id = $" + strconv.Itoa(idx) + "::uuid AND vertical = $" + strconv.Itoa(idx+1) +
 		" AND kind = $" + strconv.Itoa(idx+2)
 	var affected int64
@@ -332,27 +331,4 @@ func (a *FeatureAdapter) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
-}
-
-// featuresVertical is unused now that the adapter closes over the
-// vertical at builder time. Kept as a stub in case a future
-// caller wants to override it via a chi URL param.
-func featuresVertical(r *http.Request) string {
-	if rc := chi.RouteContext(r.Context()); rc != nil {
-		if v := rc.URLParam("vertical"); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func joinComma(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += ", "
-		}
-		out += s
-	}
-	return out
 }

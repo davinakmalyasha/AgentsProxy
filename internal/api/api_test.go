@@ -158,7 +158,7 @@ func setup(t *testing.T) *harness {
 		Cache:   cli,
 		LLM:     llmCli,
 		ADK:     testADKRunner(t, pool, mockLLM.URL),
-		Auth:    &authapi.Auth{Pool: pool, Cache: cli},
+		Auth:    &authapi.Auth{Pool: pool},
 		Version: "test",
 	})
 	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey}

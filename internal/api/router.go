@@ -77,7 +77,7 @@ func NewRouter(d Deps) http.Handler {
 		})
 
 		// WS2: chat-generated .xlsx downloads — token IS the auth (tenant-scoped, 30-min TTL)
-		reportsH := &Reports{RDB: d.Redis}
+		reportsH := &Reports{Pool: d.Pool}
 		r.Get("/reports/{token}", reportsH.Download)
 
 		// Staff login (Phase 7): email+password → session token.

@@ -209,43 +209,6 @@ func encodeDynamicJSON(raw json.RawMessage) (any, error) {
 	return string(raw), nil
 }
 
-func decodeDynamicJSON(src any) (json.RawMessage, error) {
-	if src == nil {
-		return nil, nil
-	}
-	// pgx may hand back the JSON null literal for NULL columns; treat it
-	// as NULL so empty decodes stay nil, matching the reference behavior.
-	// (Stored 'null' can only come from a buggy writer; reading it as nil
-	// is still the honest interpretation.)
-	normalize := func(b []byte) (json.RawMessage, error) {
-		if len(b) == 0 || string(b) == "null" {
-			return nil, nil
-		}
-		if !json.Valid(b) {
-			return nil, fmt.Errorf("invalid JSON received from database: %s", string(b))
-		}
-		out := make(json.RawMessage, len(b))
-		copy(out, b)
-		return out, nil
-	}
-	// pgx decodes jsonb into Go values when the target is any; re-encode
-	// to raw bytes so callers unmarshal concrete types themselves.
-	switch v := src.(type) {
-	case json.RawMessage:
-		return normalize(v)
-	case []byte:
-		return normalize(v)
-	case string:
-		return normalize([]byte(v))
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal JSONB value: %T", src)
-		}
-		return normalize(b)
-	}
-}
-
 func encodeActions(a session.EventActions) ([]byte, error) {
 	return json.Marshal(a)
 }

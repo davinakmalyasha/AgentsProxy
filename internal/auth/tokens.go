@@ -13,7 +13,7 @@ const TokenHexLen = 64
 // GenerateToken returns (rawToken, sha256Hex(rawToken)).
 // rawToken is shown to the admin ONCE; only the hash is stored.
 func GenerateToken() (string, string, error) {
-	b := make([]byte, 32)
+	b := make([]byte, TokenHexLen/2)
 	if _, err := rand.Read(b); err != nil {
 		return "", "", err
 	}

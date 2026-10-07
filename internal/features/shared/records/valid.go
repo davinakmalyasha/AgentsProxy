@@ -23,15 +23,15 @@ func ValidateTenantSlug(t string) error {
 	return nil
 }
 
-// MaxQuotaTokens caps monthly_quota_tokens: above this the SUM never trips,
+// maxQuotaTokens caps monthly_quota_tokens: above this the SUM never trips,
 // which is unlimited billing by typo.
-const MaxQuotaTokens = 100_000_000
+const maxQuotaTokens = 100_000_000
 
 // ValidateQuota rejects negative quotas and absurd ones. Zero means
 // "unset" at creation (default applies); on PATCH zero is rejected by the
 // caller passing requireNonZero.
 func ValidateQuota(q int) error {
-	if q < 0 || q > MaxQuotaTokens {
+	if q < 0 || q > maxQuotaTokens {
 		return fmt.Errorf("invalid monthly_quota_tokens")
 	}
 	return nil

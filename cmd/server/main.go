@@ -264,7 +264,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      &authapi.Auth{Pool: pool, Cache: cli},
+		Auth:      &authapi.Auth{Pool: pool},
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,
@@ -274,7 +274,7 @@ func main() {
 	// download request path). Manifest-driven purge handles durable
 	// storage; the legacy local walk covers pre-manifest dev files.
 	reportStop := make(chan struct{})
-	reportsSweeper := &api.Reports{RDB: rdb, Pool: pool}
+	reportsSweeper := &api.Reports{Pool: pool}
 	go reportsSweeper.StartSweeper(reportStop)
 
 	// Retention janitor: expired sessions + old sent/dead reminders

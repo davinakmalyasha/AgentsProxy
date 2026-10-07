@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,10 +20,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/cache"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 )
 
 // SessionTTL is how long a login lasts before re-auth.
@@ -32,8 +32,7 @@ const SessionTTL = 30 * 24 * time.Hour
 
 // Auth is the staff-auth handler.
 type Auth struct {
-	Pool  *pgxpool.Pool
-	Cache *cache.Client
+	Pool *pgxpool.Pool
 }
 
 // User is the public user shape returned by login/me.
@@ -102,9 +101,9 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 	}
 	newRole := req.Role
 	if newRole == "" {
-		newRole = "pegawai"
+		newRole = clientctx.RoleStaff
 	}
-	if newRole != "owner" && newRole != "pegawai" {
+	if newRole != clientctx.RoleOwner && newRole != clientctx.RoleStaff {
 		writeErr(w, http.StatusBadRequest, "role must be owner or pegawai")
 		return
 	}
@@ -156,16 +155,9 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// clientByToken resolves a client token via the cache client model.
-func (a *Auth) clientByToken(ctx context.Context, tok string) (*cache.ClientModel, error) {
-	return a.Cache.GetByToken(ctx, tok)
-}
-
 func isUniqueViolation(err error) bool {
-	if pgErr, ok := err.(interface{ SQLState() string }); ok {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // HashPassword bcrypt-hashes a password (cost 10 default).
@@ -194,10 +186,6 @@ func GenerateSessionToken() (string, string, error) {
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
-}
-
-func equal(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 type loginReq struct {

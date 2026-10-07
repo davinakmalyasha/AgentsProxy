@@ -12,6 +12,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	adksession "google.golang.org/adk/v2/session"
@@ -198,8 +199,8 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := u.Role
-	if role != "owner" && role != "pegawai" {
-		role = "pegawai"
+	if role != clientctx.RoleOwner && role != clientctx.RoleStaff {
+		role = clientctx.RoleStaff
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var req agentChatRequest

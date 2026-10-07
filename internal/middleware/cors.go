@@ -3,7 +3,6 @@ package middleware
 
 import (
 	"net/http"
-	"strings"
 )
 
 // CORS emits permissive Access-Control headers from the configured
@@ -44,13 +43,4 @@ func CORS(allowOrigins []string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-func contains(list []string, v string) bool {
-	for _, s := range list {
-		if strings.EqualFold(s, v) {
-			return true
-		}
-	}
-	return false
 }

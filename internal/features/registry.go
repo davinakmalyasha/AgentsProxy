@@ -122,8 +122,8 @@ func AllowedForVertical(name, vertical string) bool {
 	return false
 }
 
-// HasFeature reports whether the given feature name is registered.
-func HasFeature(name string) bool {
+// hasFeature reports whether the given feature name is registered.
+func hasFeature(name string) bool {
 	mu.RLock()
 	defer mu.RUnlock()
 	_, ok := all[strings.ToLower(strings.TrimSpace(name))]

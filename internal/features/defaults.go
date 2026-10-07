@@ -41,5 +41,5 @@ func IsKnownFeature(name string) bool {
 	if name == "records" {
 		return true
 	}
-	return HasFeature(name)
+	return hasFeature(name)
 }

@@ -3,35 +3,10 @@ package agentstools
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
-
-// CtxRecipientID carries the sender's recipient ID for out-of-chat
-// delivery through the agent loop into tools. Tools that deliver outside
-// the chat require it; callers without a delivery recipient have none.
-type ctxKey string
-
-const CtxRecipientID ctxKey = "recipient_id"
-
-// RecipientIDFromCtx returns the sender recipient ID, or "" when the
-// caller has no delivery recipient.
-func RecipientIDFromCtx(ctx context.Context) string {
-	if v, ok := ctx.Value(CtxRecipientID).(int64); ok && v != 0 {
-		return strconv.FormatInt(v, 10)
-	}
-	if v, ok := ctx.Value(CtxRecipientID).(string); ok {
-		return v
-	}
-	return ""
-}
-
-// WithRecipientID stamps a context with the sender's recipient ID.
-func WithRecipientID(ctx context.Context, recipientID int64) context.Context {
-	return context.WithValue(ctx, CtxRecipientID, recipientID)
-}
 
 // WibNow returns now in WIB (UTC+7, no DST). FixedZone avoids tzdata
 // dependency on Windows containers.

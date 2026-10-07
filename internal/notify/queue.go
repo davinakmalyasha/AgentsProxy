@@ -54,13 +54,10 @@ type Sender interface {
 	Send(ctx context.Context, to, text string) error
 }
 
-// Job is one queued notification. Tenant is carried so the row has a
-// tenant_id for the RLS policy even though the enqueue runs outside the
-// request's transaction.
+// Job is one queued notification.
 type Job struct {
-	Tenant string `json:"-"`
-	To     string `json:"to"`
-	Text   string `json:"text"`
+	To   string `json:"to"`
+	Text string `json:"text"`
 }
 
 const (
@@ -91,7 +88,7 @@ type WaMeSender struct{}
 // provider (Meta Cloud API / Twilio) + business verification; until
 // then, a deep link is the zero-credential automated fallback.
 func (WaMeSender) Send(_ context.Context, to, text string) error {
-	link := "https://wa.me/" + url.PathEscape(to) + "?text=" + url.QueryEscape(text)
+	link := MakeWaMeLink(to, text)
 	slog.Info("notify wa.me link", "to", to, "link", link)
 	return nil
 }
