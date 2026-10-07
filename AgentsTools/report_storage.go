@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 // ReportStore persists chat-generated report bytes. Local disk is the dev
@@ -49,7 +51,7 @@ func ConfigureSupabaseReportStore(baseURL, apiKey, bucket string) {
 		BaseURL: baseURL,
 		APIKey:  apiKey,
 		Bucket:  bucket,
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		HTTP:    httpx.NewClient(30 * time.Second),
 	}
 }
 
@@ -115,7 +117,9 @@ func (s *SupabaseReportStore) http() *http.Client {
 	if s.HTTP != nil {
 		return s.HTTP
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	// Shared transport, not a fresh client per call (which also
+	// skipped connection reuse entirely).
+	return httpx.NewClient(30 * time.Second)
 }
 
 // objectKey builds the server-side key. Never client-supplied: tenant is

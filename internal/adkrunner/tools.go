@@ -56,9 +56,14 @@ func adaptTool(t agentstools.Tool, tenantID string) (tool.Tool, error) {
 				return map[string]any{"result": "Error: invalid arguments — " + verr.Error() + ". Call the tool again with corrected arguments."}, nil
 			}
 			out := t.Run(toolCtx, tenantID, norm)
-			slog.Info("adkrunner: tool ran",
-				"tenant", tenantID, "tool", t.Name,
-				"result", agentstools.Truncate(out, 200))
+			// Debug only, and guarded: Truncate allocates on every call,
+			// and tool results can carry customer PII that must not hit
+			// stdout on a production log level.
+			if slog.Default().Enabled(toolCtx, slog.LevelDebug) {
+				slog.Debug("adkrunner: tool ran",
+					"tenant", tenantID, "tool", t.Name,
+					"result", agentstools.Truncate(out, 200))
+			}
 			return map[string]any{"result": out}, nil
 		},
 	)

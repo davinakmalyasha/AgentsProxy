@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -111,7 +112,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid message role")
 			return
 		}
-		if len([]rune(m.Content)) > maxMessageRunes {
+		if utf8.RuneCountInString(m.Content) > maxMessageRunes {
 			writeJSONError(w, http.StatusBadRequest, "message too long")
 			return
 		}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
@@ -25,6 +26,27 @@ type AgentChat struct {
 	Auth *authapi.Auth
 	// ADK is the agent loop. Boot is fatal without it.
 	ADK *adkrunner.Runner
+	// sem bounds concurrent agent turns. Caps and rate limits bound
+	// throughput, not concurrency: without this, N concurrent chats
+	// hold N pooled transactions + N provider calls against a pool
+	// capped at 20. Nil means unbounded (tests).
+	sem chan struct{}
+}
+
+// maxConcurrentAgentTurns caps simultaneous RunWithToolsRole calls.
+const maxConcurrentAgentTurns = 8
+
+// acquireTurn takes a turn slot or reports whether the server is full.
+func (h *AgentChat) acquireTurn() (release func(), ok bool) {
+	if h.sem == nil {
+		return func() {}, true
+	}
+	select {
+	case h.sem <- struct{}{}:
+		return func() { <-h.sem }, true
+	default:
+		return nil, false
+	}
 }
 
 type agentChatRequest struct {
@@ -56,7 +78,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "message required")
 		return
 	}
-	if len([]rune(msg)) > maxMessageRunes {
+	if utf8.RuneCountInString(msg) > maxMessageRunes {
 		writeJSONError(w, http.StatusBadRequest, "message too long")
 		return
 	}
@@ -101,6 +123,12 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	//
 	// Cutover complete: the ADK loop with the same pairing (anon tools,
 	// client persona). Boot is fatal without the runner, so no fallback.
+	release, ok := h.acquireTurn()
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "server busy — coba lagi")
+		return
+	}
+	defer release()
 	reply, err := h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
 	if err != nil {
 		if quarantineErr(w, tenant, err) {
@@ -213,7 +241,7 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "message required")
 		return
 	}
-	if len([]rune(msg)) > maxMessageRunes {
+	if utf8.RuneCountInString(msg) > maxMessageRunes {
 		writeJSONError(w, http.StatusBadRequest, "message too long")
 		return
 	}
@@ -228,6 +256,12 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	// Cutover complete: the ADK loop, same tier for tools and persona
 	// (unlike ClientChat's anon/client split -- here the session token
 	// pins the tenant, so the role's own tool set is safe).
+	release, ok := h.acquireTurn()
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "server busy — coba lagi")
+		return
+	}
+	defer release()
 	reply, err := h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
 		if quarantineErr(w, tenant, err) {

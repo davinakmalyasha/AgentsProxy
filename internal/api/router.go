@@ -66,6 +66,7 @@ func NewRouter(d Deps) http.Handler {
 			RDB:  d.Redis,
 			Auth: d.Auth,
 			ADK:  d.ADK,
+			sem:  make(chan struct{}, maxConcurrentAgentTurns),
 		}
 		r.Route("/agent", func(r chi.Router) {
 			// Isolated bucket: chat quota must not be eaten by landing polls
