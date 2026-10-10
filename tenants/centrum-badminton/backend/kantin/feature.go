@@ -788,11 +788,14 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		}
 		// Set the server-computed total from the inserted lines — no
 		// Go-side accumulator, so a deadlock retry cannot double-count.
+		// Note: every bound param is referenced ($1 scopes the tenant):
+		// an unreferenced $n fails the whole statement with 42P18
+		// ("could not determine data type"), not a silent skip.
 		if err := tx.QueryRow(r.Context(),
 			`UPDATE sports_kantin_sales SET total = (
 				SELECT COALESCE(SUM(unit_price * qty), 0)
 				  FROM sports_kantin_sale_items WHERE sale_id = $2::uuid
-			) WHERE id = $2::uuid RETURNING total`,
+			) WHERE id = $2::uuid AND tenant_id = $1 RETURNING total`,
 			idn.TenantID(), saleID).Scan(&total); err != nil {
 			return err
 		}
@@ -833,8 +836,7 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 			records.WriteJSONError(w, http.StatusConflict, msg)
 			return
 		}
-		// TEMPORARY-CI-DEBUG: echo the real error until the sale 500 is diagnosed.
-		records.WriteJSONError(w, http.StatusInternalServerError, "internal: "+err.Error())
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	records.WriteJSON(w, http.StatusCreated, map[string]any{"id": saleID, "total": total})
