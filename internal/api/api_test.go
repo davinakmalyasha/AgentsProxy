@@ -664,7 +664,7 @@ func TestAdmin_ContractBump(t *testing.T) {
 		body string
 		want int
 	}{
-		"unknown feature": {alphaID, `{"feature":"nope","version":1}`, 400},
+		"unknown feature":  {alphaID, `{"feature":"nope","version":1}`, 400},
 		"ahead of catalog": {alphaID, `{"feature":"bookings","version":99}`, 400},
 		"version zero":     {alphaID, `{"feature":"bookings","version":0}`, 400},
 		"empty feature":    {alphaID, `{"feature":"","version":1}`, 400},

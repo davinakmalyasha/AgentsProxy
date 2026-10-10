@@ -208,6 +208,7 @@ func TestAdapterRejectsBadArgs(t *testing.T) {
 		t.Errorf("reply = %q", reply)
 	}
 }
+
 // TestQuarantinedTenantNeverReachesModel: a fenced tenant fails closed
 // with the sentinel error before any model spend (trip.calls stays 0).
 // A healthy tenant proceeds to the model normally: the fence is scoped.

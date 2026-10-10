@@ -35,19 +35,19 @@ type Config struct {
 	CostOutPerMtok float64
 	// Daily LLM-call money caps per role: the guard on the single
 	// shared LLM_API_KEY. Tunable per deploy without recompiling.
-	CapCallsClient  int
-	CapCallsStaff   int
-	CapCallsOwner   int
-	RPDCallsClient  int
-	RPDCallsStaff   int
-	RPDCallsOwner   int
-	SentryDSN          string
-	SentryEnv          string
-	SentryRelease      string
-	TracesSampleRate   float64
-	DBPoolMin          int
-	DBPoolMax          int
-	DBSimpleProtocol   bool
+	CapCallsClient   int
+	CapCallsStaff    int
+	CapCallsOwner    int
+	RPDCallsClient   int
+	RPDCallsStaff    int
+	RPDCallsOwner    int
+	SentryDSN        string
+	SentryEnv        string
+	SentryRelease    string
+	TracesSampleRate float64
+	DBPoolMin        int
+	DBPoolMax        int
+	DBSimpleProtocol bool
 	// Admin pool (migrations + admin endpoints + workers) talks to the
 	// DIRECT 5432 connection in session mode, where Supabase caps sessions
 	// (pool_size 15 on small projects). It must park almost nothing: boot
@@ -103,15 +103,15 @@ func Load() (*Config, error) {
 		MaxTokensPerReq:         getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
 		RateLimitPerMinute:      getenvInt("RATE_LIMIT_PER_MINUTE", 180),
 		AllowOrigins:            splitCSV(getenv("ALLOW_ORIGINS", "*")),
-		TrustedProxyCIDRs:     splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
-		CostInPerMtok:         getenvFloatUnbounded("LLM_COST_IN_PER_MTOK", 0.14),
-		CostOutPerMtok:        getenvFloatUnbounded("LLM_COST_OUT_PER_MTOK", 0.28),
-		CapCallsClient:        getenvInt("CAP_CALLS_CLIENT", 20),
-		CapCallsStaff:         getenvInt("CAP_CALLS_PEGAWAI", 80),
-		CapCallsOwner:         getenvInt("CAP_CALLS_OWNER", 150),
-		RPDCallsClient:        getenvInt("RPD_CALLS_CLIENT", 30),
-		RPDCallsStaff:         getenvInt("RPD_CALLS_PEGAWAI", 80),
-		RPDCallsOwner:         getenvInt("RPD_CALLS_OWNER", 150),
+		TrustedProxyCIDRs:       splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
+		CostInPerMtok:           getenvFloatUnbounded("LLM_COST_IN_PER_MTOK", 0.14),
+		CostOutPerMtok:          getenvFloatUnbounded("LLM_COST_OUT_PER_MTOK", 0.28),
+		CapCallsClient:          getenvInt("CAP_CALLS_CLIENT", 20),
+		CapCallsStaff:           getenvInt("CAP_CALLS_PEGAWAI", 80),
+		CapCallsOwner:           getenvInt("CAP_CALLS_OWNER", 150),
+		RPDCallsClient:          getenvInt("RPD_CALLS_CLIENT", 30),
+		RPDCallsStaff:           getenvInt("RPD_CALLS_PEGAWAI", 80),
+		RPDCallsOwner:           getenvInt("RPD_CALLS_OWNER", 150),
 		SentryDSN:               os.Getenv("SENTRY_DSN"),
 		SentryEnv:               getenv("SENTRY_ENV", ""),
 		SentryRelease:           getenv("SENTRY_RELEASE", ""),

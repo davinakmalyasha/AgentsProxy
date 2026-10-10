@@ -118,18 +118,18 @@ func NewRouter(d Deps) http.Handler {
 			adminPool = d.Pool
 		}
 
-	r.Route("/admin", func(r chi.Router) {
-		r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
-		adm := &Admin{Pool: adminPool, Cache: d.Cache}
-		r.Post("/clients", adm.Create)
-		r.Get("/clients", adm.List)
-		r.Patch("/clients/{id}", records.WithValidID(adm.Patch))
-		r.Post("/clients/{id}/contract", records.WithValidID(adm.ContractBump))
-		r.Get("/usage", adm.Usage)
-		thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool}
-		r.Get("/tenant-health", TenantHealth(thDeps))
-		r.Post("/tenant-health/reload", TenantReload(thDeps))
-	})
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
+			adm := &Admin{Pool: adminPool, Cache: d.Cache}
+			r.Post("/clients", adm.Create)
+			r.Get("/clients", adm.List)
+			r.Patch("/clients/{id}", records.WithValidID(adm.Patch))
+			r.Post("/clients/{id}/contract", records.WithValidID(adm.ContractBump))
+			r.Get("/usage", adm.Usage)
+			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool}
+			r.Get("/tenant-health", TenantHealth(thDeps))
+			r.Post("/tenant-health/reload", TenantReload(thDeps))
+		})
 	})
 
 	return r

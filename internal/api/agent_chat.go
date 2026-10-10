@@ -166,6 +166,7 @@ func quarantineErr(w http.ResponseWriter, tenant string, err error) bool {
 	}
 	return false
 }
+
 // clientIP lives in clientip.go (trust-boundary aware shared helper).
 // ClearHistory deletes the caller's client-bot memory (landing "Bersihkan
 // riwayat"). Client-only by design: staff/owner memory (keyed by email) is

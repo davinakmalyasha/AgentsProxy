@@ -29,12 +29,12 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	// Phase 4/6 sports-vertical custom features.
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
-	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
+	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
@@ -402,6 +402,7 @@ func main() {
 //     them and a restart does not silently unfence;
 //   - rows already present (previous instance, or fenced by hand) are
 //     loaded into this process's registry.
+//
 // A boot failure here is fatal: silent divergence between the registry
 // and the table would fence tenants for one driver but not the other.
 func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, badTenants map[string]string) {
