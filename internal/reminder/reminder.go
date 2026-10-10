@@ -235,8 +235,8 @@ var errHandledDead = errors.New("reminder dead-lettered")
 const maxAttempts = 5
 
 // bumpAttempts records a transient send failure and releases the claim
-// so the row becomes visible to the next tick. Mirrors
-// private.fail_reminder (migration 031) including maxAttempts = 5.
+// so the row becomes visible to the next tick. Mirrors the retired
+// private.fail_reminder (dropped in 055) including maxAttempts = 5.
 //
 // The claim design forces one change from the original: the old query
 // left `status` untouched because rows were never claimed. A claimed

@@ -58,7 +58,11 @@ func Init(o Options) {
 		Release:          release,
 		ServerName:       o.ServerName,
 		TracesSampleRate: traces,
-		AttachStacktrace: true,
+		// No AttachStacktrace: with it, every captured error mints a
+		// full goroutine stack. Panics still carry stacks (the SDK
+		// attaches those on Recover regardless), which is the only
+		// place a stack is worth its bytes.
+		AttachStacktrace: false,
 		BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			scrubPII(e)
 			return e
