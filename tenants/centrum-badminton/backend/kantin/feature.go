@@ -833,7 +833,8 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 			records.WriteJSONError(w, http.StatusConflict, msg)
 			return
 		}
-		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		// TEMPORARY-CI-DEBUG: echo the real error until the sale 500 is diagnosed.
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal: "+err.Error())
 		return
 	}
 	records.WriteJSON(w, http.StatusCreated, map[string]any{"id": saleID, "total": total})
