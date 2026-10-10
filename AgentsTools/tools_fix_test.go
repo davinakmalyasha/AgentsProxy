@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -396,5 +397,72 @@ func TestKantinSummary_RespectsDate(t *testing.T) {
 	}
 	if !strings.Contains(out, "20000") || strings.Contains(out, "99999") {
 		t.Errorf("query_kantin_summary=%q want today's 20000, not yesterday's 99999", out)
+	}
+}
+
+// TestQueryRangeSummary_SingleRPC pins the private.range_summary RPC
+// (migration 056): one booking + payment + expense + kantin sale seeded,
+// the dashboard tool must report all four sources in one round trip.
+// Tombstoned/voided rows and out-of-range rows must not leak in.
+func TestQueryRangeSummary_SingleRPC(t *testing.T) {
+	ctx, pool, admin := toolTestPool(t)
+	tenant := "tool-test"
+	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
+	tomorrow := time.Now().In(agentstools.WibLoc()).AddDate(0, 0, 1).Format("2006-01-02")
+	// noonWIB renders a WIB-noon timestamptz from a date param $N.
+	noonWIB := func(n int) string {
+		return `(($` + strconv.Itoa(n) + `::date + time '12:00') AT TIME ZONE 'Asia/Jakarta')`
+	}
+
+	var bookingID string
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 SELECT $1, id, $2::date, '19:00'::time, '20:00'::time, 'Range', 'confirmed', 100000
+		   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1 RETURNING id::text`,
+		tenant, today).Scan(&bookingID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, paid_at)
+		 VALUES ($1, $2, 100000, 'cash', `+noonWIB(3)+`)`, tenant, bookingID, today); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, paid_at, deleted_at)
+		 VALUES ($1, $2, 777000, 'cash', `+noonWIB(3)+`, now())`, tenant, bookingID, today); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_expenses (tenant_id, amount, spent_at) VALUES ($1, 30000, $2::date)`,
+		tenant, today); err != nil {
+		t.Fatal(err)
+	}
+	var saleID string
+	if err := admin.QueryRow(ctx,
+		`INSERT INTO sports_kantin_sales (tenant_id, total, created_at)
+		 VALUES ($1, 25000, `+noonWIB(2)+`) RETURNING id::text`,
+		tenant, today).Scan(&saleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx,
+		`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
+		 VALUES ($1,$2,'Teh',1,25000,10000)`, tenant, saleID); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]string{"from": today, "to": tomorrow})
+	out := runTool(t, pool, "query_range_summary").Run(ctx, tenant, args)
+	if strings.Contains(out, "error:") {
+		t.Fatalf("query_range_summary error: %s", out)
+	}
+	// Received 100000 cash + 25000 kantin = Rp125.000 (Idr, dotted);
+	// expenses/net render with %.0f (no separator): 30000 / 95000.
+	for _, want := range []string{"125.000", "expenses 30000", "net 95000", "payments 1", "bookings 1", "best day " + today, "19:00 x1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("query_range_summary=%q missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "777.000") || strings.Contains(out, "777000") {
+		t.Errorf("query_range_summary=%q leaked the tombstoned 777000 payment", out)
 	}
 }

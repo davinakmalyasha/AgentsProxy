@@ -59,39 +59,15 @@ func (b Basis) Received() float64 { return b.Cash + b.QRIS + b.Other + b.Kantin 
 // LoadBasis reads both bases for [from, to). Payment and expense dates are
 // timestamptz and are compared in WIB, matching how they are entered;
 // booking and expense dates are plain dates.
+//
+// One round trip via private.range_summary (migration 056); the three
+// per-table SELECTs it replaced are the function's subqueries verbatim.
 func LoadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (Basis, error) {
-	var b Basis
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount) FILTER (WHERE method='cash'),0),
-		        COALESCE(SUM(amount) FILTER (WHERE method='qris'),0),
-		        COALESCE(SUM(amount) FILTER (WHERE method NOT IN ('cash','qris')),0),
-		        COUNT(*)
-		   FROM sports_payments
-		  WHERE tenant_id=$1
-		    AND deleted_at IS NULL
-		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
-		    AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
-		tenantID, from, to).Scan(&b.Cash, &b.QRIS, &b.Other, &b.Count); err != nil {
-		return b, err
+	s, err := LoadRangeSummary(ctx, tx, tenantID, from, to)
+	if err != nil {
+		return Basis{}, err
 	}
-	// Committed value, excluding slots that will never be charged.
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(COALESCE(override_price, price)),0)
-		   FROM sports_bookings
-		  WHERE tenant_id=$1 AND date >= $2::date AND date < $3::date
-		    AND status IN ('confirmed','checked_in','completed')`,
-		tenantID, from, to).Scan(&b.Booked); err != nil {
-		return b, err
-	}
-	// voided_at IS NULL: a voided sale is a correction, not revenue. Without
-	// this the agent would keep reporting money that was taken back.
-	return b, tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(total),0) FROM sports_kantin_sales
-		  WHERE tenant_id=$1
-		    AND voided_at IS NULL
-		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date
-		    AND (created_at AT TIME ZONE 'Asia/Jakarta')::date <  $3::date`,
-		tenantID, from, to).Scan(&b.Kantin)
+	return s.Basis(), nil
 }
 
 // Describe renders the basis in one sentence so every tool phrases the

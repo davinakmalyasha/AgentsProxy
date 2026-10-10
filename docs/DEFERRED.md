@@ -100,6 +100,11 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   ISOLATION CONTRACT in `pgx_sessions.go`); DB-enforced policy needs
   tx-scoped `set_config` on the read paths (+3 RTs/turn on the hottest
   path) — do it only with integration coverage, not blind.
+  ENFORCED 2026-10-10 by `TestSessionStore_TenantIsolation`
+  (`internal/adkrunner/session_isolation_test.go`): cross-app Get/List/
+  Delete leak checks plus fail-closed empty-app_name at all four entry
+  points (Create/Get/List/Delete). The test, not the policy, is the
+  enforcement until the GUC tradeoff is re-measured.
   Trigger: any raw-SQL-via-app_runtime path, or a second reviewer.
 - **Rate-limiter consolidation**: 3 Lua round trips per request
   (global + scope + client). Merging needs middleware-chain
