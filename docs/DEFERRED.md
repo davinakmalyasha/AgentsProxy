@@ -46,6 +46,14 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   reads to owner; `payments:patch` to owner. CHANGES who can do what —
   needs frontend coordination + owner sign-off, never silent.
   Trigger: second staff role, external API consumers, or any auth incident.
+- **Fresh-DB RLS gap on clients/usage**: RLS on those two tables was
+  enabled out-of-band on production (033), never by migration — so a
+  database built purely from migrations has NO RLS there and the
+  `app_runtime` table grants govern alone. Adding `ENABLE ROW LEVEL
+  SECURITY` to a migration breaks the `app` TEST role (it has table
+  grants but no policies, and a test-only role cannot be named in a
+  production migration). Fixing properly needs test-role rework first.
+  Trigger: new-environment provisioning, or the test-role cleanup.
 - **GDPR export/erase**: customer delete orphans PII copies in bookings/payments.
   Trigger: customer request, second tenant, or regulatory need.
 - **Admin-key rotation**: key-id + overlap, no flag day.
