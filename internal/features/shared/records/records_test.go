@@ -29,6 +29,7 @@ type recordsHarness struct {
 	router http.Handler
 	pool   *pgxpool.Pool
 	rdb    *redis.Client
+	admin  *pgxpool.Pool // superuser: bypasses RLS for assertions + cleanup
 }
 
 func setupRecords(t *testing.T) *recordsHarness {
@@ -90,7 +91,7 @@ func setupRecords(t *testing.T) *recordsHarness {
 	rec := New(recDeps)
 	router := rec.Routes("fnb")
 	wrapped := WithClientAuth(recDeps)(router)
-	return &recordsHarness{router: wrapped, pool: pool, rdb: rdb}
+	return &recordsHarness{router: wrapped, pool: pool, rdb: rdb, admin: adminPool}
 }
 
 func bootstrapAppRole(ctx context.Context, admin *pgxpool.Pool) error {
@@ -430,4 +431,44 @@ func TestRecords_StatusUnknownReturnsZero(t *testing.T) {
 		t.Errorf("status=nosuch code=%d want 400", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestRecords_AdapterCreateRecordsUsage pins the usage.kind contract for the
+// shared-feature adapter: usage.kind is CHECKed to ('chat','business'), so an
+// adapter create must record metering as 'business'. Passing Spec.Name here
+// used to fail the CHECK on every call and silently drop the metering row
+// (best-effort Warn), so the adapter create looked fine while recording
+// nothing.
+func TestRecords_AdapterCreateRecordsUsage(t *testing.T) {
+	h := setupRecords(t)
+	deps := Deps{Pool: h.pool, Cache: &cache.Client{DB: h.pool, RDB: h.rdb}}
+	adapter := NewFeatureAdapter(deps, FeatureSpec{Name: "menu", Kind: "item"}, "fnb")
+	router := WithClientAuth(deps)(adapter.Routes())
+
+	ctx := context.Background()
+	clientOf := `(SELECT id FROM clients WHERE tenant_id='tenant-a')`
+	var before int
+	if err := h.admin.QueryRow(ctx,
+		`SELECT count(*) FROM usage WHERE client_id = `+clientOf).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	resp := doReq(t, router, "POST", "/", "tok-a", `{"title":"Nasi Goreng","payload":{"price":25000}}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("adapter create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	resp.Body.Close()
+	var after int
+	var kind string
+	if err := h.admin.QueryRow(ctx,
+		`SELECT count(*),
+		        (SELECT kind FROM usage WHERE client_id = `+clientOf+` ORDER BY id DESC LIMIT 1)
+		   FROM usage WHERE client_id = `+clientOf).Scan(&after, &kind); err != nil {
+		t.Fatal(err)
+	}
+	if after != before+1 {
+		t.Errorf("usage rows after=%d before=%d want exactly one new row", after, before)
+	}
+	if kind != "business" {
+		t.Errorf("usage kind=%q want business", kind)
+	}
 }

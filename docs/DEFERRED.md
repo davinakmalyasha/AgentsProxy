@@ -107,8 +107,10 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   ~4ms. If p99 says otherwise, the fix is moving Upstash to
   ap-southeast-1 (RUNBOOK-vercel), not code.
   Trigger: measured limiter latency on the request path.
-- **Reminder delivery repair**: `reminder-tick` fires into the deleted
-  `/deliver-reminders` (kept, scheduled-for-repair). The 3 orphaned
+- **Reminder delivery repair**: `reminder-tick` UNSCHEDULED on prod 2026-10-10
+  (was firing into the deleted `/deliver-reminders`; per 042 header, not the
+  old keep-it-scheduled note). Re-schedule via `ops/schedule-delivery.sql`
+  when the delivery target lands. The 3 orphaned
   driver SQL functions were dropped in 055; a repair re-adds what it
   needs (see 031/042/048 for the bodies).
   Trigger: owner decision on the delivery target (PWA transport vs Edge).
