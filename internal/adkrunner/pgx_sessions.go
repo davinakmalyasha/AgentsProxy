@@ -39,6 +39,18 @@ type pgxSessionService struct {
 	pool *pgxpool.Pool
 }
 
+// TENANT ISOLATION CONTRACT: app_name IS the tenant slug (migration
+// 041), and every query in this file filters on it — Get requires all
+// three of (app_name, user_id, session_id), List requires app_name,
+// writes carry it on every row. The table RLS policies are USING (true)
+// (041), so this application-layer scoping is the entire enforcement:
+// a new query MUST filter app_name, or it reads every tenant's
+// transcripts. There is no test that can assert this without a live
+// DB; it is enforced by review. A future migration may add a
+// tenant_id column + restrictive policy once the service sets the
+// app.tenant_id GUC (needs tx-scoped set_config on the read paths,
+// which costs round trips — not done lightly on this hot path).
+
 // NewPgxSessionService builds the pgx-backed session store on the app
 // pool. No extra connections: every query runs on the shared pool.
 func NewPgxSessionService(pool *pgxpool.Pool) session.Service {

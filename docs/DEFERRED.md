@@ -85,6 +85,25 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   retention indexes + BRIN. Backup scheduling (R18) still open.
 - **Pool tuning beyond admin**: runtime pool Min/Max per deploy shape.
   Trigger: another EMAXCONNSESSION-class incident.
+- **ADK session-table RLS**: `sessions/events/app_states/user_states`
+  are `USING (true)`; isolation rests entirely on every Go query
+  filtering `app_name` (= tenant slug). Decision 2026-10: app-layer
+  filtering verified complete on all 13 query sites (see the TENANT
+  ISOLATION CONTRACT in `pgx_sessions.go`); DB-enforced policy needs
+  tx-scoped `set_config` on the read paths (+3 RTs/turn on the hottest
+  path) — do it only with integration coverage, not blind.
+  Trigger: any raw-SQL-via-app_runtime path, or a second reviewer.
+- **Rate-limiter consolidation**: 3 Lua round trips per request
+  (global + scope + client). Merging needs middleware-chain
+  restructuring around pre/post-auth identity — bypass risk outweighs
+  ~4ms. If p99 says otherwise, the fix is moving Upstash to
+  ap-southeast-1 (RUNBOOK-vercel), not code.
+  Trigger: measured limiter latency on the request path.
+- **Reminder delivery repair**: `reminder-tick` fires into the deleted
+  `/deliver-reminders` (kept, scheduled-for-repair). The 3 orphaned
+  driver SQL functions were dropped in 055; a repair re-adds what it
+  needs (see 031/042/048 for the bodies).
+  Trigger: owner decision on the delivery target (PWA transport vs Edge).
 
 ## Done (moved here from planning — landed)
 
