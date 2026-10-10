@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
 // Rate limiting comes in two halves, and the split is the whole point:
@@ -89,16 +91,13 @@ func Allow(ctx context.Context, rdb *redis.Client, perMinute int, scope, key str
 	bucket := now.Format("200601021504") // YYYYMMDDHHmm
 	redisKey := fmt.Sprintf("rl:%s:%s:%s", scope, key, bucket)
 
-	n, err := rdb.Incr(ctx, redisKey).Result()
+	n, err := redisx.IncrExpireRun(ctx, rdb, redisKey, 65*time.Second)
 	if err != nil {
 		// Deliberately fail-open AND quiet: a cache outage must never
 		// block traffic, and Warn here would page every minute during
 		// an outage for a non-money throttle.
 		slog.Warn("rate limit redis, failing open", "scope", scope, "err", err)
 		return true, 0 // fail open
-	}
-	if n == 1 {
-		_ = rdb.Expire(ctx, redisKey, 65*time.Second).Err()
 	}
 	if int(n) > perMinute {
 		return false, 60 - now.Second()

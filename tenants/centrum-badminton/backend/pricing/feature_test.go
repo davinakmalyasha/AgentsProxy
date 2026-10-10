@@ -112,6 +112,7 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT ON tenant_schema_contracts TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
@@ -234,6 +235,23 @@ func TestPricing_CRUD(t *testing.T) {
 	if resp4.StatusCode != 409 {
 		t.Errorf("dup valid_from status=%d want 409", resp4.StatusCode)
 	}
+}
+
+// TestPricing_PatchRejectsBadTime: unparsable HH:MM fails closed with 400
+// (the raw string is concatenated with ::time — garbage would 500 in SQL).
+func TestPricing_PatchRejectsBadTime(t *testing.T) {
+	h := setup(t)
+	resp := doReq(t, h.router, "POST", "/pricing", "tok-pr-a",
+		`{"valid_from":"2026-01-01","price_day":20000,"price_evening":40000}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	id, _ := readJSON(t, resp)["id"].(string)
+	resp2 := doReq(t, h.router, "PATCH", "/pricing/"+id, "tok-pr-a", `{"day_end":"tomorrow"}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("bad time status=%d want 400", resp2.StatusCode)
+	}
+	readAll(t, resp2)
 }
 
 func TestPricing_PriceForDayAndEvening(t *testing.T) {

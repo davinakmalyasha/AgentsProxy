@@ -39,6 +39,18 @@ type pgxSessionService struct {
 	pool *pgxpool.Pool
 }
 
+// TENANT ISOLATION CONTRACT: app_name IS the tenant slug (migration
+// 041), and every query in this file filters on it — Get requires all
+// three of (app_name, user_id, session_id), List requires app_name,
+// writes carry it on every row. The table RLS policies are USING (true)
+// (041), so this application-layer scoping is the entire enforcement:
+// a new query MUST filter app_name, or it reads every tenant's
+// transcripts. There is no test that can assert this without a live
+// DB; it is enforced by review. A future migration may add a
+// tenant_id column + restrictive policy once the service sets the
+// app.tenant_id GUC (needs tx-scoped set_config on the read paths,
+// which costs round trips — not done lightly on this hot path).
+
 // NewPgxSessionService builds the pgx-backed session store on the app
 // pool. No extra connections: every query runs on the shared pool.
 func NewPgxSessionService(pool *pgxpool.Pool) session.Service {
@@ -209,43 +221,6 @@ func encodeDynamicJSON(raw json.RawMessage) (any, error) {
 	return string(raw), nil
 }
 
-func decodeDynamicJSON(src any) (json.RawMessage, error) {
-	if src == nil {
-		return nil, nil
-	}
-	// pgx may hand back the JSON null literal for NULL columns; treat it
-	// as NULL so empty decodes stay nil, matching the reference behavior.
-	// (Stored 'null' can only come from a buggy writer; reading it as nil
-	// is still the honest interpretation.)
-	normalize := func(b []byte) (json.RawMessage, error) {
-		if len(b) == 0 || string(b) == "null" {
-			return nil, nil
-		}
-		if !json.Valid(b) {
-			return nil, fmt.Errorf("invalid JSON received from database: %s", string(b))
-		}
-		out := make(json.RawMessage, len(b))
-		copy(out, b)
-		return out, nil
-	}
-	// pgx decodes jsonb into Go values when the target is any; re-encode
-	// to raw bytes so callers unmarshal concrete types themselves.
-	switch v := src.(type) {
-	case json.RawMessage:
-		return normalize(v)
-	case []byte:
-		return normalize(v)
-	case string:
-		return normalize([]byte(v))
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal JSONB value: %T", src)
-		}
-		return normalize(b)
-	}
-}
-
 func encodeActions(a session.EventActions) ([]byte, error) {
 	return json.Marshal(a)
 }
@@ -281,6 +256,9 @@ func derefOrZero(s *string) string {
 // --- state scope helpers (same rules as ADK: app:/user:/temp:) ---
 
 func extractStateDeltas(delta map[string]any) (app, user, sess map[string]any) {
+	if len(delta) == 0 {
+		return nil, nil, nil
+	}
 	app = make(map[string]any)
 	user = make(map[string]any)
 	sess = make(map[string]any)
@@ -333,6 +311,17 @@ const eventColumns = `id, app_name, user_id, session_id, invocation_id, author, 
 	branch, isolation_scope, "timestamp", content, grounding_metadata, custom_metadata,
 	usage_metadata, citation_metadata, input_transcription, output_transcription,
 	partial, turn_complete, error_code, error_message, interrupted`
+
+// eventInsertSQL is the precomputed event INSERT: 27 placeholders with
+// ::jsonb casts on the 12 jsonb columns (everything except actions,
+// which is bytea). Built once at compile time instead of 28 Sprintf +
+// a 12-entry map literal + a Join on every event.
+const eventInsertSQL = `INSERT INTO events (` + eventColumns + `) VALUES (` +
+	`$1,$2,$3,$4,$5,$6,$7,` +
+	`$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,` +
+	`$13,$14,$15,` +
+	`$16::jsonb,$17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21::jsonb,$22::jsonb,` +
+	`$23,$24,$25,$26,$27)`
 
 // mustJSONMap encodes maps and lists: nil or empty is NULL upstream,
 // so only non-empty values are stored.
@@ -388,10 +377,11 @@ func eventToRow(sess *pgxLocalSession, ev *session.Event) ([]any, error) {
 		}
 		return b
 	}
-	args := []any{
+	args := make([]any, 0, 27)
+	args = append(args,
 		ev.ID, sess.AppName(), sess.UserID(), sess.ID(),
 		ev.InvocationID, ev.Author, actions,
-	}
+	)
 	for _, raw := range []json.RawMessage{
 		strList(ev.LongRunningToolIDs),
 		strList(ev.Routes),
@@ -901,7 +891,7 @@ func (s *pgxSessionService) applyEvent(ctx context.Context, sess *pgxLocalSessio
 	}()
 
 	var storedUpdate time.Time
-	var storedStateSrc any
+	var storedStateSrc []byte
 	err = tx.QueryRow(ctx,
 		`SELECT state, update_time FROM sessions WHERE app_name=$1 AND user_id=$2 AND id=$3`,
 		sess.AppName(), sess.UserID(), sess.ID()).Scan(&storedStateSrc, &storedUpdate)
@@ -922,80 +912,61 @@ func (s *pgxSessionService) applyEvent(ctx context.Context, sess *pgxLocalSessio
 			storedUpdate.Format(time.RFC3339Nano))
 	}
 
-	appState, _, err := fetchAppStateTx(ctx, tx, sess.AppName())
-	if err != nil {
-		return err
-	}
-	userState, _, err := fetchUserStateTx(ctx, tx, sess.AppName(), sess.UserID())
-	if err != nil {
-		return err
-	}
-
 	appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+	// Fetch-then-merge only when there is something to merge: a typical
+	// event carries no app:/user: delta, so the old unconditional
+	// fetches wasted 2 of ~7 round trips per event, every event.
 	if len(appDelta) > 0 {
+		appState, _, err := fetchAppStateTx(ctx, tx, sess.AppName())
+		if err != nil {
+			return err
+		}
 		maps.Copy(appState, appDelta)
 		if err := upsertAppStateTx(ctx, tx, sess.AppName(), appState, event.Timestamp); err != nil {
 			return fmt.Errorf("failed to save app state: %w", err)
 		}
 	}
 	if len(userDelta) > 0 {
+		userState, _, err := fetchUserStateTx(ctx, tx, sess.AppName(), sess.UserID())
+		if err != nil {
+			return err
+		}
 		maps.Copy(userState, userDelta)
 		if err := upsertUserStateTx(ctx, tx, sess.AppName(), sess.UserID(), userState, event.Timestamp); err != nil {
 			return fmt.Errorf("failed to save user state: %w", err)
 		}
 	}
-	var sessionJSON string
 	if len(sessionDelta) > 0 {
 		merged, err := decodeStateMap(storedStateSrc)
 		if err != nil {
 			return fmt.Errorf("failed to get session: %w", err)
 		}
 		maps.Copy(merged, sessionDelta)
-		sessionJSON, err = encodeStateMap(merged)
+		sessionJSON, err := encodeStateMap(merged)
 		if err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
-	} else {
-		// No session delta: re-persist the stored state with the new
-		// timestamp (the UPDATE below always refreshes update_time).
-		// storedStateSrc came from a jsonb column; re-encode through a
-		// map so formatting stays canonical.
-		merged, err := decodeStateMap(storedStateSrc)
-		if err != nil {
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-		sessionJSON, err = encodeStateMap(merged)
-		if err != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET state=$1::jsonb, update_time=$2 WHERE app_name=$3 AND user_id=$4 AND id=$5`,
+			sessionJSON, event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
+	} else if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET update_time=$1 WHERE app_name=$2 AND user_id=$3 AND id=$4`,
+		event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
+		// No session delta: refresh the timestamp without rewriting
+		// the state jsonb. The old path re-decoded, re-encoded, and
+		// rewrote the whole state on every event — a full row version
+		// plus index churn for a value that did not change.
+		return fmt.Errorf("failed to save session state: %w", err)
 	}
 
 	vals, err := eventToRow(sess, event)
 	if err != nil {
 		return fmt.Errorf("failed to map event to storage model: %w", err)
 	}
-	placeholders := make([]string, 0, len(vals))
-	for i := range vals {
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
-	}
-	// jsonb-typed columns need explicit casts; text/bool/bytea/timestamptz
-	// ride on pgx's inference.
-	jsonCols := map[int]bool{7: true, 8: true, 9: true, 10: true, 11: true, 15: true, 16: true, 17: true, 18: true, 19: true, 20: true, 21: true}
-	for i := range placeholders {
-		if jsonCols[i] {
-			placeholders[i] += "::jsonb"
-		}
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO events (`+eventColumns+`) VALUES (`+strings.Join(placeholders, ",")+`)`,
-		vals...); err != nil {
+	if _, err := tx.Exec(ctx, eventInsertSQL, vals...); err != nil {
 		return fmt.Errorf("failed to save event: %w", err)
-	}
-
-	if _, err := tx.Exec(ctx,
-		`UPDATE sessions SET state=$1::jsonb, update_time=$2 WHERE app_name=$3 AND user_id=$4 AND id=$5`,
-		sessionJSON, event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1020,7 +991,10 @@ type pgxQuerier interface {
 }
 
 func fetchAppStateTx(ctx context.Context, q pgxQuerier, appName string) (map[string]any, time.Time, error) {
-	var src any
+	// Scan jsonb into bytes, not any: pgx decodes jsonb-to-any via
+	// reflection into map[string]any (~2x slower than bytes +
+	// json.Unmarshal), and every turn pays it three times.
+	var src []byte
 	var ut time.Time
 	err := q.QueryRow(ctx,
 		`SELECT state, update_time FROM app_states WHERE app_name=$1`, appName).Scan(&src, &ut)
@@ -1043,7 +1017,7 @@ func fetchUserState(ctx context.Context, db pgxQuerier, appName, userID string) 
 }
 
 func fetchUserStateTx(ctx context.Context, q pgxQuerier, appName, userID string) (map[string]any, time.Time, error) {
-	var src any
+	var src []byte
 	var ut time.Time
 	err := q.QueryRow(ctx,
 		`SELECT state, update_time FROM user_states WHERE app_name=$1 AND user_id=$2`,

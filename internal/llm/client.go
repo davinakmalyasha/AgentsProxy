@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 const (
@@ -19,18 +21,15 @@ const (
 
 // Message is one turn of the conversation.
 //
-// ToolCalls/ToolCallID are what make a real tool round-trip possible.
-// Without them the only way to return a result to the model is to fake it
-// as a user turn, which teaches the model that tool output is something
-// the user said â€” and leaves no id to correlate, so a model that emits two
-// calls cannot be answered unambiguously.
+// ToolCalls carries the provider's function-call request on responses.
+// This client never performs a tool round-trip itself (the ADK loop
+// does), so nothing here sets them on requests.
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// ToolCalls carries the provider's function-call request on the
+	// response path. The request path never sets it.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolCallID is set on role:"tool" messages and names the call this
-	// message answers.
-	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is one function invocation requested by the model.
@@ -51,15 +50,20 @@ type Client struct {
 	DefaultModel string
 	MaxTokens    int
 	HTTP         *http.Client
+	// chatURL is BaseURL + chatCompletionsPath, precomputed: the hot path
+	// concatenated it per request.
+	chatURL string
 }
 
 func New(baseURL, apiKey, model string, maxTokens int) *Client {
+	baseURL = strings.TrimRight(baseURL, "/")
 	return &Client{
-		BaseURL:      strings.TrimRight(baseURL, "/"),
+		BaseURL:      baseURL,
 		APIKey:       apiKey,
 		DefaultModel: model,
 		MaxTokens:    maxTokens,
-		HTTP:         &http.Client{Timeout: 60 * time.Second},
+		HTTP:         httpx.NewClient(60 * time.Second),
+		chatURL:      baseURL + chatCompletionsPath,
 	}
 }
 
@@ -90,14 +94,11 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// Completion is one model turn: either tool calls, or prose, or both.
+// Completion is one model turn: prose plus token counts. Tool calls
+// ride on Message.ToolCalls (read by the caller from the raw choice);
+// this struct carries only what the quota/metering path consumes.
 type Completion struct {
-	Content   string
-	ToolCalls []ToolCall
-	// FinishReason is the provider's own verdict ("stop",
-	// "tool_calls", "length"). Useful for telling "the model ignored the
-	// tool" apart from "the model ran out of tokens".
-	FinishReason  string
+	Content       string
 	PromptTokens  int
 	CompletionTok int
 }
@@ -152,7 +153,10 @@ func (c *Client) Complete(
 	if err != nil {
 		return nil, err
 	}
-	if status != 0 && strings.Contains(raw, "Invalid option") {
+	// Scan only small error bodies: the "Invalid option" shape is a ~100
+	// byte provider 400. A megabytes-large body is never it, and
+	// scanning the whole thing per error is pure CPU.
+	if status != 0 && len(raw) < 512 && bytes.Contains(raw, []byte("Invalid option")) {
 		// Provider dislikes "low"; try the explicit-thinking shape instead.
 		reasonNone := "none"
 		payload.ReasoningEffort = &reasonNone
@@ -166,7 +170,7 @@ func (c *Client) Complete(
 	}
 
 	var out chatResponse
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("%w: decode", ErrProvider)
 	}
 	if out.Error != nil {
@@ -178,8 +182,6 @@ func (c *Client) Complete(
 	choice0 := out.Choices[0]
 	comp := &Completion{
 		Content:       choice0.Message.Content,
-		ToolCalls:     choice0.Message.ToolCalls,
-		FinishReason:  choice0.FinishReason,
 		PromptTokens:  out.Usage.PromptTokens,
 		CompletionTok: out.Usage.CompletionTokens,
 	}
@@ -201,31 +203,33 @@ func IsReasoningModel(model string) bool {
 }
 
 // post sends one payload and returns the body plus a non-2xx status (0 when
-// the request itself failed, in which case err is set).
-func (c *Client) post(ctx context.Context, payload chatRequest) (string, int, error) {
+// the request itself failed, in which case err is set). The body is
+// returned as bytes: callers unmarshal from it directly, so one .xlsx of
+// a completion is never copied through string conversions.
+func (c *Client) post(ctx context.Context, payload chatRequest) ([]byte, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", 0, fmt.Errorf("marshal: %w", err)
+		return nil, 0, fmt.Errorf("marshal: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+chatCompletionsPath, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL, bytes.NewReader(body))
 	if err != nil {
-		return "", 0, fmt.Errorf("new request: %w", err)
+		return nil, 0, fmt.Errorf("new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: %v", ErrProvider, err)
+		return nil, 0, fmt.Errorf("%w: %v", ErrProvider, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: read body", ErrProvider)
+		return nil, 0, fmt.Errorf("%w: read body", ErrProvider)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return string(raw), resp.StatusCode, nil
+		return raw, resp.StatusCode, nil
 	}
-	return string(raw), 0, nil
+	return raw, 0, nil
 }

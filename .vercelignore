@@ -1,0 +1,21 @@
+# Keep the Vercel build container lean and make it structurally
+# impossible for secrets or local junk to land in the upload.
+#
+# tenants/ is REQUIRED (memory/skills .md embed into the binary via
+# tenantembed.go), so it is re-included after the blanket *.md rule.
+bin/
+data/
+docs/
+shots/
+appendonlydir/
+.playwright-mcp/
+.commandcode/
+supabase/
+ops/
+scripts/
+*.md
+!tenants/**/*.md
+*.png
+*.log
+*.rdb
+.env

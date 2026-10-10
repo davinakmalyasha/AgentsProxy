@@ -11,25 +11,23 @@ import (
 	"context"
 	"log/slog"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 )
 
-var (
-	enabled bool
-	mu      sync.RWMutex
-)
+// enabled is an atomic so the per-request Enabled check (logging
+// middleware, SlogHandler) costs no mutex.
+var enabled atomic.Bool
 
 // Options configures the Sentry client.
 type Options struct {
-	DSN                string
-	Environment        string
-	Release            string
-	TracesSampleRate   float64
-	ProfilesSampleRate float64
-	ServerName         string
+	DSN              string
+	Environment      string
+	Release          string
+	TracesSampleRate float64
+	ServerName       string
 }
 
 // Init configures the global Sentry client. If DSN is empty, Init is
@@ -49,7 +47,9 @@ func Init(o Options) {
 		release = "dev"
 	}
 	traces := o.TracesSampleRate
-	if traces == 0 {
+	// 0 is a valid explicit choice (disables tracing); only negative
+	// values are clamped, and config already rejects those.
+	if traces < 0 {
 		traces = 0.1
 	}
 	err := sentry.Init(sentry.ClientOptions{
@@ -58,7 +58,11 @@ func Init(o Options) {
 		Release:          release,
 		ServerName:       o.ServerName,
 		TracesSampleRate: traces,
-		AttachStacktrace: true,
+		// No AttachStacktrace: with it, every captured error mints a
+		// full goroutine stack. Panics still carry stacks (the SDK
+		// attaches those on Recover regardless), which is the only
+		// place a stack is worth its bytes.
+		AttachStacktrace: false,
 		BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			scrubPII(e)
 			return e
@@ -72,17 +76,13 @@ func Init(o Options) {
 		slog.Error("sentry init", "err", err)
 		return
 	}
-	mu.Lock()
-	enabled = true
-	mu.Unlock()
+	enabled.Store(true)
 	slog.Info("sentry initialised", "environment", env, "release", release, "traces_sample_rate", traces)
 }
 
 // Enabled reports whether Sentry is active.
 func Enabled() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return enabled
+	return enabled.Load()
 }
 
 // Flush waits up to d for queued events to send. No-op when disabled.
@@ -91,14 +91,6 @@ func Flush(d time.Duration) {
 		return
 	}
 	sentry.Flush(d)
-}
-
-// CaptureError sends an error event. No-op when disabled.
-func CaptureError(err error) {
-	if !Enabled() || err == nil {
-		return
-	}
-	sentry.CaptureException(err)
 }
 
 // CaptureMessage sends a message event. No-op when disabled.
@@ -123,18 +115,15 @@ func AddBreadcrumb(category, message string, data map[string]any) {
 	})
 }
 
-// CurrentHub returns the process-wide Sentry hub. No-op safe —
-// callers can ignore the result when Enabled() is false.
-func CurrentHub() *sentry.Hub { return sentry.CurrentHub() }
-
 // RecoverWith forwards a recovered panic on the given context to
-// Sentry. No-op when DSN empty.
+// Sentry. No-op when DSN empty. No synchronous flush: the deferred
+// Flush at process exit (or the next event's flush) delivers it; a
+// 2s blocking flush here would add 2s to a request already failing.
 func RecoverWith(ctx context.Context, rec interface{}) {
 	if !Enabled() {
 		return
 	}
 	sentry.CurrentHub().RecoverWithContext(ctx, rec)
-	sentry.Flush(2 * time.Second)
 }
 
 // SlogHandler wraps an inner slog handler and forwards Error-level
@@ -177,7 +166,7 @@ type slogRecordError struct {
 
 func (e *slogRecordError) Error() string { return e.record.Message }
 
-// scrubPII removes Authorization, X-Client-Token, and raw token
+// scrubPII removes auth tokens, session tokens, cookies, and secret-ish
 // values from a Sentry event before transmission.
 func scrubPII(e *sentry.Event) {
 	if e == nil {
@@ -210,10 +199,19 @@ func scrubPII(e *sentry.Event) {
 	}
 }
 
+// IsSensitive reports whether a log/event key carries a secret value.
+// Exported so the server's slog redactor and this package agree on one
+// list instead of drifting into two.
+func IsSensitive(k string) bool {
+	return isSensitive(k)
+}
+
 func isSensitive(k string) bool {
 	kl := strings.ToLower(k)
 	switch kl {
-	case "authorization", "x-client-token", "client_token", "x-admin-key", "cookie":
+	case "authorization", "x-client-token", "client_token", "x-admin-key",
+		"x-session-token", "session_token", "cookie", "set-cookie",
+		"api_key", "apikey", "dsn", "database_url", "token":
 		return true
 	}
 	return strings.Contains(kl, "password") || strings.Contains(kl, "secret")

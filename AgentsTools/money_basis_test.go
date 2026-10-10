@@ -53,19 +53,21 @@ func TestDescribeLabelsBothFigures(t *testing.T) {
 		t.Errorf("describe() must label both figures, got %q", got)
 	}
 	// Indonesian labels, matching how the model is prompted to answer.
-	if !strings.Contains(got, "terima 245000") {
+	// Amounts render Idr-style with thousand separators (245.000),
+	// the same rule every other money string uses.
+	if !strings.Contains(got, "terima 245.000") {
 		t.Errorf("describe() received total wrong, got %q", got)
 	}
-	if !strings.Contains(got, "teresan 400000") {
+	if !strings.Contains(got, "teresan 400.000") {
 		t.Errorf("describe() committed total wrong, got %q", got)
 	}
 	// The cash/qris split is what the owner reconciles against the till.
-	if !strings.Contains(got, "cash 120000") || !strings.Contains(got, "qris 80000") {
+	if !strings.Contains(got, "cash 120.000") || !strings.Contains(got, "qris 80.000") {
 		t.Errorf("describe() lost the payment method split, got %q", got)
 	}
 	// Canteen is money in too, and must be inside the received total
 	// rather than listed separately where it could be double-counted.
-	if !strings.Contains(got, "kantin 45000") {
+	if !strings.Contains(got, "kantin 45.000") {
 		t.Errorf("describe() lost the canteen figure, got %q", got)
 	}
 }

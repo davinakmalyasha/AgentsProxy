@@ -6,18 +6,34 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
-// MoneyCap is the per-tenant daily LLM-call cap for the owner tier.
-const MoneyCap = 150
+// Per-role daily LLM-call caps, set from config at boot (main.go).
+// They guard the single shared LLM_API_KEY: tunable per deploy
+// without recompiling. Defaults match the historical switches.
+var (
+	CapCallsClient = 20
+	CapCallsStaff  = 80
+	CapCallsOwner  = 150
+	RPDCallsClient = 30
+	RPDCallsStaff  = 80
+	RPDCallsOwner  = 150
+)
 
 // CapRDB is the Redis client used by the cost cap. Set once in
 // main.go wiring; tests leave it nil (no cap).
 var CapRDB *redis.Client
 
-// CapKey returns the Redis key for a tenant's daily call count.
-func CapKey(tenantID string) string {
-	return "agcap:" + tenantID + ":" + time.Now().Format("2006-01-02")
+// capTTL anchors a daily counter at next WIB midnight + 1h grace.
+// 24h-from-creation (the old TTL) lets a 23:59 key count yesterday's
+// spend for 24 more hours; midnight-anchored is both shorter and
+// semantically correct.
+func capTTL() time.Duration {
+	now := WibNow()
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	return midnight.Add(time.Hour).Sub(now)
 }
 
 // CostCapAllowedForRole checks per-tenant+role daily cap (20/80/150). Single LLM_API_KEY shared.
@@ -29,44 +45,37 @@ func CostCapAllowedForRole(ctx context.Context, tenantID, role string) bool {
 	if CapRDB == nil {
 		return true
 	}
-	cap := MoneyCap
+	cap := CapCallsOwner
 	switch role {
 	case "client":
-		cap = 20
+		cap = CapCallsClient
 	case "pegawai":
-		cap = 80
+		cap = CapCallsStaff
 	case "owner":
-		cap = 150
+		cap = CapCallsOwner
 	}
 	key := CapKeyForRole(tenantID, role)
-	n, err := CapRDB.Incr(ctx, key).Result()
+	// Atomic INCR + creator-set EXPIRE: the old split had a crash
+	// window that left immortal counters capping permanently.
+	n, err := redisx.IncrExpireRun(ctx, CapRDB, key, capTTL())
 	if err != nil {
 		slog.Error("cost cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
 		return false
 	}
-	if n == 1 {
-		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
-			slog.Warn("cost cap expire", "tenant", tenantID, "role", role, "err", err)
-		}
-	}
-	// Also increment legacy global key for backward compat / total view
-	if err := CapRDB.Incr(ctx, CapKey(tenantID)).Err(); err != nil {
-		slog.Warn("cost cap legacy incr", "tenant", tenantID, "err", err)
-	}
 	return n <= int64(cap)
 }
 
-// CapKeyForRole is the per-role key: agcap:{tenant}:{role}:{date}
+// CapKeyForRole is the per-role key: agcap:{tenant}:{role}:{date} (WIB day).
 func CapKeyForRole(tenantID, role string) string {
-	return "agcap:" + tenantID + ":" + role + ":" + time.Now().Format("2006-01-02")
+	return "agcap:" + tenantID + ":" + role + ":" + WibNow().Format("2006-01-02")
 }
 
-// Per-person RPD: agcap:{tenant}:{role}:{user}:{date}
+// Per-person RPD: agcap:{tenant}:{role}:{user}:{date} (WIB day).
 func RPDKeyForUser(tenantID, role, userID string) string {
 	if userID == "" {
 		userID = "anon"
 	}
-	return "rpd:" + tenantID + ":" + role + ":" + userID + ":" + time.Now().Format("2006-01-02")
+	return "rpd:" + tenantID + ":" + role + ":" + userID + ":" + WibNow().Format("2006-01-02")
 }
 
 // RPDCapAllowedForUser checks per-person daily cap (client 30, pegawai 80, owner 150)
@@ -76,25 +85,20 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 	if CapRDB == nil {
 		return true
 	}
-	cap := 150
+	cap := RPDCallsOwner
 	switch role {
 	case "client":
-		cap = 30
+		cap = RPDCallsClient
 	case "pegawai":
-		cap = 80
+		cap = RPDCallsStaff
 	case "owner":
-		cap = 150
+		cap = RPDCallsOwner
 	}
 	key := RPDKeyForUser(tenantID, role, userID)
-	n, err := CapRDB.Incr(ctx, key).Result()
+	n, err := redisx.IncrExpireRun(ctx, CapRDB, key, capTTL())
 	if err != nil {
 		slog.Error("rpd cap redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
 		return false
-	}
-	if n == 1 {
-		if err := CapRDB.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
-			slog.Warn("rpd cap expire", "tenant", tenantID, "role", role, "err", err)
-		}
 	}
 	return n <= int64(cap)
 }

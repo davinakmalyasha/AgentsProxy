@@ -193,7 +193,8 @@ var _ = redis.Nil
 func TestLogging_RecordsFields(t *testing.T) {
 	var buf bytes.Buffer
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// Debug level: successful GETs log at Debug, writes/errors at Info.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(old) })
 
 	h := Logging()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +212,27 @@ func TestLogging_RecordsFields(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `"status":201`) {
 		t.Errorf("log missing status: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"level":"DEBUG"`) {
+		t.Errorf("successful GET should log at DEBUG, got: %s", buf.String())
+	}
+}
+
+func TestLogging_ErrorsStayInfo(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	h := Logging()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	srv := httptest.NewServer(RequestID()(h))
+	defer srv.Close()
+	resp, _ := http.Get(srv.URL)
+	resp.Body.Close()
+	if !strings.Contains(buf.String(), `"status":500`) {
+		t.Errorf("error responses must stay at INFO, got: %s", buf.String())
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -130,6 +131,70 @@ func TestScheduler_SendsDue(t *testing.T) {
 		return err
 	})
 	_, _ = pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id='rem-test'`)
+}
+
+// TestScheduler_QuarantinedTenantHeld: a fenced tenant's due reminder is
+// neither sent nor dead-lettered. The claim is released back to pending
+// without burning attempts, so it waits instead of retrying.
+func TestScheduler_QuarantinedTenantHeld(t *testing.T) {
+	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	if dsn == "" {
+		dsn = os.Getenv("DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	scrubReminders(t, ctx, pool)
+
+	for _, stmt := range []string{
+		`DELETE FROM agent_reminders WHERE tenant_id='rem-hold'`,
+		`DELETE FROM clients WHERE tenant_id='rem-hold'`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
+		 VALUES ('rem-hold','rem-hold','hash-hold',1000,'active','sports',ARRAY['records'])`); err != nil {
+		t.Fatal(err)
+	}
+	var dueID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO agent_reminders (tenant_id, chat_id, text, remind_at) VALUES ('rem-hold','999','TEST-hold me', now() - interval '1 minute') RETURNING id::text`,
+	).Scan(&dueID); err != nil {
+		t.Fatal(err)
+	}
+
+	tenanthealth.Quarantine("rem-hold", "test")
+	defer tenanthealth.Release("rem-hold")
+
+	fake := &fakeSender{}
+	s := New(pool, fake.Send)
+	s.Tick()
+
+	if fake.count() != 0 {
+		t.Fatalf("sent=%d want 0 (quarantined tenant held)", fake.count())
+	}
+	var status string
+	var attempts int
+	if err := pool.QueryRow(ctx,
+		`SELECT status, attempts FROM agent_reminders WHERE id=$1::uuid`, dueID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Errorf("status=%s want pending (claim released)", status)
+	}
+	if attempts != 0 {
+		t.Errorf("attempts=%d want 0 (no retry burned)", attempts)
+	}
 }
 
 // slowSender simulates a slow delivery destination that takes ~500ms per send.

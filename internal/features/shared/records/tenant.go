@@ -5,10 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 // Querier is the QueryRow subset both *pgxpool.Pool and pgx.Tx satisfy.
@@ -50,19 +50,45 @@ func CheckTenant(ctx context.Context, q Querier, tenantID string) (bool, error) 
 	return true, nil
 }
 
-// KnownTenant reports whether tenantID belongs to an active client.
-// Used wherever a tenant arrives from user input (public reads,
-// client-chat): arbitrary strings must not become Redis keys, RLS
-// contexts, or cross-tenant read paths. Single indexed lookup.
-//
-// Prefer CheckTenant where the caller can return a 5xx; this wrapper
-// keeps the deny-by-default behaviour and only adds logging.
-func KnownTenant(ctx context.Context, q Querier, tenantID string) bool {
+// knownTenantKey is the Redis key for the tenant-exists cache. Short
+// TTL: a just-provisioned tenant must become visible quickly, and a
+// just-paused one must fence quickly. Admin writes evict it eagerly
+// (see EvictTenantKnown); the TTL is the backstop, not the mechanism.
+const knownTenantKeyPrefix = "tknown:"
+
+// CheckTenantCached is CheckTenant with a 30s Redis cache. The tenant
+// lookup sits on the hottest anonymous path (every public read, every
+// client-chat); without this, landing traffic is a Postgres query per
+// request with a thundering herd every time a client row changes.
+func CheckTenantCached(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (bool, error) {
+	if tenantID == "" {
+		return false, nil
+	}
+	if rdb != nil {
+		if v, err := rdb.Get(ctx, knownTenantKeyPrefix+tenantID).Result(); err == nil {
+			return v == "1", nil
+		}
+	}
 	ok, err := CheckTenant(ctx, q, tenantID)
 	if err != nil {
-		// Deny by default, but never silently: an unknown tenant is the
-		// caller's problem, this is ours.
-		slog.Error("tenant lookup failed", "tenant", tenantID, "err", err)
+		return false, err
 	}
-	return ok
+	if rdb != nil {
+		val := "0"
+		if ok {
+			val = "1"
+		}
+		_ = rdb.Set(ctx, knownTenantKeyPrefix+tenantID, val, 30*time.Second).Err()
+	}
+	return ok, nil
+}
+
+// EvictTenantKnown drops a cached tenant-exists entry. Call on every
+// clients write (provision, patch, status change) so the 30s TTL never
+// delays a fence or a launch.
+func EvictTenantKnown(ctx context.Context, rdb *redis.Client, tenantID string) error {
+	if rdb == nil || tenantID == "" {
+		return nil
+	}
+	return rdb.Del(ctx, knownTenantKeyPrefix+tenantID).Err()
 }

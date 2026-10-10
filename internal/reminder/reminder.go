@@ -11,7 +11,7 @@
 //
 // TWO DRIVERS, ONE CLAIM. This ticker is the driver for long-running
 // hosts (Laragon, VPS, Railway). On serverless (Vercel) it is disabled
-// via REMINDER_TICKER=off and a Supabase Edge Function driven by
+// via BACKGROUND_TICKERS=false and a Supabase Edge Function driven by
 // pg_cron delivers instead. Every path claims a row by atomically
 // flipping status to 'sending' and stamping claimed_at; drivers only
 // read status='pending', so the other driver can never see a claimed
@@ -29,10 +29,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // maxConcurrentSends bounds how many reminders a single tick delivers
@@ -156,6 +155,14 @@ func (s *Scheduler) Tick() {
 	var wg sync.WaitGroup
 	for _, d := range batch {
 		d := d
+		// Quarantine fence: a fenced tenant's rows wait in pending. The
+		// claim already flipped them to sending, so release the claim
+		// without burning attempts — never send, never dead-letter.
+		if q, reason := tenanthealth.Check(d.tenant); q {
+			slog.Warn("quarantined tenant reminder held", "tenant", d.tenant, "reason", reason, "id", d.id)
+			s.releaseClaim(ctx, d)
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -194,22 +201,21 @@ func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
 	// this row back to another driver, the update matches nothing and we
 	// must NOT report success.
 	//
-	// Tenant-scoped via WithTenantTx, matching the rest of the package:
-	// the per-row writes set app.tenant_id so RLS admits them, which
-	// keeps this working on a runtime pool as well as the admin one.
-	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`UPDATE agent_reminders SET status='sent', claimed_at=NULL
-			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			slog.Warn("reminder claim lost before mark sent", "id", d.id)
-		}
-		return nil
-	}); err != nil {
+	// Single statement, no transaction: this is one PK update, and the
+	// scheduler runs on the admin pool (see Tick), so no tenant GUC is
+	// needed — the explicit tenant_id predicate scopes the row. A
+	// transaction here would cost BEGIN + set_config + COMMIT (3 wasted
+	// round trips) per reminder, 4× the work on the size-3 admin pool.
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE agent_reminders SET status='sent', claimed_at=NULL
+		  WHERE id=$1::uuid AND tenant_id=$2 AND status='sending' AND claimed_at=$3`,
+		d.id, d.tenant, d.claimedAt)
+	if err != nil {
 		slog.Warn("reminder mark sent failed, will retry", "id", d.id, "err", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		slog.Warn("reminder claim lost before mark sent", "id", d.id)
 	}
 }
 
@@ -229,49 +235,56 @@ var errHandledDead = errors.New("reminder dead-lettered")
 const maxAttempts = 5
 
 // bumpAttempts records a transient send failure and releases the claim
-// so the row becomes visible to the next tick. Mirrors
-// private.fail_reminder (migration 031) including maxAttempts = 5.
+// so the row becomes visible to the next tick. Mirrors the retired
+// private.fail_reminder (dropped in 055) including maxAttempts = 5.
 //
 // The claim design forces one change from the original: the old query
 // left `status` untouched because rows were never claimed. A claimed
 // row must be reset to 'pending' explicitly or it stays invisible to
 // every driver forever.
 func (s *Scheduler) bumpAttempts(ctx context.Context, d dueReminder) {
-	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`UPDATE agent_reminders
-			    SET attempts = attempts + 1,
-			        status = CASE WHEN attempts + 1 >= $3 THEN 'dead' ELSE 'pending' END,
-			        claimed_at = NULL
-			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`,
-			d.id, d.claimedAt, maxAttempts)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			slog.Warn("reminder claim lost before bump", "id", d.id)
-		}
-		return nil
-	}); err != nil {
+	// Single statement (see mark-sent above for why no transaction).
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE agent_reminders
+		    SET attempts = attempts + 1,
+		        status = CASE WHEN attempts + 1 >= $4 THEN 'dead' ELSE 'pending' END,
+		        claimed_at = NULL
+		  WHERE id=$1::uuid AND tenant_id=$2 AND status='sending' AND claimed_at=$3`,
+		d.id, d.tenant, d.claimedAt, maxAttempts)
+	if err != nil {
 		slog.Warn("reminder bump failed, will retry", "id", d.id, "err", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		slog.Warn("reminder claim lost before bump", "id", d.id)
+	}
+}
+
+// releaseClaim hands a claimed row back to pending without touching
+// attempts. Used for quarantine holds: the row must wait, not retry.
+// Single statement (see mark-sent above for why no transaction).
+func (s *Scheduler) releaseClaim(ctx context.Context, d dueReminder) {
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE agent_reminders SET status='pending', claimed_at=NULL
+		  WHERE id=$1::uuid AND tenant_id=$2 AND status='sending' AND claimed_at=$3`,
+		d.id, d.tenant, d.claimedAt); err != nil {
+		slog.Warn("reminder release failed, reaper will recover", "id", d.id, "err", err)
 	}
 }
 
 func (s *Scheduler) markDead(ctx context.Context, d dueReminder, reason string) {
 	// Dead-lettering is permanent data loss signal: it pages.
 	slog.Error("reminder dead-lettered", "id", d.id, "reason", reason)
-	if err := records.WithTenantTx(ctx, s.Pool, d.tenant, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`UPDATE agent_reminders SET status='dead', claimed_at=NULL
-			  WHERE id=$1::uuid AND status='sending' AND claimed_at=$2`, d.id, d.claimedAt)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			slog.Warn("reminder claim lost before dead-letter", "id", d.id)
-		}
-		return nil
-	}); err != nil {
+	// Single statement (see mark-sent above for why no transaction).
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE agent_reminders SET status='dead', claimed_at=NULL
+		  WHERE id=$1::uuid AND tenant_id=$2 AND status='sending' AND claimed_at=$3`,
+		d.id, d.tenant, d.claimedAt)
+	if err != nil {
 		slog.Error("reminder dead-letter write failed", "id", d.id, "err", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		slog.Warn("reminder claim lost before dead-letter", "id", d.id)
 	}
 }

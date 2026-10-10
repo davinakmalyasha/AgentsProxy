@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 type Healthz struct {
@@ -22,6 +24,9 @@ type healthzResponse struct {
 	Version string `json:"version"`
 	DB      bool   `json:"db"`
 	Redis   bool   `json:"redis"`
+	// Tenants maps quarantined slug → reason. Absent slugs are healthy
+	// (or unknown). No prompt bodies, no contacts — status only.
+	Tenants map[string]string `json:"tenants,omitempty"`
 }
 
 func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +49,12 @@ func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(resp)
 		return
+	}
+	for slug, e := range tenanthealth.Snapshot() {
+		if resp.Tenants == nil {
+			resp.Tenants = map[string]string{}
+		}
+		resp.Tenants[slug] = e.Reason
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

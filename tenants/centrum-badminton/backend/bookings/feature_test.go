@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -130,6 +131,7 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
+		`GRANT SELECT ON tenant_schema_contracts TO app`,
 		`GRANT SELECT ON sports_pricing_rules TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
@@ -201,6 +203,10 @@ func seedFacility(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
+	return doReqKey(t, h, method, path, token, body, "")
+}
+
+func doReqKey(t *testing.T, h http.Handler, method, path, token, body, idemKey string) *http.Response {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -213,6 +219,9 @@ func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http
 	}
 	if token != "" {
 		req.Header.Set("X-Client-Token", token)
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -524,6 +533,137 @@ func TestBookings_TenantIsolation(t *testing.T) {
 	if respB.StatusCode != 201 {
 		t.Errorf("B own-facility booking status=%d want 201", respB.StatusCode)
 	}
+}
+
+// TestBookings_ContractMismatch428: a tenant rolled forward past this
+// binary fails closed with 428 on the write path — scoped to that tenant,
+// no crash, no silent wrong-shape write.
+func TestBookings_ContractMismatch428(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	if _, err := h.adminPool.Exec(ctx,
+		`INSERT INTO tenant_schema_contracts (tenant_id, feature, version, status)
+		 VALUES ('bk-a','bookings',99,'ok')
+		 ON CONFLICT (tenant_id, feature) DO UPDATE
+		   SET version=EXCLUDED.version, status='ok', applied_at=now(), error = ''`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = h.adminPool.Exec(context.Background(),
+			`DELETE FROM tenant_schema_contracts WHERE tenant_id='bk-a'`)
+	})
+
+	body := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"19:00","end_time":"20:00","customer_name":"Zed"}`
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
+	if resp.StatusCode != 428 {
+		t.Errorf("future-contract create status=%d want 428 (body=%s)", resp.StatusCode, readAll(t, resp))
+	}
+	readAll(t, resp)
+
+	// Rollback (row back to v1) serves again immediately.
+	if _, err := h.adminPool.Exec(ctx,
+		`UPDATE tenant_schema_contracts SET version=1 WHERE tenant_id='bk-a' AND feature='bookings'`); err != nil {
+		t.Fatal(err)
+	}
+	resp2 := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
+	if resp2.StatusCode != 201 {
+		t.Errorf("rolled-back create status=%d want 201 (body=%s)", resp2.StatusCode, readAll(t, resp2))
+	}
+	readAll(t, resp2)
+}
+
+// TestBookings_MalformedIDs400: garbage UUID filters fail closed with 400,
+// never 500 from a ::uuid cast.
+func TestBookings_MalformedIDs400(t *testing.T) {
+	h := setup(t)
+	resp := doReq(t, h.router, "GET", "/bookings?facility_id=not-a-uuid", "tok-bk-a", "")
+	if resp.StatusCode != 400 {
+		t.Errorf("facility_id garbage status=%d want 400", resp.StatusCode)
+	}
+	readAll(t, resp)
+}
+
+// TestBookings_CreateIdempotency: same Idempotency-Key twice → one row,
+// second call returns the original id with deduplicated:true.
+func TestBookings_CreateIdempotency(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	body := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"19:00","end_time":"20:00","customer_name":"Idem"}`
+	resp := doReqKey(t, h.router, "POST", "/bookings", "tok-bk-a", body, "bk-key-1")
+	if resp.StatusCode != 201 {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	first := readJSON(t, resp)
+	resp2 := doReqKey(t, h.router, "POST", "/bookings", "tok-bk-a", body, "bk-key-1")
+	if resp2.StatusCode != 200 {
+		t.Fatalf("replay status=%d want 200, body=%s", resp2.StatusCode, readAll(t, resp2))
+	}
+	second := readJSON(t, resp2)
+	if second["id"] != first["id"] || second["deduplicated"] != true {
+		t.Errorf("replay = %v, want same id with deduplicated:true", second)
+	}
+	var n int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sports_bookings WHERE tenant_id='bk-a'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("booking rows = %d, want 1 (no double booking)", n)
+	}
+}
+
+// TestBookings_CancelWithNote: the union rule — optional note is stored on
+// cancel; checked_in is not cancellable (409 names the current status).
+func TestBookings_CancelWithNote(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+
+	body := `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"19:00","end_time":"20:00","customer_name":"Noted"}`
+	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	id, _ := readJSON(t, resp)["id"].(string)
+
+	respD := doReq(t, h.router, "DELETE", "/bookings/"+id+"?note="+url.QueryEscape("uang kembali tunai"), "tok-bk-a", "")
+	if respD.StatusCode != 200 {
+		t.Fatalf("cancel status=%d body=%s", respD.StatusCode, readAll(t, respD))
+	}
+	readAll(t, respD)
+	var notes string
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT notes FROM sports_bookings WHERE id=$1::uuid`, id).Scan(&notes); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notes, "uang kembali tunai") {
+		t.Errorf("notes=%q want the cancellation note", notes)
+	}
+
+	// checked_in cannot cancel (union rule, both doors).
+	resp2 := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
+		`{"facility_id":"`+fac+`","date":"2026-09-06","start_time":"20:00","end_time":"21:00","customer_name":"Played"}`)
+	if resp2.StatusCode != 201 {
+		t.Fatalf("create2 status=%d body=%s", resp2.StatusCode, readAll(t, resp2))
+	}
+	id2, _ := readJSON(t, resp2)["id"].(string)
+	if _, err := h.adminPool.Exec(ctx,
+		`UPDATE sports_bookings SET status='checked_in' WHERE id=$1::uuid`, id2); err != nil {
+		t.Fatal(err)
+	}
+	respC := doReq(t, h.router, "DELETE", "/bookings/"+id2, "tok-bk-a", "")
+	if respC.StatusCode != 409 {
+		t.Errorf("cancel checked_in status=%d want 409 (body=%s)", respC.StatusCode, readAll(t, respC))
+	}
+	readAll(t, respC)
 }
 
 // TestBookings_Validation: outside facility hours → 400.

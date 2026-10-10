@@ -73,7 +73,7 @@ func ParseXLSXMarker(reply string) (path, rest string) {
 }
 
 // lookupTicket validates a token and returns its ticket.
-func lookupTicket(token string) (reportTicket, error) {
+func lookupTicket(ctx context.Context, token string) (reportTicket, error) {
 	var t reportTicket
 	token = strings.TrimSuffix(token, ".xlsx")
 	if !hexTokenRe.MatchString(token) {
@@ -82,9 +82,9 @@ func lookupTicket(token string) (reportTicket, error) {
 	if ReportRDB == nil {
 		return t, fmt.Errorf("report store unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	raw, err := ReportRDB.Get(ctx, reportTokenPrefix+token).Result()
+	raw, err := ReportRDB.Get(rctx, reportTokenPrefix+token).Result()
 	if err != nil {
 		return t, fmt.Errorf("expired or unknown link")
 	}
@@ -99,14 +99,43 @@ func lookupTicket(token string) (reportTicket, error) {
 
 // LoadReport validates a token and returns the download filename + bytes
 // from the active ReportStorage backend.
-func LoadReport(token string) (filename string, data []byte, err error) {
-	t, err := lookupTicket(token)
+func LoadReport(ctx context.Context, token string) (filename string, data []byte, err error) {
+	t, err := lookupTicket(ctx, token)
 	if err != nil {
 		return "", nil, err
 	}
 	// Never trust the ticket blindly: the store confines keys to its own
 	// tenant/object layout.
-	return ReportStorage.Load(context.Background(), t.Tenant, t.File)
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return ReportStorage.Load(lctx, t.Tenant, t.File)
+}
+
+// ReportTenant validates a token and returns its tenant, without loading
+// the object. The download handler uses it for the quarantine fence.
+func ReportTenant(ctx context.Context, token string) (string, error) {
+	t, err := lookupTicket(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	return t.Tenant, nil
+}
+
+// ResolveTicket validates a token once and returns the tenant plus the
+// download payload. The handler uses this instead of ReportTenant +
+// LoadReport so one download costs one ticket lookup, not two.
+func ResolveTicket(ctx context.Context, token string) (tenant, filename string, data []byte, err error) {
+	t, err := lookupTicket(ctx, token)
+	if err != nil {
+		return "", "", nil, err
+	}
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	filename, data, err = ReportStorage.Load(lctx, t.Tenant, t.File)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return t.Tenant, filename, data, nil
 }
 
 // ---- Tool ----
@@ -152,7 +181,16 @@ type reportData struct {
 
 func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to string) (reportData, error) {
 	var d reportData
+	// Build into a local and assign once at the end: WithTenantTx
+	// retries the closure on deadlock, and accumulating (+=) into the
+	// outer struct would double-count every total on a retry.
 	err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
+		var local reportData
+		// A 370-day export legitimately outlives the pool-wide
+		// statement_timeout: raise it for this transaction only.
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '120s'`); err != nil {
+			return err
+		}
 		// Lapangan income per day (WIB calendar day, same convention as laporan page).
 		r, err := tx.Query(ctx,
 			`SELECT (paid_at AT TIME ZONE 'Asia/Jakarta')::date AS d,
@@ -175,10 +213,10 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.Days = append(d.Days, row)
-			d.Cash += row.Cash
-			d.Qris += row.Qris
-			d.Bookings += row.Bookings
+			local.Days = append(local.Days, row)
+			local.Cash += row.Cash
+			local.Qris += row.Qris
+			local.Bookings += row.Bookings
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -201,8 +239,8 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.Expenses = append(d.Expenses, row)
-			d.ExpensesTot += row.Amount
+			local.Expenses = append(local.Expenses, row)
+			local.ExpensesTot += row.Amount
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -232,9 +270,9 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				return err
 			}
 			row.Date = dt.Format("2006-01-02")
-			d.KantinDays = append(d.KantinDays, row)
-			d.KantinOmzet += row.Omzet
-			d.KantinModal += row.Modal
+			local.KantinDays = append(local.KantinDays, row)
+			local.KantinOmzet += row.Omzet
+			local.KantinModal += row.Modal
 		}
 		r.Close()
 		if err := r.Err(); err != nil {
@@ -258,10 +296,14 @@ func FetchReportData(ctx context.Context, pool *pgxpool.Pool, tenantID, from, to
 				r.Close()
 				return err
 			}
-			d.KantinTop = append(d.KantinTop, row)
+			local.KantinTop = append(local.KantinTop, row)
 		}
 		r.Close()
-		return r.Err()
+		if err := r.Err(); err != nil {
+			return err
+		}
+		d = local
+		return nil
 	})
 	return d, err
 }
@@ -273,20 +315,29 @@ func Idr(v float64) string {
 	if neg {
 		v = -v
 	}
+	// Single pass, no Sprintf, no intermediate string: append the
+	// digits reversed with separators, then reverse in place.
+	var buf []byte
 	n := int64(v + 0.5)
-	s := fmt.Sprintf("%d", n)
-	// thousands separator "."
-	var out []byte
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			out = append(out, '.')
+	if n == 0 {
+		buf = append(buf, '0')
+	}
+	digits := 0
+	for n > 0 {
+		if digits > 0 && digits%3 == 0 {
+			buf = append(buf, '.')
 		}
-		out = append(out, byte(c))
+		buf = append(buf, byte('0'+n%10))
+		n /= 10
+		digits++
 	}
 	if neg {
-		return "-" + string(out)
+		buf = append(buf, '-')
 	}
-	return string(out)
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
 }
 
 // rp renders an IDR amount with the sign in front: -Rp4.405.000, Rp95.000.
@@ -524,6 +575,10 @@ func reportTokenHash(token string) string {
 // hot ticket (30 min TTL), Postgres holds the manifest row the sweeper
 // uses to reclaim the object. On manifest failure the ticket is revoked
 // and the object removed so no orphan survives.
+//
+// The manifest write goes through private.mint_report (migration 053):
+// report_objects is FORCE RLS on app.tenant_id, which the runtime pool
+// never sets, so a direct INSERT fails 42501 on every export.
 func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey string, size int) (string, error) {
 	if ReportRDB == nil {
 		return "", fmt.Errorf("report store unavailable (Redis)")
@@ -543,12 +598,10 @@ func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey 
 	if err := ReportRDB.Set(rctx, reportTokenPrefix+token, string(b), reportTTL).Err(); err != nil {
 		return "", err
 	}
-	_, err := pool.Exec(ctx,
-		`INSERT INTO report_objects (token_hash, tenant_id, object_key, size_bytes, expires_at)
-		 VALUES ($1,$2,$3,$4,now() + make_interval(secs => $5))
-		 ON CONFLICT (token_hash) DO NOTHING`,
-		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds()))
-	if err != nil {
+	var minted bool
+	if err := pool.QueryRow(ctx,
+		`SELECT private.mint_report($1,$2,$3,$4,$5)`,
+		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds())).Scan(&minted); err != nil {
 		_ = ReportRDB.Del(rctx, reportTokenPrefix+token).Err()
 		_ = ReportStorage.Delete(ctx, SafeTenant(tenant), objectKey)
 		return "", err
@@ -558,18 +611,22 @@ func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey 
 
 // PurgeExpiredReports deletes expired manifest rows and their objects.
 // Idempotent: safe for concurrent sweepers and for either backend.
+//
+// Both statements go through definer functions (migration 053): the
+// manifest is FORCE RLS, so direct SELECT/DELETE on the runtime pool
+// match zero rows — a silent storage leak. Deletes are one batched
+// call, not one round trip per row.
 func PurgeExpiredReports(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	if pool == nil {
 		return 0, nil
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT token_hash, tenant_id, object_key FROM report_objects
-		  WHERE expires_at < now() LIMIT 100`)
+		`SELECT token_hash, tenant_id, object_key FROM private.expired_reports($1)`, 100)
 	if err != nil {
 		return 0, err
 	}
 	type expired struct{ hash, tenant, key string }
-	var batch []expired
+	batch := make([]expired, 0, 100)
 	for rows.Next() {
 		var e expired
 		if err := rows.Scan(&e.hash, &e.tenant, &e.key); err != nil {
@@ -583,12 +640,19 @@ func PurgeExpiredReports(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		return 0, err
 	}
 	n := 0
+	hashes := make([]string, 0, len(batch))
 	for _, e := range batch {
+		// Storage deletes stay serial: they are HTTP calls, and one
+		// slow object must not fail the whole batch.
 		_ = ReportStorage.Delete(ctx, e.tenant, e.key)
-		if _, err := pool.Exec(ctx, `DELETE FROM report_objects WHERE token_hash=$1`, e.hash); err != nil {
-			return n, err
-		}
+		hashes = append(hashes, e.hash)
 		n++
+	}
+	if len(hashes) > 0 {
+		if err := pool.QueryRow(ctx,
+			`SELECT private.delete_reports($1::text[])`, hashes).Scan(&n); err != nil {
+			return 0, err
+		}
 	}
 	return n, nil
 }

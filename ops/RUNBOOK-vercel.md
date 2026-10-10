@@ -34,8 +34,8 @@ Set in the dashboard, never in git.
 | `TRUSTED_PROXY_CIDRS` | Vercel egress ranges | Without it `internal/api/clientip.go` ignores `X-Forwarded-For`, every client buckets as one IP, and you rate-limit yourself into `429`s |
 | `ALLOW_ORIGINS` | comma-separated client origins | `*` in prod defeats the CORS tightening that `ENV=production` enables |
 | `ENV` | `production` | Tightens CORS |
-| `DATABASE_ADMIN_URL` | direct **5432**, superuser | Migrations + admin endpoints. Runs on every cold start, so keep the DSN fast |
-| `REDIS_URL` | `rediss://…` | Cache, quota, rate limits |
+| `DATABASE_ADMIN_URL` | direct **5432**, superuser | Migrations + admin endpoints. Skipped on cold start when `RUN_MIGRATIONS=false` |
+| `REDIS_URL` | `rediss://…` **in ap-southeast-1 (Singapore)** | Cache, quota, rate limits — every request pays 1–3 sequential Redis round trips, so a cross-region Upstash adds 100–500ms per request. Same-region (`sin1` ↔ ap-southeast-1) keeps them at ~1–2ms. |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | as `.env` | |
 | `ADMIN_API_KEY` | 64 hex chars | |
 | `SENTRY_DSN` | optional | Empty disables Sentry entirely |
@@ -45,11 +45,13 @@ Set in the dashboard, never in git.
 ```bash
 npx vercel link      # once
 npx vercel env add BACKGROUND_TICKERS production      # "false"
+npx vercel env add RUN_MIGRATIONS production          # "false" (migrations run as a deploy step: make migrate)
 npx vercel deploy --prod
 ```
 
-`maxDuration: 300` is already the Hobby maximum. It comfortably covers
-the 60s `llm.Client` cap and the server's 90s `WriteTimeout`.
+Fluid Compute defaults to a 300s cap on every plan (Hobby maximum).
+It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
+10s flush slack inside the server's `WriteTimeout`).
 
 ## What you will feel
 

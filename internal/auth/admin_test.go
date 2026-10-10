@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,9 +12,6 @@ func TestRequireAdmin_OK(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(h(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		if !IsAdmin(r.Context()) {
-			t.Error("IsAdmin false on authed req")
-		}
 		w.WriteHeader(200)
 	})))
 	defer srv.Close()
@@ -53,11 +49,5 @@ func TestRequireAdmin_Wrong(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Errorf("status=%d want 401", resp.StatusCode)
-	}
-}
-
-func TestIsAdmin_Empty(t *testing.T) {
-	if IsAdmin(context.Background()) {
-		t.Error("IsAdmin true on bare ctx")
 	}
 }

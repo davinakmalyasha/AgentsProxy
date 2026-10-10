@@ -13,7 +13,7 @@ COPY . .
 ARG VERSION=dev
 ARG TARGETARCH=amd64
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH}
-RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/server ./cmd/server
+RUN go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o /out/server ./cmd/server
 
 # Stage 2: runtime
 FROM gcr.io/distroless/static:nonroot

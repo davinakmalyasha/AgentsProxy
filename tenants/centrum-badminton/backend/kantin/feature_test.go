@@ -128,6 +128,7 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT ON tenant_schema_contracts TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
@@ -330,6 +331,28 @@ func TestKantin_SaleIdempotency(t *testing.T) {
 	}
 }
 
+// TestKantin_SaleErrorCodes: missing product → 404, bad qty → 400, only
+// genuine stock contention → 409. Messages unchanged (UI matches on them).
+func TestKantin_SaleErrorCodes(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	p := seedProduct(t, ctx, h.adminPool, "ka-a", "Teh", 5000, 3)
+
+	resp := doReq(t, h.router, "POST", "/kantin/sales", "tok-ka-a",
+		`{"items":[{"product_id":"00000000-0000-0000-0000-000000000000","qty":1}]}`)
+	if resp.StatusCode != 404 {
+		t.Errorf("missing product status=%d want 404", resp.StatusCode)
+	}
+	readAll(t, resp)
+	resp2 := doReq(t, h.router, "POST", "/kantin/sales", "tok-ka-a",
+		`{"items":[{"product_id":"`+p+`","qty":0}]}`)
+	if resp2.StatusCode != 400 {
+		t.Errorf("bad qty status=%d want 400", resp2.StatusCode)
+	}
+	readAll(t, resp2)
+}
+
 // TestKantin_Oversell: selling more than stock → 409, nothing written.
 func TestKantin_Oversell(t *testing.T) {
 	h := setup(t)
@@ -475,6 +498,48 @@ func TestKantin_Isolation(t *testing.T) {
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
 		t.Errorf("B saw %d products, want 0", len(items))
+	}
+}
+
+// TestKantin_DeleteDeactivates: owner delete sets is_active=false instead
+// of destroying the row (sale_items SET NULL + movements CASCADE on hard
+// delete would orphan receipts and erase the ledger). The product stops
+// selling (409) but its history stays. Re-delete → 404.
+func TestKantin_DeleteDeactivates(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	p := seedProduct(t, ctx, h.adminPool, "ka-a", "Hapus", 5000, 5)
+
+	respD := doReq(t, h.router, "DELETE", "/kantin/products/"+p, "tok-ka-a", "")
+	if respD.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", respD.StatusCode, readAll(t, respD))
+	}
+	readAll(t, respD)
+	var active bool
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT is_active FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Error("product still active after delete")
+	}
+	// No longer sellable (deactivated reads as not-found for the POS).
+	respS := doReq(t, h.router, "POST", "/kantin/sales", "tok-ka-a",
+		`{"items":[{"product_id":"`+p+`","qty":1}]}`)
+	if respS.StatusCode != 404 {
+		t.Errorf("sale of inactive status=%d want 404", respS.StatusCode)
+		readAll(t, respS)
+	}
+	// History intact: movements + product row still present.
+	var mv int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT count(*) FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&mv); err != nil || mv != 1 {
+		t.Errorf("product row missing (count=%d err=%v)", mv, err)
+	}
+	if r := doReq(t, h.router, "DELETE", "/kantin/products/"+p, "tok-ka-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
 	}
 }
 

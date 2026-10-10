@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -46,6 +47,9 @@ func NewRouter(d Deps) http.Handler {
 	// styles, which 404s half the matrix otherwise.
 	r.Use(middleware.StripTrailingSlash)
 	r.Use(middleware.CORS(d.Cfg.AllowOrigins))
+	// Compress JSON responses over 1KB (list endpoints); already-
+	// compressed bodies (.xlsx) and small payloads pass through.
+	r.Use(middleware.Gzip)
 
 	r.Get("/healthz", (&Healthz{DB: d.Pool, RDB: d.Redis, Build: d.Version}).ServeHTTP)
 
@@ -65,6 +69,7 @@ func NewRouter(d Deps) http.Handler {
 			RDB:  d.Redis,
 			Auth: d.Auth,
 			ADK:  d.ADK,
+			sem:  make(chan struct{}, maxConcurrentAgentTurns),
 		}
 		r.Route("/agent", func(r chi.Router) {
 			// Isolated bucket: chat quota must not be eaten by landing polls
@@ -77,7 +82,7 @@ func NewRouter(d Deps) http.Handler {
 		})
 
 		// WS2: chat-generated .xlsx downloads — token IS the auth (tenant-scoped, 30-min TTL)
-		reportsH := &Reports{RDB: d.Redis}
+		reportsH := &Reports{Pool: d.Pool}
 		r.Get("/reports/{token}", reportsH.Download)
 
 		// Staff login (Phase 7): email+password → session token.
@@ -85,9 +90,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Mount("/auth", d.Auth.Routes())
 		}
 
-		// Per-vertical feature platform. One builder call per
-		// vertical; the builder mounts the records feature plus
-		// every registered shared feature, each gated.
+		// Per-vertical feature platform. Only verticals with live tenants
+		// mount (plus any vertical with registered custom features);
+		// the rest serve nothing today. Zero live tenants — a fresh
+		// database — mounts everything, exactly as before.
 		bDeps := features.BuilderDeps{
 			Pool:               d.Pool,
 			Cache:              d.Cache,
@@ -95,7 +101,7 @@ func NewRouter(d Deps) http.Handler {
 			Redis:              d.Redis,
 			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
 		}
-		for _, v := range features.AllowedVerticals {
+		for _, v := range features.VerticalsToMount(features.LiveVerticals(context.Background(), d.Pool)) {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}
@@ -118,7 +124,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/clients", adm.Create)
 			r.Get("/clients", adm.List)
 			r.Patch("/clients/{id}", records.WithValidID(adm.Patch))
+			r.Post("/clients/{id}/contract", records.WithValidID(adm.ContractBump))
 			r.Get("/usage", adm.Usage)
+			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool}
+			r.Get("/tenant-health", TenantHealth(thDeps))
+			r.Post("/tenant-health/reload", TenantReload(thDeps))
 		})
 	})
 

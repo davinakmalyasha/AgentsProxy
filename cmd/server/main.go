@@ -8,9 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
@@ -32,6 +33,9 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
+	"github.com/davinakmalyasha/agents-proxy/internal/usage"
+
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
 	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
@@ -48,34 +52,46 @@ import (
 )
 
 func main() {
-	// Sentry FIRST: env-gated no-op when SENTRY_DSN is empty (PRD Â§H).
-	// Re-read env directly so Init runs even before config.Load.
+	// Healthcheck probe for container orchestration (docker-compose
+	// healthcheck, k8s): exits 0 when /healthz answers 200, 1
+	// otherwise. Without this the compose healthcheck boots a whole
+	// second server that binds :8080 and hangs until timeout.
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		os.Exit(healthcheck())
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config load", "err", err)
+		os.Exit(1)
+	}
+
+	// Sentry after config: a single source for DSN/env/release/rate.
+	// config.Load cannot fail on a missing DSN (empty disables), so the
+	// old direct os.Getenv reads were pure duplication.
+	release := cfg.SentryRelease
+	if release == "" {
+		release = Version
+	}
 	sentry.Init(sentry.Options{
-		DSN:                os.Getenv("SENTRY_DSN"),
-		Environment:        os.Getenv("SENTRY_ENV"),
-		Release:            firstNonEmpty(os.Getenv("SENTRY_RELEASE"), Version),
-		TracesSampleRate:   parseFloatOr(os.Getenv("TRACES_SAMPLE_RATE"), 0.1),
-		ProfilesSampleRate: parseFloatOr(os.Getenv("PROFILES_SAMPLE_RATE"), 0.1),
-		ServerName:         "agents-proxy",
+		DSN:              cfg.SentryDSN,
+		Environment:      cfg.SentryEnv,
+		Release:          release,
+		TracesSampleRate: cfg.TracesSampleRate,
+		ServerName:       "agents-proxy",
 	})
 	defer sentry.Flush(2 * time.Second)
 
-	// slog JSON handler with Authorization redaction. Wraps a Sentry-
-	// forwarding handler so Error records go to Sentry automatically.
+	// slog JSON handler with secret redaction. Uses the same sensitive-key
+	// list as the Sentry scrubber so the two can never drift apart.
 	redact := func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == "Authorization" {
-			return slog.String("Authorization", "[REDACTED]")
+		if sentry.IsSensitive(a.Key) {
+			return slog.String(a.Key, "[REDACTED]")
 		}
 		return a
 	}
 	inner := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: redact})
 	slog.SetDefault(slog.New(sentry.NewSlogHandler(inner)))
 
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("config load", "err", err)
-		os.Exit(1)
-	}
 	slog.Info("config loaded", "summary", cfg.String())
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -89,6 +105,7 @@ func main() {
 		MinConns:          cfg.DBPoolMin,
 		MaxConns:          cfg.DBPoolMax,
 		UseSimpleProtocol: cfg.DBSimpleProtocol,
+		ApplicationName:   "agentsproxy/" + cfg.Env,
 	})
 	if err != nil {
 		slog.Error("db connect", "err", err)
@@ -104,17 +121,37 @@ func main() {
 	if adminDSN == "" {
 		adminDSN = cfg.DatabaseURL
 	}
-	adminPool, err := db.NewPool(bootCtx, adminDSN)
+	// Sized deliberately small: this pool talks to DIRECT 5432 in session
+	// mode, where Supabase caps sessions (pool_size 15). The old default
+	// (Min 2 / Max 20) parked idle sessions per instance and cold-start
+	// storms exhausted the cap with EMAXCONNSESSION. Min 0 parks nothing;
+	// Max 3 bounds migrate + admin endpoints + one worker. Idle sessions
+	// close after a minute so cold-start instances stop counting against
+	// the cap almost immediately.
+	adminPool, err := db.NewPoolWithOptions(bootCtx, adminDSN, db.NewPoolOptions{
+		MinConns:        cfg.DBAdminPoolMin,
+		MaxConns:        cfg.DBAdminPoolMax,
+		MaxConnIdleTime: time.Minute,
+		ApplicationName: "agentsproxy/" + cfg.Env + "-admin",
+	})
 	if err != nil {
 		slog.Error("db admin connect", "err", err)
 		os.Exit(1)
 	}
 	defer adminPool.Close()
-	if err := db.Migrate(bootCtx, adminPool); err != nil {
-		slog.Error("migrate", "err", err)
-		os.Exit(1)
+	// Migrations are a deploy step on serverless: every cold start
+	// replaying the ledger inside an advisory lock costs 150ms+ and
+	// serializes parallel boots. Vercel sets RUN_MIGRATIONS=false;
+	// long-running hosts keep the default true.
+	if cfg.RunMigrations {
+		if err := db.Migrate(bootCtx, adminPool); err != nil {
+			slog.Error("migrate", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("migrations applied")
+	} else {
+		slog.Info("migrations skipped (RUN_MIGRATIONS=false; run as a deploy step)")
 	}
-	slog.Info("migrations applied")
 
 	rdb, err := redisx.NewClient(bootCtx, cfg.RedisURL)
 	if err != nil {
@@ -125,27 +162,51 @@ func main() {
 	slog.Info("redis connected")
 	agentstools.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
 	agentstools.CapRDB = rdb    // per-tenant daily cost cap
+	agentstools.CapCallsClient = cfg.CapCallsClient
+	agentstools.CapCallsStaff = cfg.CapCallsStaff
+	agentstools.CapCallsOwner = cfg.CapCallsOwner
+	agentstools.RPDCallsClient = cfg.RPDCallsClient
+	agentstools.RPDCallsStaff = cfg.RPDCallsStaff
+	agentstools.RPDCallsOwner = cfg.RPDCallsOwner
+	usage.CostInPerMtok = cfg.CostInPerMtok
+	usage.CostOutPerMtok = cfg.CostOutPerMtok
 	agentstools.ReportMaxBytes = cfg.ReportMaxBytes
 	agentstools.ConfigureSupabaseReportStore(cfg.SupabaseURL, cfg.SupabaseStorageKey, cfg.ReportBucket)
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	llmCli := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.MaxTokensPerReq)
 
-	// Per-tenant agent configuration, from internal/agentconfig/projects/.
-	// Loaded and validated against the tool registry here, once, and fatal
-	// on failure.
+	// Trust boundary for forwarding headers, from config (not a hidden
+	// os.Getenv): on Vercel this must list the egress ranges or every
+	// client buckets as one IP.
+	api.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
+
+	// Per-tenant agent configuration, collected not thrown: each tenant
+	// validates independently. A bad tenant is quarantined (fenced with
+	// an honest 503) while healthy tenants serve. Only zero healthy
+	// tenants -- or a load failure -- is fatal for everyone.
 	//
-	// Fatal is the point. Every mistake validation catches -- a tool named in
-	// tools.json that nothing implements, a role a project granted itself, a
-	// skill whose file is missing, a project claiming a write is a read --
-	// produces an agent that looks configured and quietly cannot do its job.
-	// The owner finds out at 3am as "I couldn't reach the system"; the
-	// deploy finds out in a second.
-	projects, err := agentstools.LoadProjects(agentstools.AllTools(pool))
+	// Fatal is still the point for shared mistakes: a config that cannot
+	// even be listed means no tenant can be evaluated, and the deploy
+	// must fail loudly rather than serve an empty world.
+	projects, badTenants, err := agentstools.LoadProjectsCollect(agentstools.AllTools(pool))
 	if err != nil {
-		slog.Error("agent project config is invalid", "err", err)
-		return
+		slog.Error("agent project config unloadable", "err", err)
+		os.Exit(1)
 	}
+	if len(projects) == 0 {
+		slog.Error("agent project config: zero healthy tenants")
+		os.Exit(1)
+	}
+	for slug, reason := range badTenants {
+		tenanthealth.Quarantine(slug, "boot: "+reason)
+		slog.Warn("tenant quarantined at boot", "tenant", slug, "reason", reason)
+	}
+	// Quarantine is durable (tenant_quarantine) so the Supabase driver
+	// honors it too. Reconcile both directions on the admin pool:
+	// boot-fenced rows are written, and rows fenced by a previous
+	// instance (or by hand) are loaded into this process's registry.
+	reconcileQuarantine(bootCtx, adminPool, badTenants)
 	names := make([]string, 0, len(projects))
 	for slug, p := range projects {
 		names = append(names, slug+" ("+p.Display+")")
@@ -160,12 +221,12 @@ func main() {
 	// philosophy as LoadProjects above.
 	if err := adkrunner.VerifySessionTables(bootCtx, pool); err != nil {
 		slog.Error("adk session tables", "err", err)
-		return
+		os.Exit(1)
 	}
 	sessSvc, err := adkrunner.NewSessionService(pool)
 	if err != nil {
 		slog.Error("adk session service", "err", err)
-		return
+		os.Exit(1)
 	}
 	adkRunner, err := adkrunner.New(adkrunner.Config{
 		Pool:      pool,
@@ -178,7 +239,7 @@ func main() {
 	})
 	if err != nil {
 		slog.Error("adk runner", "err", err)
-		return
+		os.Exit(1)
 	}
 	slog.Info("adk runner ready", "model", cfg.LLMModel)
 
@@ -197,9 +258,14 @@ func main() {
 		slog.Info("notify drain disabled; Supabase webhook + pg_cron own delivery")
 	}
 	defer notifyQ.Stop()
-	bookings.NotifyFunc = func(tenantID, to, text string) {
+	bookings.NotifyFunc = func(ctx context.Context, tenantID, to, text string) {
+		// Detached: the booking already committed, so a client disconnect
+		// must not drop the notification. Bounded so a hung DB cannot
+		// hold this goroutine forever.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
 		// Never let a queue hiccup fail the booking.
-		if err := notifyQ.Enqueue(context.Background(), tenantID, to, text); err != nil {
+		if err := notifyQ.Enqueue(dctx, tenantID, to, text); err != nil {
 			slog.Warn("notify enqueue", "tenant", tenantID, "to", to, "err", err)
 		}
 	}
@@ -209,7 +275,7 @@ func main() {
 	//
 	// Telegram delivery was deleted. There is currently no PWA delivery
 	// transport, so the scheduler preserves due rows until that lands
-	// instead of dead-lettering them. BACKGROUND_TICKERS=off on
+	// instead of dead-lettering them. BACKGROUND_TICKERS=false on
 	// serverless: the function is destroyed between requests so the 60s
 	// ticker would never tick.
 	remSched := reminder.New(adminPool, nil)
@@ -227,7 +293,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      &authapi.Auth{Pool: pool, Cache: cli},
+		Auth:      &authapi.Auth{Pool: pool, RDB: rdb},
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,
@@ -236,52 +302,71 @@ func main() {
 	// Background reclaim for chat-generated .xlsx (not on the
 	// download request path). Manifest-driven purge handles durable
 	// storage; the legacy local walk covers pre-manifest dev files.
+	// Gated like every other background loop: on serverless the
+	// function is destroyed between requests, so an ungated sweeper
+	// would fire once per cold start and never again.
 	reportStop := make(chan struct{})
-	reportsSweeper := &api.Reports{RDB: rdb, Pool: pool}
-	go reportsSweeper.StartSweeper(reportStop)
+	if cfg.BackgroundTickers {
+		reportsSweeper := &api.Reports{Pool: pool}
+		go reportsSweeper.StartSweeper(reportStop)
+	} else {
+		slog.Info("report sweeper disabled; Supabase owns reclaim")
+	}
 
 	// Retention janitor: expired sessions + old sent/dead reminders
 	// (migration 027). Hourly, best-effort, on the admin pool (sees all
 	// tenants; the deletes are by status/timestamp, not tenant-scoped).
+	// Same gate: without it the janitor fires once per cold start on
+	// serverless and then never ticks.
 	janitorStop := make(chan struct{})
-	go func() {
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		runJanitor := func() {
-			cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer ccancel()
-			if _, err := adminPool.Exec(cctx, `DELETE FROM sports_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
-				slog.Warn("janitor sessions", "err", err)
+	if cfg.BackgroundTickers {
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			runJanitor := func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer ccancel()
+				if _, err := adminPool.Exec(cctx, `DELETE FROM sports_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
+					slog.Warn("janitor sessions", "err", err)
+				}
+				if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='sent' AND created_at < now() - interval '90 days'`); err != nil {
+					slog.Warn("janitor sent reminders", "err", err)
+				}
+				if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='dead' AND created_at < now() - interval '30 days'`); err != nil {
+					slog.Warn("janitor dead reminders", "err", err)
+				}
 			}
-			if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='sent' AND created_at < now() - interval '90 days'`); err != nil {
-				slog.Warn("janitor sent reminders", "err", err)
+			runJanitor()
+			for {
+				select {
+				case <-janitorStop:
+					return
+				case <-t.C:
+					runJanitor()
+				}
 			}
-			if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='dead' AND created_at < now() - interval '30 days'`); err != nil {
-				slog.Warn("janitor dead reminders", "err", err)
-			}
-		}
-		runJanitor()
-		for {
-			select {
-			case <-janitorStop:
-				return
-			case <-t.C:
-				runJanitor()
-			}
-		}
-	}()
+		}()
+	} else {
+		slog.Info("retention janitor disabled; pg_cron owns retention")
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		// WriteTimeout bounds slow responses/hijacked streams; agent
-		// LLM calls (â‰¤60s in llm.Client) exceed it, but those paths
-		// don't block on client writes â€” they respond at the end. Set
-		// generous 90s so long provider replies still flush.
-		WriteTimeout: 90 * time.Second,
+		// WriteTimeout covers the slowest response path: one agent turn
+		// (adkrunner.TurnTimeout) plus slack to flush the reply. The
+		// turn has its own deadline and maps overruns to 504, so this
+		// is strictly a backstop, derived from the same constant.
+		WriteTimeout: adkrunner.TurnTimeout + 10*time.Second,
 		IdleTimeout:  120 * time.Second,
+		// 16KB rejects junk headers early; the largest legitimate
+		// header here is a session token. ErrorLog routes net/http
+		// internal errors through slog instead of the stdlib logger,
+		// so accept failures land structured in the log drain.
+		MaxHeaderBytes: 16 << 10,
+		ErrorLog:       slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
 		// TLSConfig left nil for plain HTTP local; PQC default in 1.27 only applies to TLS.
 	}
 
@@ -311,20 +396,63 @@ func main() {
 	slog.Info("bye")
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+// reconcileQuarantine syncs the in-memory registry with the durable
+// tenant_quarantine table (both directions, admin pool):
+//   - rows fenced at this boot are written, so the Supabase driver honors
+//     them and a restart does not silently unfence;
+//   - rows already present (previous instance, or fenced by hand) are
+//     loaded into this process's registry.
+//
+// A boot failure here is fatal: silent divergence between the registry
+// and the table would fence tenants for one driver but not the other.
+func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, badTenants map[string]string) {
+	for slug, reason := range badTenants {
+		if _, err := adminPool.Exec(ctx,
+			`INSERT INTO tenant_quarantine (tenant_id, reason) VALUES ($1, $2)
+			 ON CONFLICT (tenant_id) DO UPDATE SET reason = EXCLUDED.reason, quarantined_at = now()`,
+			slug, "boot: "+reason); err != nil {
+			slog.Error("quarantine persist failed", "tenant", slug, "err", err)
+			os.Exit(1)
+		}
 	}
-	return b
+	rows, err := adminPool.Query(ctx, `SELECT tenant_id, reason FROM tenant_quarantine`)
+	if err != nil {
+		slog.Error("quarantine load failed", "err", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var slug, reason string
+		if err := rows.Scan(&slug, &reason); err != nil {
+			slog.Error("quarantine scan failed", "err", err)
+			os.Exit(1)
+		}
+		if _, have := badTenants[slug]; !have {
+			slog.Warn("tenant quarantined by previous state", "tenant", slug, "reason", reason)
+		}
+		tenanthealth.Quarantine(slug, reason)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("quarantine rows failed", "err", err)
+		os.Exit(1)
+	}
 }
 
-func parseFloatOr(s string, def float64) float64 {
-	if s == "" {
-		return def
+// healthcheck probes the local /healthz endpoint for container
+// orchestration. Port follows PORT (default 8080).
+func healthcheck() int {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
 	if err != nil {
-		return def
+		return 1
 	}
-	return f
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }

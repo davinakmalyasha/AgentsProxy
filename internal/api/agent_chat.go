@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -8,10 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	adksession "google.golang.org/adk/v2/session"
 )
 
@@ -22,6 +26,27 @@ type AgentChat struct {
 	Auth *authapi.Auth
 	// ADK is the agent loop. Boot is fatal without it.
 	ADK *adkrunner.Runner
+	// sem bounds concurrent agent turns. Caps and rate limits bound
+	// throughput, not concurrency: without this, N concurrent chats
+	// hold N pooled transactions + N provider calls against a pool
+	// capped at 20. Nil means unbounded (tests).
+	sem chan struct{}
+}
+
+// maxConcurrentAgentTurns caps simultaneous RunWithToolsRole calls.
+const maxConcurrentAgentTurns = 8
+
+// acquireTurn takes a turn slot or reports whether the server is full.
+func (h *AgentChat) acquireTurn() (release func(), ok bool) {
+	if h.sem == nil {
+		return func() {}, true
+	}
+	select {
+	case h.sem <- struct{}{}:
+		return func() { <-h.sem }, true
+	default:
+		return nil, false
+	}
 }
 
 type agentChatRequest struct {
@@ -53,7 +78,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "message required")
 		return
 	}
-	if len([]rune(msg)) > maxMessageRunes {
+	if utf8.RuneCountInString(msg) > maxMessageRunes {
 		writeJSONError(w, http.StatusBadRequest, "message too long")
 		return
 	}
@@ -70,7 +95,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Tenant arrives from user input: must be a real active client,
 	// never an arbitrary string (history keys, RLS context, tool reads).
-	known, terr := records.CheckTenant(r.Context(), h.Pool, tenant)
+	known, terr := records.CheckTenantCached(r.Context(), h.RDB, h.Pool, tenant)
 	if terr != nil {
 		slog.Error("client chat tenant lookup failed", "tenant", tenant, "err", terr)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
@@ -78,6 +103,9 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if !known {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
+		return
+	}
+	if !quarantineCheck(w, tenant) {
 		return
 	}
 	vertical := req.Vertical
@@ -95,13 +123,48 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	//
 	// Cutover complete: the ADK loop with the same pairing (anon tools,
 	// client persona). Boot is fatal without the runner, so no fallback.
+	release, ok := h.acquireTurn()
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "server busy — coba lagi")
+		return
+	}
+	defer release()
 	reply, err := h.ADK.RunWithToolsRole(r.Context(), tenant, vertical, userName, "anon", "client", msg)
 	if err != nil {
+		if quarantineErr(w, tenant, err) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSONError(w, http.StatusGatewayTimeout, "agent timeout — coba lagi")
+			return
+		}
 		slog.Error("client chat run failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return
 	}
 	writeJSON(w, http.StatusOK, agentChatResponse{Reply: reply, Role: "client"})
+}
+
+// quarantineCheck fails closed for fenced tenants: 503 with the distinct
+// quarantine body, before any model spend. Returns false when the request
+// must stop.
+func quarantineCheck(w http.ResponseWriter, tenant string) bool {
+	if q, reason := tenanthealth.Check(tenant); q {
+		slog.Warn("quarantined tenant blocked from agent", "tenant", tenant, "reason", reason)
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
+		return false
+	}
+	return true
+}
+
+// quarantineErr maps a runner quarantine refusal to the same 503. All
+// other runner errors stay 502 provider errors.
+func quarantineErr(w http.ResponseWriter, tenant string, err error) bool {
+	if errors.Is(err, tenanthealth.ErrQuarantined) {
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
+		return true
+	}
+	return false
 }
 
 // clientIP lives in clientip.go (trust-boundary aware shared helper).
@@ -119,7 +182,7 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 	// Same guard as Chat: the tenant prefixes the Redis history keys, so
 	// an unvalidated value lets a caller enumerate or wipe another
 	// tenant's memory. Check it before building any key.
-	known, err := records.CheckTenant(r.Context(), h.Pool, tenant)
+	known, err := records.CheckTenantCached(r.Context(), h.RDB, h.Pool, tenant)
 	if err != nil {
 		slog.Error("clear history tenant lookup failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
@@ -129,8 +192,11 @@ func (h *AgentChat) ClearHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return
 	}
+	if !quarantineCheck(w, tenant) {
+		return
+	}
 	hist := &adkrunner.History{RDB: h.RDB}
-	if err := hist.ClearForRole(tenant, "client", "client:"+clientIP(r)); err != nil {
+	if err := hist.ClearForRole(r.Context(), tenant, "client", "client:"+clientIP(r)); err != nil {
 		writeJSONError(w, http.StatusBadGateway, "clear failed")
 		return
 	}
@@ -162,8 +228,8 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := u.Role
-	if role != "owner" && role != "pegawai" {
-		role = "pegawai"
+	if role != clientctx.RoleOwner && role != clientctx.RoleStaff {
+		role = clientctx.RoleStaff
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var req agentChatRequest
@@ -176,11 +242,14 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "message required")
 		return
 	}
-	if len([]rune(msg)) > maxMessageRunes {
+	if utf8.RuneCountInString(msg) > maxMessageRunes {
 		writeJSONError(w, http.StatusBadRequest, "message too long")
 		return
 	}
 	tenant := u.TenantID
+	if !quarantineCheck(w, tenant) {
+		return
+	}
 	vertical := req.Vertical
 	if vertical == "" {
 		vertical = "sports"
@@ -188,8 +257,21 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	// Cutover complete: the ADK loop, same tier for tools and persona
 	// (unlike ClientChat's anon/client split -- here the session token
 	// pins the tenant, so the role's own tool set is safe).
+	release, ok := h.acquireTurn()
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "server busy — coba lagi")
+		return
+	}
+	defer release()
 	reply, err := h.ADK.RunWithRole(r.Context(), tenant, vertical, u.Email, role, msg)
 	if err != nil {
+		if quarantineErr(w, tenant, err) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeJSONError(w, http.StatusGatewayTimeout, "agent timeout — coba lagi")
+			return
+		}
 		slog.Error("agent chat run failed", "tenant", tenant, "role", role, "err", err)
 		writeJSONError(w, http.StatusBadGateway, "provider error")
 		return

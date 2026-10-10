@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
@@ -84,7 +85,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// WIB, not the server's local time: a UTC host would file the
 		// expense under yesterday for seven hours a day, and every
 		// summary query in this file filters in Asia/Jakarta.
-		spentAt = time.Now().In(time.FixedZone("WIB", 7*3600)).Format("2006-01-02")
+		spentAt = agentstools.WibNow().Format("2006-01-02")
 	}
 	if _, err := time.Parse("2006-01-02", spentAt); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "spent_at must be YYYY-MM-DD")
@@ -137,7 +138,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	var out []expenseResp
+	out := make([]expenseResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
 			   FROM sports_expenses WHERE tenant_id=$1 AND deleted_at IS NULL`

@@ -1,8 +1,10 @@
 package features
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,6 +50,79 @@ func IsAllowedVertical(v string) bool {
 	return false
 }
 
+// LiveVerticals returns the verticals that have at least one active
+// tenant, for mounting routers. Verticals with no tenants serve nothing
+// but the generic records shell, so skipping them saves ~90% of boot
+// route registrations on a young deployment.
+//
+// Fail-open by design: on any error (or zero rows) it returns nil and
+// the caller mounts every AllowedVertical — identical to the old
+// behavior. A fresh database with no tenants yet therefore behaves
+// exactly as before.
+func LiveVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
+	if pool == nil {
+		return nil
+	}
+	qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	rows, err := pool.Query(qctx, `SELECT DISTINCT vertical FROM clients WHERE status='active'`)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return nil
+		}
+		if IsAllowedVertical(v) {
+			out = append(out, v)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// VerticalsToMount resolves the mount list: live verticals when known,
+// every allowed vertical otherwise (boot with no tenants yet, or a
+// lookup failure). A vertical with registered custom features always
+// mounts, so a feature can never be registered yet unreachable.
+func VerticalsToMount(live []string) []string {
+	if len(live) == 0 {
+		return AllowedVerticals
+	}
+	seen := make(map[string]bool, len(AllowedVerticals))
+	out := make([]string, 0, len(AllowedVerticals))
+	for _, v := range live {
+		if IsAllowedVertical(v) && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, v := range AllowedVerticals {
+		if hasCustomFeatures(v) && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// hasCustomFeatures reports whether any registered feature brings its
+// own routes for the vertical (as opposed to the generic adapter).
+func hasCustomFeatures(vertical string) bool {
+	for _, f := range All() {
+		if f.Routes != nil && AllowedForVertical(f.Name, vertical) {
+			return true
+		}
+	}
+	return false
+}
+
 // BuildVerticalRouter returns a chi router for one vertical. The
 // caller is responsible for /v1/{vertical} prefix.
 //
@@ -69,6 +144,10 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 	} else {
 		r.Use(records.WithClientAuth(recDeps))
 	}
+	// Quarantine fence: after identity (401 first, no oracle for
+	// unauthenticated callers), before rate-limit and feature gates (no
+	// quota burn, no 403 masking). Covers /records and every feature.
+	r.Use(RequireTenantHealthy)
 	// Per-account limiter, mounted AFTER the identity middleware so
 	// CtxClientID is populated. The outer /v1 limiter already bounds by
 	// IP; this restores the per-client budget that IP bucketing would
@@ -80,6 +159,7 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 	rec := records.New(recDeps)
 	// records is always available, never gated.
 	r.Mount("/records", rec.Routes(vertical))
+	mounted := 0
 	for _, f := range All() {
 		if f.Name == "records" {
 			continue
@@ -97,7 +177,7 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 				rr.Use(gate)
 				f.Routes(rr, deps)
 			})
-			slog.Info("feature mounted (custom)", "vertical", vertical, "feature", f.Name)
+			mounted++
 			continue
 		}
 		adapter := records.NewFeatureAdapter(recDeps, records.FeatureSpec{
@@ -109,7 +189,10 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 			rr.Use(gate)
 			rr.Mount("/", adapter.Routes())
 		})
-		slog.Info("feature mounted", "vertical", vertical, "feature", f.Name)
+		mounted++
 	}
+	// One line per vertical, not per feature: 13 verticals × 18 features
+	// used to emit ~90 Info lines on every cold start.
+	slog.Debug("vertical mounted", "vertical", vertical, "features", mounted)
 	return r
 }

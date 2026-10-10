@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,9 +24,15 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
 const featureName = "pricing"
+
+// SchemaVersion is this binary's pricing contract (see tenant_schema_contracts
+// + records.CheckContractTx). Bump when the shape this code reads changes,
+// and keep the previous shape readable for one release so rollback is a row.
+const SchemaVersion = 1
 
 func init() { Register() }
 
@@ -83,6 +90,12 @@ type Rule struct {
 var ErrNoRule = fmt.Errorf("no pricing rule for date")
 
 func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time) (*Rule, error) {
+	// Contract gate: a tenant rolled forward past this binary refuses
+	// here, before any price is computed — one choke point for RuleFor,
+	// PriceFor, and every caller (bookings, tools, availability).
+	if err := records.CheckContractTx(ctx, tx, tenantID, featureName, SchemaVersion); err != nil {
+		return nil, err
+	}
 	var r Rule
 	var validFrom time.Time
 	err := tx.QueryRow(ctx,
@@ -151,6 +164,34 @@ func (h *handler) PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date
 	if err != nil {
 		return 0, err
 	}
+	return priceFromRule(r, start, end), nil
+}
+
+// RuleAndPriceFor resolves the active rule once and returns both the
+// rule and the computed price. Booking creates need both (the price
+// and the opening-hours window); separate PriceFor + RuleFor calls
+// would run the contract gate and the rule lookup twice per booking.
+func RuleAndPriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time, start, end time.Time) (*Rule, float64, error) {
+	h := &handler{pool: nil}
+	r, err := h.resolveRule(ctx, tx, tenantID, date)
+	if err != nil {
+		return nil, 0, err
+	}
+	return r, priceFromRule(r, start, end), nil
+}
+
+// priceFromRule prices a (start, end) window hour by hour at the
+// day/evening rate, matching the frontend's computePrice.
+//
+// MONEY INVARIANT (whole-rupiah IDR): every amount in the system is a
+// whole rupiah — no sen — so float64 is exact for storage and sums
+// (all values < 2^53). The one exception is right here: rate ×
+// fractional hours (e.g. a 20-minute tail) is inexact binary, so the
+// result is rounded to cents before it leaves. Postgres numeric(12,2)
+// would round on write anyway; rounding here keeps the Go value, the
+// stored value, and the displayed value identical instead of
+// 13333.333333333334 vs 13333.33.
+func priceFromRule(r *Rule, start, end time.Time) float64 {
 	dayStart, _ := time.Parse("15:04", normTime(r.DayStart))
 	dayEnd, _ := time.Parse("15:04", normTime(r.DayEnd))
 	total := 0.0
@@ -159,18 +200,18 @@ func (h *handler) PriceFor(ctx context.Context, tx pgx.Tx, tenantID string, date
 	// one, matching the frontend, which iterates `for h = startH; h < endH`.
 	// Overlapping court slots are whole hours everywhere in this product,
 	// so a fractional end is not a case worth diverging on.
-	for h := start; h.Before(end); h = h.Add(time.Hour) {
+	for t := start; t.Before(end); t = t.Add(time.Hour) {
 		rate := r.PriceEvening
-		if !h.Before(dayStart) && h.Before(dayEnd) {
+		if !t.Before(dayStart) && t.Before(dayEnd) {
 			rate = r.PriceDay
 		}
-		segEnd := h.Add(time.Hour)
+		segEnd := t.Add(time.Hour)
 		if segEnd.After(end) {
 			segEnd = end
 		}
-		total += rate * segEnd.Sub(h).Hours()
+		total += rate * segEnd.Sub(t).Hours()
 	}
-	return total, nil
+	return math.Round(total*100) / 100
 }
 
 func normTime(s string) string {
@@ -226,7 +267,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		).Scan(&id)
 	})
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgerr.IsUniqueViolation(err) {
 			records.WriteJSONError(w, http.StatusConflict, "a rule already exists for that valid_from")
 			return
 		}
@@ -248,12 +289,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []ruleResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]ruleResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
@@ -333,17 +374,24 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		val any
 	}
 	var vals []kv
-	if req.OpenTime != nil {
-		vals = append(vals, kv{"open_time", *req.OpenTime + "::time"})
-	}
-	if req.CloseTime != nil {
-		vals = append(vals, kv{"close_time", *req.CloseTime + "::time"})
-	}
-	if req.DayStart != nil {
-		vals = append(vals, kv{"day_start", *req.DayStart + "::time"})
-	}
-	if req.DayEnd != nil {
-		vals = append(vals, kv{"day_end", *req.DayEnd + "::time"})
+	for _, tf := range []struct {
+		val *string
+		col string
+	}{
+		{req.OpenTime, "open_time"},
+		{req.CloseTime, "close_time"},
+		{req.DayStart, "day_start"},
+		{req.DayEnd, "day_end"},
+	} {
+		if tf.val != nil {
+			// Fail closed on format: the raw string is concatenated with
+			// ::time below, so garbage would 500 in SQL instead of 400 here.
+			if _, err := time.Parse("15:04", normTime(*tf.val)); err != nil {
+				records.WriteJSONError(w, http.StatusBadRequest, tf.col+" must be HH:MM")
+				return
+			}
+			vals = append(vals, kv{tf.col, *tf.val + "::time"})
+		}
 	}
 	if req.PriceDay != nil {
 		if *req.PriceDay < 0 {
@@ -501,11 +549,4 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
-}
-
-func isUniqueViolation(err error) bool {
-	if pgErr, ok := err.(interface{ SQLState() string }); ok {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
 }

@@ -48,8 +48,8 @@ func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 			// bookings here made a venue look profitable while nothing
 			// had been collected.
 			net := b.Received() - expenses
-			return fmt.Sprintf("net profit %.0f (%s to %s): %s, expenses %.0f",
-				net, from, to, b.Describe(), expenses)
+			return fmt.Sprintf("net profit %s (%s to %s): %s, expenses %s",
+				agentstools.Idr(net), from, to, b.Describe(), agentstools.Idr(expenses))
 		},
 	}
 }

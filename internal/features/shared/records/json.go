@@ -1,8 +1,10 @@
 package records
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 // writeJSON serializes v as JSON with the given status. Panics on
@@ -16,4 +18,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// emptyPayloadJSON is the shared empty-object payload. List handlers
+// stamp it on rows with NULL/empty payloads instead of allocating one
+// []byte("{}") per row; it is read-only after init (marshaled, never
+// mutated).
+var emptyPayloadJSON = []byte("{}")
+
+// detachedCtx returns a context for post-commit bookkeeping (metering):
+// detached from client cancellation so a disconnect after the response
+// is computed cannot drop the row, bounded to 5s so a hung DB cannot
+// hold the goroutine forever. Callers defer the cancel.
+func detachedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }

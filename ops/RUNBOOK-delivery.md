@@ -33,6 +33,7 @@ is active per environment.
 
    ```bash
    supabase functions deploy deliver-notification
+   supabase functions deploy deliver-reminders
    ```
 
 3. Secrets. One in Supabase Vault (read by `pg_cron`/`pg_net`),
@@ -97,7 +98,6 @@ select jobname, status, start_time from cron.job_run_details
 
 -- webhook calls (pg_net log)
 select * from net._http_response order by id desc limit 5;
-```
 
 End to end (reminders — PENDING-REPAIR):
 
@@ -105,7 +105,6 @@ End to end (reminders — PENDING-REPAIR):
 -- with BACKGROUND_TICKERS=false on the running app
 insert into agent_reminders (tenant_id, chat_id, text, remind_at)
 values ('centrum', '<chat_id>', 'DELIVERY SMOKE TEST', now() + interval '2 minutes');
-```
 
 > No delivery is expected until the reminder repair lands: `reminder-tick`
 > currently posts to the deleted `deliver-reminders` function. The row

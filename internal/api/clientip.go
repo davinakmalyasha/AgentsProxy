@@ -13,22 +13,26 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 )
 
 var (
-	trustedOnce sync.Once
+	trustedMu   sync.RWMutex
 	trustedNets []netip.Prefix
+	configured  bool
 )
 
-func loadTrustedProxies() {
-	trustedNets = []netip.Prefix{
+func defaultTrusted() []netip.Prefix {
+	return []netip.Prefix{
 		netip.MustParsePrefix("127.0.0.0/8"),
 		netip.MustParsePrefix("::1/128"),
 	}
-	for _, part := range strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ",") {
+}
+
+func parseTrustedCIDRs(cidrs []string) []netip.Prefix {
+	nets := defaultTrusted()
+	for _, part := range cidrs {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -37,14 +41,34 @@ func loadTrustedProxies() {
 			part += "/32"
 		}
 		if p, err := netip.ParsePrefix(part); err == nil {
-			trustedNets = append(trustedNets, p)
+			nets = append(nets, p)
 		}
 	}
+	return nets
+}
+
+// ConfigureTrustedProxies installs the trusted-proxy set from config.
+// Called once at boot from cfg.TrustedProxyCIDRs; invalid entries are
+// skipped (fail-closed: an unparsable CIDR trusts nothing new).
+// Unconfigured processes keep loopback-only trust.
+func ConfigureTrustedProxies(cidrs []string) {
+	trustedMu.Lock()
+	defer trustedMu.Unlock()
+	trustedNets = parseTrustedCIDRs(cidrs)
+	configured = true
+}
+
+func currentTrusted() []netip.Prefix {
+	trustedMu.RLock()
+	defer trustedMu.RUnlock()
+	if !configured {
+		return defaultTrusted()
+	}
+	return trustedNets
 }
 
 // trustedPeer reports whether the TCP peer may set forwarding headers.
 func trustedPeer(remoteAddr string) bool {
-	trustedOnce.Do(loadTrustedProxies)
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
@@ -53,7 +77,7 @@ func trustedPeer(remoteAddr string) bool {
 	if err != nil {
 		return false
 	}
-	for _, p := range trustedNets {
+	for _, p := range currentTrusted() {
 		if p.Contains(ip) {
 			return true
 		}

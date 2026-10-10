@@ -8,6 +8,7 @@ package availability
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
@@ -45,10 +47,19 @@ type handler struct {
 	// going to Postgres each time — busy intervals can be up to 3s
 	// stale, which is invisible for a "free slot" board and far kinder
 	// to the DB. Per-instance is fine: it's a cache, not a source of
-	// truth (a write just isn't visible for ≤3s on this instance).
+	// truth (a write just isn't visible for ~3s on this instance).
+	//
+	// Bounded: maxAvailCacheEntries caps tenants × dates × types, and
+	// every write evicts expired entries first, so the map cannot grow
+	// without bound on a public polling endpoint.
 	cache   map[string]cachedAvail
 	cacheMu sync.Mutex
 }
+
+// maxAvailCacheEntries bounds the availability cache: one entry per
+// (tenant, date, type). A venue polls a handful of dates; 512 is far
+// above any real keyspace and keeps the cap a non-issue in practice.
+const maxAvailCacheEntries = 512
 
 type cachedAvail struct {
 	at      time.Time
@@ -57,10 +68,6 @@ type cachedAvail struct {
 
 // cacheTTL bounds how long a built availability payload is reused.
 const cacheTTL = 3 * time.Second
-
-// jakartaTZ is UTC+7 with no DST. FixedZone keeps this dependency-free
-// on Windows containers, matching the agent's wibLoc().
-var jakartaTZ = time.FixedZone("WIB", 7*3600)
 
 type busyInterval struct {
 	Start string `json:"start"`
@@ -91,7 +98,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		// codebase already compares in Asia/Jakarta — so a UTC host would
 		// default to yesterday for seven hours a day and the landing board
 		// would quietly show the wrong day's availability.
-		date = time.Now().In(jakartaTZ).Format("2006-01-02")
+		date = agentstools.WibNow().Format("2006-01-02")
 	}
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
@@ -119,109 +126,101 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	if h.cache == nil {
 		h.cache = map[string]cachedAvail{}
 	}
+	// Evict expired entries first so the map cannot grow without bound;
+	// then enforce the cap by dropping one entry (every entry is at
+	// most seconds old, so any drop is cheap and self-healing).
+	now2 := time.Now()
+	for k, v := range h.cache {
+		if now2.Sub(v.at) >= cacheTTL {
+			delete(h.cache, k)
+		}
+	}
+	if len(h.cache) >= maxAvailCacheEntries {
+		for k := range h.cache {
+			delete(h.cache, k)
+			break
+		}
+	}
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
 	h.cacheMu.Unlock()
 	records.WriteJSON(w, http.StatusOK, payload)
 }
 
-// build runs the 3-query availability read and returns the payload.
+// build runs the availability read and returns the payload.
+//
+// One statement, one round trip: facilities LEFT JOINed to their busy
+// intervals (bookings + blocks aggregated as JSONB in SQL). The old
+// shape ran 3 sequential queries in a transaction (facilities, then
+// bookings, then blocks) plus the tx framing — 6 round trips per cache
+// miss on the highest-QPS endpoint. An all-courts block
+// (facility_id NULL) fans out in the UNION, so the Go fan-out loop is
+// gone too.
 func (h *handler) build(ctx context.Context, tenantID, date, typ string) (map[string]any, error) {
-	type facInfo struct {
-		id, name, open, close string
-	}
-	var facilities []facInfo
-	// facility → busy intervals
-	busyByFac := map[string][]busyInterval{}
-
+	out := make([]facilityAvailability, 0, 16)
 	err := records.WithTenantTx(ctx, h.pool, tenantID, func(tx pgx.Tx) error {
-		q := `SELECT id::text, name, open_time::text, close_time::text FROM sports_facilities
-			  WHERE tenant_id=$1 AND deleted_at IS NULL AND status='active'`
-		args := []any{tenantID}
+		q := `SELECT f.id::text, f.name, f.open_time::text, f.close_time::text,
+		              COALESCE((
+		                SELECT jsonb_agg(x ORDER BY x->>'start', x->>'end')
+		                  FROM (
+		                    SELECT jsonb_build_object('start', to_char(b.start_time, 'HH24:MI'),
+		                                              'end', to_char(b.end_time, 'HH24:MI'),
+		                                              'kind', 'booked') AS x
+		                      FROM sports_bookings b
+		                     WHERE b.tenant_id = $1 AND b.date = $2::date
+		                       AND b.status NOT IN ('cancelled', 'no_show')
+		                       AND b.facility_id = f.id
+		                    UNION ALL
+		                    SELECT jsonb_build_object('start', to_char(k.start_time, 'HH24:MI'),
+		                                              'end', to_char(k.end_time, 'HH24:MI'),
+		                                              'kind', 'blocked')
+		                      FROM sports_court_blocks k
+		                     WHERE k.tenant_id = $1 AND k.block_date = $2::date
+		                       AND (k.facility_id = f.id OR k.facility_id IS NULL)
+		                  ) sub
+		              ), '[]'::jsonb)
+		         FROM sports_facilities f
+		        WHERE f.tenant_id = $1 AND f.deleted_at IS NULL AND f.status = 'active'`
+		args := []any{tenantID, date}
 		if typ != "" {
-			q += ` AND type=$2`
+			q += ` AND f.type = $3`
 			args = append(args, typ)
 		}
-		q += ` ORDER BY name`
+		// Courts are ones, not thousands — but no query ships unbounded.
+		// 500 is far above any venue; hitting it means a different product.
+		q += ` ORDER BY f.name LIMIT 500`
 		rows, err := tx.Query(ctx, q, args...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var f facInfo
-			if err := rows.Scan(&f.id, &f.name, &f.open, &f.close); err != nil {
+			var fa facilityAvailability
+			var open, close string
+			var busyRaw []byte
+			if err := rows.Scan(&fa.FacilityID, &fa.Name, &open, &close, &busyRaw); err != nil {
 				return err
 			}
-			facilities = append(facilities, f)
-			busyByFac[f.id] = nil
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-
-		// Booked intervals (non-cancelled/no_show).
-		brows, err := tx.Query(ctx,
-			`SELECT facility_id::text, start_time::text, end_time::text FROM sports_bookings
-			  WHERE tenant_id=$1 AND date=$2::date AND status NOT IN ('cancelled','no_show')
-			  ORDER BY start_time`,
-			tenantID, date)
-		if err != nil {
-			return err
-		}
-		defer brows.Close()
-		for brows.Next() {
-			var fid, s, e string
-			if err := brows.Scan(&fid, &s, &e); err != nil {
-				return err
-			}
-			if _, ok := busyByFac[fid]; ok {
-				busyByFac[fid] = append(busyByFac[fid], busyInterval{Start: shortTime(s), End: shortTime(e), Kind: "booked"})
-			}
-		}
-		if err := brows.Err(); err != nil {
-			return err
-		}
-
-		// Court blocks (facility_id NULL = all courts).
-		crows, err := tx.Query(ctx,
-			`SELECT COALESCE(facility_id::text,''), start_time::text, end_time::text FROM sports_court_blocks
-			  WHERE tenant_id=$1 AND block_date=$2::date
-			  ORDER BY start_time`,
-			tenantID, date)
-		if err != nil {
-			return err
-		}
-		defer crows.Close()
-		for crows.Next() {
-			var fid, s, e string
-			if err := crows.Scan(&fid, &s, &e); err != nil {
-				return err
-			}
-			bi := busyInterval{Start: shortTime(s), End: shortTime(e), Kind: "blocked"}
-			if fid == "" {
-				// All-courts block → every facility.
-				for f := range busyByFac {
-					busyByFac[f] = append(busyByFac[f], bi)
+			fa.OpenTime = shortTime(open)
+			fa.CloseTime = shortTime(close)
+			// Preserve the old shape exactly: no busy intervals
+			// serializes as null, not [].
+			if string(busyRaw) != "[]" {
+				var busy []busyInterval
+				if err := json.Unmarshal(busyRaw, &busy); err != nil {
+					return err
 				}
-			} else if _, ok := busyByFac[fid]; ok {
-				busyByFac[fid] = append(busyByFac[fid], bi)
+				for i := range busy {
+					busy[i].Start = shortTime(busy[i].Start)
+					busy[i].End = shortTime(busy[i].End)
+				}
+				fa.Busy = busy
 			}
+			out = append(out, fa)
 		}
-		return crows.Err()
+		return rows.Err()
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	out := make([]facilityAvailability, 0, len(facilities))
-	for _, f := range facilities {
-		out = append(out, facilityAvailability{
-			FacilityID: f.id,
-			Name:       f.name,
-			OpenTime:   shortTime(f.open),
-			CloseTime:  shortTime(f.close),
-			Busy:       busyByFac[f.id],
-		})
 	}
 	return map[string]any{"date": date, "facilities": out}, nil
 }

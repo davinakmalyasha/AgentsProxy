@@ -8,6 +8,7 @@ package payments
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
@@ -77,6 +79,10 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.BookingID) == "" {
 		records.WriteJSONError(w, http.StatusBadRequest, "booking_id required")
+		return
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(req.BookingID)); err != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "booking_id must be a uuid")
 		return
 	}
 	if req.Amount <= 0 {
@@ -141,7 +147,8 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			return overpayErr
 		}
 		if req.Amount > outstanding {
-			overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f", req.Amount, outstanding)
+			overpayErr = fmt.Errorf("amount %s exceeds outstanding %s",
+				agentstools.Idr(req.Amount), agentstools.Idr(outstanding))
 			return overpayErr
 		}
 		// recorded_by is who actually took the money, which is not the same
@@ -197,7 +204,6 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	bookingID := q.Get("booking_id")
 	// WIB calendar-day bounds on paid_at (same convention as reports).
 	// ?from=YYYY-MM-DD & ?to=YYYY-MM-DD (to exclusive). ?limit caps rows.
 	from, to := strings.TrimSpace(q.Get("from")), strings.TrimSpace(q.Get("to"))
@@ -241,8 +247,15 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []paymentResp
+	out := make([]paymentResp, 0, limit+1)
 	truncated := false
+	bookingID := strings.TrimSpace(q.Get("booking_id"))
+	if bookingID != "" {
+		if _, err := uuid.Parse(bookingID); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "booking_id must be a uuid")
+			return
+		}
+	}
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
 		          FROM sports_payments WHERE tenant_id = $1 AND deleted_at IS NULL`
@@ -424,8 +437,8 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if newTotal := paid + *req.Amount; newTotal > effective+1e-9 {
-				overpayErr = fmt.Errorf("amount %.2f exceeds outstanding %.2f",
-					*req.Amount, effective-paid)
+				overpayErr = fmt.Errorf("amount %s exceeds outstanding %s",
+					agentstools.Idr(*req.Amount), agentstools.Idr(effective-paid))
 				return overpayErr
 			}
 		}
@@ -441,6 +454,12 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Missing payment (or its booking vanished mid-edit) is a 404,
+		// not a 500: the inner SELECTs surface pgx.ErrNoRows.
+		if errors.Is(err, pgx.ErrNoRows) {
+			records.WriteJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}

@@ -13,11 +13,16 @@ package tenantembed
 
 import "embed"
 
-// AgentsFS carries every tenant's folders into the binary.
+// AgentsFS carries every tenant's declarative folders into the binary.
+//
+// Only memory/ and skills/ are embedded: that is everything the loader
+// reads (project.json, SystemPrompt.md, Information/*.md, skills/*.md).
+// The tenant backend/ and tools/ trees are compiled Go — embedding their
+// .go sources too shipped ~440KB twice (once compiled, once as text).
 //
 // The _template tenant is embedded too and skipped by the loader;
 // embedding it keeps `go build` honest about its syntax without treating
 // it as a live tenant.
 //
-//go:embed all:tenants
+//go:embed all:tenants/*/memory all:tenants/*/skills
 var AgentsFS embed.FS

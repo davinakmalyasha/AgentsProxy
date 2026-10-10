@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,7 +24,9 @@ import (
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // Config wires one Runner: the pool tools run against, the tenant projects,
@@ -50,6 +53,148 @@ type Runner struct {
 	// NewToolSetFor call) so tests can substitute stub tools without
 	// touching the global registry.
 	newToolSet func(pool *pgxpool.Pool, tenant, role string) *agentstools.ToolSet
+	// mu guards projects: the admin reload path swaps one tenant's
+	// config while requests read. cfg.Projects is the boot snapshot and
+	// must not be read directly after New.
+	mu       sync.RWMutex
+	projects map[string]*agentconfig.Project
+	// toolSets caches the adapted ADK tool set per (tenant, toolsRole).
+	// The registry is init()-static, so entries never go stale; the
+	// cache is per-Runner (not global) so tests with stub tool sets
+	// cannot collide with each other. Saves 18 constructors + 18
+	// schema parses + 2 sorts per request.
+	// prompts caches the assembled system prompt per
+	// (tenant, role, WIB date). The date rides the key because the
+	// prompt carries today's date; UpdateProject evicts the tenant.
+	cacheMu  sync.RWMutex
+	toolSets map[string]*cachedTools
+	prompts  map[string]string
+}
+
+// cachedTools is one role-filtered, ADK-adapted tool set.
+type cachedTools struct {
+	names   []string
+	adapted []tool.Tool
+	defs    []string
+}
+
+// cacheKey namespaces the tool/prompt caches. \x00 cannot appear in a
+// slug, role, or date, so plain concatenation is collision-free.
+func cacheKey(parts ...string) string {
+	return strings.Join(parts, "\x00")
+}
+
+// cachedSet returns the adapted tool set for (tenant, toolsRole),
+// building and caching it on first use. Maps are lazily initialised
+// so test-constructed Runners (which bypass New) work too.
+func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
+	key := cacheKey(tenantID, toolsRole)
+	r.cacheMu.RLock()
+	ct, ok := r.toolSets[key]
+	r.cacheMu.RUnlock()
+	if ok {
+		return ct, nil
+	}
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if r.toolSets == nil {
+		r.toolSets = map[string]*cachedTools{}
+	}
+	if ct, ok := r.toolSets[key]; ok {
+		return ct, nil
+	}
+	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
+	names := ts.Names()
+	adapted := make([]tool.Tool, 0, len(names))
+	for _, name := range names {
+		t, ok := ts.Get(name)
+		if !ok {
+			continue
+		}
+		at, err := adaptTool(t, tenantID)
+		if err != nil {
+			// Proven at boot for every registered tool; reaching here
+			// means the set changed under us, which must be loud.
+			return nil, err
+		}
+		adapted = append(adapted, at)
+	}
+	ct = &cachedTools{names: names, adapted: adapted, defs: ts.Definitions()}
+	r.toolSets[key] = ct
+	return ct, nil
+}
+
+// cachedPrompt returns the assembled system prompt for
+// (tenant, role, date), building and caching it on first use. Stale
+// dates are swept on a miss so the cache holds one day only.
+func (r *Runner) cachedPrompt(tenantID, role, date string, build func() string) string {
+	key := cacheKey(tenantID, role, date)
+	r.cacheMu.RLock()
+	if r.prompts != nil {
+		if p, ok := r.prompts[key]; ok {
+			r.cacheMu.RUnlock()
+			return p
+		}
+	}
+	r.cacheMu.RUnlock()
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if r.prompts == nil {
+		r.prompts = map[string]string{}
+	}
+	if p, ok := r.prompts[key]; ok {
+		return p
+	}
+	p := build()
+	r.prompts[key] = p
+	for k := range r.prompts {
+		if !strings.HasSuffix(k, "\x00"+date) {
+			delete(r.prompts, k)
+		}
+	}
+	return p
+}
+
+// projectFor returns one tenant's config under read lock. A nil project
+// is not an error (base prompt serves unconfigured tenants); a
+// quarantined tenant never reaches here (fail-closed above it).
+func (r *Runner) projectFor(tenantID string) *agentconfig.Project {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.projects[tenantID]
+}
+
+// UpdateProject hot-swaps one tenant's config (admin reload path). Only
+// called after the candidate passes LoadSingle + Validate + tool proof,
+// so serving config is always known-good. Evicts the tenant's cached
+// prompts; the tool set is registry-derived and unaffected.
+func (r *Runner) UpdateProject(p *agentconfig.Project) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.projects == nil {
+		r.projects = map[string]*agentconfig.Project{}
+	}
+	r.projects[p.Slug] = p
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	prefix := p.Slug + "\x00"
+	for k := range r.prompts {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.prompts, k)
+		}
+	}
+}
+
+// TenantSlugs lists tenants with serving configs (for admin health).
+func (r *Runner) TenantSlugs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.projects))
+	for slug := range r.projects {
+		out = append(out, slug)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // New builds the shared model and proves every registered tool adapts.
@@ -75,7 +220,7 @@ func New(cfg Config) (*Runner, error) {
 		APIKey:     cfg.APIKey,
 		BaseURL:    cfg.BaseURL,
 		API:        openaimodel.APIChatCompletions,
-		HTTPClient: &http.Client{Timeout: 60 * time.Second},
+		HTTPClient: httpx.NewClient(60 * time.Second),
 		Options:    opts,
 	})
 	if err != nil {
@@ -102,8 +247,17 @@ func New(cfg Config) (*Runner, error) {
 		slog.Info("adkrunner: tenant tools live",
 			"tenant", tenant, "tools", len(ts.Names()), "schema_bytes", schemaBytes)
 	}
-	return &Runner{cfg: cfg, model: m, newToolSet: agentstools.NewToolSetFor}, nil
+	return &Runner{cfg: cfg, model: m, projects: cfg.Projects, newToolSet: agentstools.NewToolSetFor,
+		toolSets: map[string]*cachedTools{}, prompts: map[string]string{}}, nil
 }
+
+// TurnTimeout bounds one agent turn end to end. Worst case without it
+// is maxModelCalls × the per-model-call HTTP timeout (5 × 60s = 300s),
+// which exceeds both the HTTP WriteTimeout and Vercel's function cap —
+// the server would kill the connection mid-write. 80s fits a full
+// 5-call turn at typical provider latency with headroom, and leaves
+// 10s of slack inside the 90s WriteTimeout derived from it in main.
+const TurnTimeout = 80 * time.Second
 
 // RunWithRole processes one user message and returns the reply. Same
 // signature as the old loop: role selects both the persona and the tool
@@ -117,10 +271,19 @@ func (r *Runner) RunWithRole(ctx context.Context, tenantID, vertical, userName, 
 // a caller-chosen tenant) with the client persona. Every other caller
 // passes the same tier twice.
 func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userName, toolsRole, role, message string) (string, error) {
-	var project *agentconfig.Project
-	if r.cfg.Projects != nil {
-		project = r.cfg.Projects[tenantID]
+	// Fail closed: a quarantined tenant never reaches the model. Silence
+	// with an honest 503 (mapped by the handler) instead of a confident
+	// reply from a half-loaded prompt.
+	if q, reason := tenanthealth.Check(tenantID); q {
+		slog.Warn("quarantined tenant blocked from agent", "tenant", tenantID, "reason", reason)
+		return "", tenanthealth.ErrQuarantined
 	}
+	// Bound the whole turn. Without this the worst case is maxModelCalls
+	// × the per-call provider timeout, which outlives both WriteTimeout
+	// and the platform cap. Handlers map DeadlineExceeded to 504.
+	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
+	defer cancel()
+	project := r.projectFor(tenantID)
 	// Tenant identity for shared text: the project's display and contact,
 	// falling back to the tenant slug and the platform default. For
 	// centrum these resolve to the exact strings the hardcoded replies
@@ -147,30 +310,21 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 
-	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
-
-	adapted := make([]tool.Tool, 0, len(ts.Names()))
-	for _, name := range ts.Names() {
-		t, ok := ts.Get(name)
-		if !ok {
-			continue
-		}
-		at, err := adaptTool(t, tenantID)
-		if err != nil {
-			// Proven at boot for every registered tool; reaching here
-			// means the set changed under us, which must be loud.
-			return "", err
-		}
-		adapted = append(adapted, at)
+	ts, err := r.cachedSet(tenantID, toolsRole)
+	if err != nil {
+		return "", err
 	}
 
-	instruction := Assemble(Layers{
-		Project:  project,
-		Role:     role,
-		Display:  display,
-		ToolDefs: ts.Definitions(),
-		Vertical: vertical,
-		Now:      time.Now(),
+	now := agentstools.WibNow()
+	instruction := r.cachedPrompt(tenantID, role, now.Format("2006-01-02"), func() string {
+		return Assemble(Layers{
+			Project:  project,
+			Role:     role,
+			Display:  display,
+			ToolDefs: ts.defs,
+			Vertical: vertical,
+			Now:      now,
+		})
 	})
 
 	ag, err := llmagent.New(llmagent.Config{
@@ -187,7 +341,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		InstructionProvider: func(ctx adkagent.ReadonlyContext) (string, error) {
 			return instruction, nil
 		},
-		Tools: adapted,
+		Tools: ts.adapted,
 		GenerateContentConfig: &genai.GenerateContentConfig{
 			MaxOutputTokens: int32(r.cfg.MaxTokens),
 		},
@@ -206,6 +360,13 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		SessionService:    r.cfg.Sessions,
 		AutoCreateSession: true,
 		PluginConfig:      runner.PluginConfig{Plugins: []*plugin.Plugin{gp}},
+		// Compaction deliberately unset: sliding-window/tail retention
+		// would spend summarizer model calls and change what the model
+		// sees. History growth is bounded instead by the 180-day events
+		// retention (ops/retention.sql) and served by
+		// events_session_time_idx (migration 053). Revisit when a
+		// single session's turn count, not the table, becomes the cost
+		// center — that needs per-session windowing, not a global flag.
 	})
 	if err != nil {
 		return "", fmt.Errorf("adkrunner: runner: %w", err)

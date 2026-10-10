@@ -3,38 +3,25 @@ package agentstools
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// CtxRecipientID carries the sender's recipient ID for out-of-chat
-// delivery through the agent loop into tools. Tools that deliver outside
-// the chat require it; callers without a delivery recipient have none.
-type ctxKey string
-
-const CtxRecipientID ctxKey = "recipient_id"
-
-// RecipientIDFromCtx returns the sender recipient ID, or "" when the
-// caller has no delivery recipient.
-func RecipientIDFromCtx(ctx context.Context) string {
-	if v, ok := ctx.Value(CtxRecipientID).(int64); ok && v != 0 {
-		return strconv.FormatInt(v, 10)
-	}
-	if v, ok := ctx.Value(CtxRecipientID).(string); ok {
-		return v
-	}
-	return ""
-}
-
-// WithRecipientID stamps a context with the sender's recipient ID.
-func WithRecipientID(ctx context.Context, recipientID int64) context.Context {
-	return context.WithValue(ctx, CtxRecipientID, recipientID)
-}
-
 // WibNow returns now in WIB (UTC+7, no DST). FixedZone avoids tzdata
 // dependency on Windows containers.
+//
+// TIME POLICY (single source of truth):
+//   - Business-day buckets (caps keys, availability default date, expense
+//     spent_at default, series "future", report months, prompt date) use
+//     WIB via this function. Server-local midnight would bill the wrong
+//     day for seven hours a day on a UTC host.
+//   - Technical buckets stay UTC by explicit decision, not by accident:
+//     quota month + resetAt wire format (quota.go), usage month
+//     (usage/store.go), rate-limit minute bucket (ratelimit.go).
+//     Migrating those to WIB needs double-write + reconciliation, because
+//     quota months and report months would otherwise disagree on the
+//     month boundary.
 func WibNow() time.Time {
 	return time.Now().In(WibLoc())
 }
@@ -108,8 +95,9 @@ func LoadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (Basis
 }
 
 // Describe renders the basis in one sentence so every tool phrases the
-// same two numbers the same way.
+// same two numbers the same way. Idr, not %.0f: one rounding rule
+// (half-up) everywhere instead of Go's half-to-even % formatting.
 func (b Basis) Describe() string {
-	return fmt.Sprintf("terima %.0f (cash %.0f, qris %.0f, kantin %.0f), teresan %.0f",
-		b.Received(), b.Cash, b.QRIS, b.Kantin, b.Booked)
+	return fmt.Sprintf("terima %s (cash %s, qris %s, kantin %s), teresan %s",
+		Idr(b.Received()), Idr(b.Cash), Idr(b.QRIS), Idr(b.Kantin), Idr(b.Booked))
 }

@@ -8,7 +8,7 @@
 -- a job on every environment sharing the migration ledger.
 --
 -- Local dev (Laragon) does not need this at all: the Go ticker owns
--- delivery there (REMINDER_TICKER unset = true).
+-- delivery there (BACKGROUND_TICKERS unset = true).
 --
 --   psql "$DATABASE_ADMIN_URL" -f ops/schedule-delivery.sql
 --

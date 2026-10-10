@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 )
@@ -75,16 +76,7 @@ var terminalSeriesStatuses = map[string]bool{"paused": true, "ended": true}
 // to 14:00 WIB, so using now() there would cancel today's evening slot at
 // lunchtime.
 func todayJakarta() string {
-	return time.Now().In(jakartaLoc).Format("2006-01-02")
-}
-
-var jakartaLoc *time.Location
-
-func init() {
-	// Fixed +07:00 (WIB) rather than Asia/Jakarta: identical for the whole
-	// of Indonesian time, and it cannot fail if the zoneinfo database is
-	// missing from a minimal container.
-	jakartaLoc = time.FixedZone("WIB", 7*60*60)
+	return agentstools.WibNow().Format("2006-01-02")
 }
 
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
@@ -155,12 +147,12 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []seriesResp
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]seriesResp, 0, limit+1)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at

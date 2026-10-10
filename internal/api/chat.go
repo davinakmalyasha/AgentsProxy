@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -18,6 +19,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/quota"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
 
@@ -110,7 +112,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid message role")
 			return
 		}
-		if len([]rune(m.Content)) > maxMessageRunes {
+		if utf8.RuneCountInString(m.Content) > maxMessageRunes {
 			writeJSONError(w, http.StatusBadRequest, "message too long")
 			return
 		}
@@ -130,6 +132,11 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientModel.Status != "active" {
 		writeJSONError(w, http.StatusForbidden, "client "+clientModel.Status)
+		return
+	}
+	if q, reason := tenanthealth.Check(clientModel.TenantID); q {
+		slog.Warn("quarantined tenant blocked from chat", "tenant", clientModel.TenantID, "reason", reason)
+		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
 		return
 	}
 
@@ -174,10 +181,15 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Metering failure must page but never break the reply the user
-	// already paid latency for.
-	if err := usage.Record(r.Context(), h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
-		slog.Error("usage record failed", "client_id", clientModel.ID, "err", err)
+	// Metering must never break the reply the user already paid
+	// latency for — but it must not be lost either. Detached context:
+	// a client that disconnects after the model call still gets
+	// metered. Warn, not Error: Error records auto-forward to Sentry
+	// with a stack trace, and a metering blip must not page.
+	mctx, mcancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer mcancel()
+	if err := usage.Record(mctx, h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
+		slog.Warn("usage record failed", "client_id", clientModel.ID, "err", err)
 	}
 
 	cost := usage.EstimateCost(inTok, outTok)

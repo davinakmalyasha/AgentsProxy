@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -104,6 +105,7 @@ func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
+		`GRANT SELECT ON tenant_schema_contracts TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_member_topups TO app`,
@@ -275,7 +277,97 @@ func TestMembers_TopupIdempotency(t *testing.T) {
 	}
 }
 
-// TestMembers_TenantIsolation — the mandatory isolation test.
+// TestMembers_TopupIdempotencyScopedToMember: the same key on two
+// DIFFERENT members credits independently. A key is (tenant, key, member),
+// never just (tenant, key) — otherwise B's check returns A's balance.
+func TestMembers_TopupIdempotencyScopedToMember(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	mk := func(name string, balance int) string {
+		resp := doReq(t, h.router, "POST", "/members", "tok-mem-a",
+			fmt.Sprintf(`{"name":%q,"balance":%d}`, name, balance))
+		if resp.StatusCode != 201 {
+			t.Fatalf("create %s status=%d body=%s", name, resp.StatusCode, readAll(t, resp))
+		}
+		m := readJSON(t, resp)
+		id, _ := m["id"].(string)
+		return id
+	}
+	idA, idB := mk("Ana", 10000), mk("Beni", 20000)
+
+	top := func(id, key string) (int, map[string]any) {
+		resp := doReqKey(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":5000}`, key)
+		m := readJSON(t, resp)
+		return resp.StatusCode, m
+	}
+	if code, _ := top(idA, "shared-key"); code != 200 {
+		t.Fatalf("A topup status=%d want 200", code)
+	}
+	code, m := top(idB, "shared-key")
+	if code != 200 {
+		t.Fatalf("B topup status=%d want 200", code)
+	}
+	if m["balance"] != float64(25000) || m["deduplicated"] == true {
+		t.Errorf("B topup = %v, want fresh credit to 25000 (not A's balance, not deduplicated)", m)
+	}
+	var n int
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("ledger rows = %d, want 2 (one per member)", n)
+	}
+}
+
+// TestMembers_TombstoneDelete: owner delete hides but preserves the row
+// (balance intact) with who/when. Re-delete → 404.
+func TestMembers_TombstoneDelete(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"Hapus","balance":50000}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, readAll(t, resp))
+	}
+	id, _ := readJSON(t, resp)["id"].(string)
+
+	respD := doReq(t, h.router, "DELETE", "/members/"+id, "tok-mem-a", "")
+	if respD.StatusCode != 200 {
+		t.Fatalf("delete status=%d body=%s", respD.StatusCode, readAll(t, respD))
+	}
+	readAll(t, respD)
+	if r := doReq(t, h.router, "GET", "/members/"+id, "tok-mem-a", ""); r.StatusCode != 404 {
+		t.Errorf("get deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	mL := readJSON(t, doReq(t, h.router, "GET", "/members", "tok-mem-a", ""))
+	for _, it := range mL["items"].([]any) {
+		if m, _ := it.(map[string]any); m["id"] == id {
+			t.Error("deleted member still listed")
+		}
+	}
+	var bal float64
+	var delAt time.Time
+	if err := h.adminPool.QueryRow(ctx,
+		`SELECT balance, deleted_at FROM sports_members WHERE id=$1::uuid`, id).Scan(&bal, &delAt); err != nil {
+		t.Fatalf("tombstone row missing: %v", err)
+	}
+	if bal != 50000 || delAt.IsZero() {
+		t.Errorf("tombstone balance=%v deleted_at=%v, want 50000 + set", bal, delAt)
+	}
+	if r := doReq(t, h.router, "DELETE", "/members/"+id, "tok-mem-a", ""); r.StatusCode != 404 {
+		t.Errorf("re-delete status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+	// Topup on a deleted member → 404, not a silent credit.
+	if r := doReq(t, h.router, "POST", "/members/"+id+"/topup", "tok-mem-a", `{"amount":1000}`); r.StatusCode != 404 {
+		t.Errorf("topup deleted status=%d want 404", r.StatusCode)
+		readAll(t, r)
+	}
+}
+
 func TestMembers_TenantIsolation(t *testing.T) {
 	h := setup(t)
 	resp := doReq(t, h.router, "POST", "/members", "tok-mem-a", `{"name":"A Member"}`)

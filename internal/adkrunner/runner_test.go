@@ -3,6 +3,7 @@ package adkrunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // stubTripper replays canned chat-completions bodies in order (repeating
@@ -67,10 +69,15 @@ func jsonString(s string) string {
 	return string(b)
 }
 
+// testCtxKey is a test-local context key proving caller values reach the
+// tool handler. It replaces the removed Telegram-era recipient plumbing;
+// the property under test is propagation, not delivery.
+type testCtxKey struct{}
+
 // TestCtxReachesTool is the proof the whole cutover rests on: values the
-// caller puts in ctx (recipient ID for out-of-chat delivery) must be visible
-// inside the tool handler, the tenant must arrive from the closure (never
-// the model), and the tool's result must flow into the final reply.
+// caller puts in ctx must be visible inside the tool handler, the tenant
+// must arrive from the closure (never the model), and the tool's result
+// must flow into the final reply.
 func TestCtxReachesTool(t *testing.T) {
 	trip := &stubTripper{bodies: []string{
 		toolCallBody("probe_tool", `{"q":"lapangan satu"}`),
@@ -85,14 +92,14 @@ func TestCtxReachesTool(t *testing.T) {
 		Run: func(ctx context.Context, tenantID string, args json.RawMessage) string {
 			runs++
 			sawTenant = tenantID
-			sawRecipient = agentstools.RecipientIDFromCtx(ctx)
+			sawRecipient, _ = ctx.Value(testCtxKey{}).(string)
 			sawArgs = string(args)
 			return "PROBE-OK"
 		},
 	}
 	r := testRunner(t, trip, probe)
 
-	ctx := agentstools.WithRecipientID(context.Background(), 123)
+	ctx := context.WithValue(context.Background(), testCtxKey{}, "123")
 	reply, err := r.RunWithToolsRole(ctx, "t1", "sports", "user1", "owner", "owner", "halo")
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -104,7 +111,7 @@ func TestCtxReachesTool(t *testing.T) {
 		t.Errorf("tenant = %q, want t1 (must come from the closure, not the model)", sawTenant)
 	}
 	if sawRecipient != "123" {
-		t.Errorf("recipientID = %q, want 123 (ctx did not reach the tool)", sawRecipient)
+		t.Errorf("ctx value = %q, want 123 (ctx did not reach the tool)", sawRecipient)
 	}
 	if !strings.Contains(sawArgs, "lapangan satu") {
 		t.Errorf("args = %s, want the model's q", sawArgs)
@@ -123,14 +130,12 @@ func TestBracesInPromptSurvive(t *testing.T) {
 		finalBody("Halo!"),
 	}}
 	r := testRunner(t, trip)
-	r.cfg.Projects = map[string]*agentconfig.Project{
-		"t1": {
-			Slug:         "t1",
-			Display:      "T Satu",
-			Vertical:     "sports",
-			SystemPrompt: "Today's date is {{DATE}} (WIB). {{TOOLS}}",
-		},
-	}
+	r.UpdateProject(&agentconfig.Project{
+		Slug:         "t1",
+		Display:      "T Satu",
+		Vertical:     "sports",
+		SystemPrompt: "Today's date is {{DATE}} (WIB). {{TOOLS}}",
+	})
 
 	reply, err := r.RunWithToolsRole(context.Background(), "t1", "sports", "user1", "owner", "owner", "halo")
 	if err != nil {
@@ -203,6 +208,31 @@ func TestAdapterRejectsBadArgs(t *testing.T) {
 		t.Errorf("reply = %q", reply)
 	}
 }
+
+// TestQuarantinedTenantNeverReachesModel: a fenced tenant fails closed
+// with the sentinel error before any model spend (trip.calls stays 0).
+// A healthy tenant proceeds to the model normally: the fence is scoped.
+func TestQuarantinedTenantNeverReachesModel(t *testing.T) {
+	trip := &stubTripper{bodies: []string{finalBody("Halo!")}}
+	r := testRunner(t, trip)
+	tenanthealth.Quarantine("t1", "test fence")
+	defer tenanthealth.Release("t1")
+	_, err := r.RunWithToolsRole(context.Background(), "t1", "sports", "u", "owner", "owner", "halo")
+	if !errors.Is(err, tenanthealth.ErrQuarantined) {
+		t.Fatalf("err = %v, want ErrQuarantined", err)
+	}
+	if trip.calls != 0 {
+		t.Errorf("fenced tenant caused %d model calls, want 0", trip.calls)
+	}
+	_, err2 := r.RunWithToolsRole(context.Background(), "t2", "sports", "u", "owner", "owner", "halo")
+	if errors.Is(err2, tenanthealth.ErrQuarantined) {
+		t.Fatal("healthy tenant fenced")
+	}
+	if trip.calls == 0 {
+		t.Error("healthy tenant made no model call")
+	}
+}
+
 func testRunner(t *testing.T, trip *stubTripper, tools ...agentstools.Tool) *Runner {
 	t.Helper()
 	m, err := openaimodel.NewModel(context.Background(), "test-model", &openaimodel.ClientConfig{

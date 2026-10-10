@@ -163,13 +163,13 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []facilityResp
 	typ := r.URL.Query().Get("type")
 	limit, lerr := records.ParseLimit(r)
 	if lerr != nil {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+	out := make([]facilityResp, 0, limit+1)
 	var q string
 	var args []any
 	if typ != "" {

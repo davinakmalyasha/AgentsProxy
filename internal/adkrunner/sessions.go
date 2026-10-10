@@ -30,17 +30,18 @@ func NewSessionService(pool *pgxpool.Pool) (session.Service, error) {
 // VerifySessionTables fails boot loudly when the ADK tables are missing.
 // Same philosophy as LoadProjects: a store that is not there produces an
 // agent that cannot converse, and that must be a failed deploy, not a 3am
-// discovery.
+// discovery. One round trip for all four tables.
 func VerifySessionTables(ctx context.Context, pool *pgxpool.Pool) error {
-	for _, t := range sessionTables {
-		var ok bool
-		if err := pool.QueryRow(ctx,
-			`SELECT to_regclass($1) IS NOT NULL`, "public."+t).Scan(&ok); err != nil {
-			return fmt.Errorf("adkrunner: session table check %s: %w", t, err)
-		}
-		if !ok {
-			return fmt.Errorf("adkrunner: session table public.%s is missing (migrations not applied?)", t)
-		}
+	var missing string
+	err := pool.QueryRow(ctx,
+		`SELECT COALESCE(string_agg(t, ', ' ORDER BY t), '') FROM unnest($1::text[]) AS t
+		  WHERE to_regclass('public.' || t) IS NULL`,
+		sessionTables).Scan(&missing)
+	if err != nil {
+		return fmt.Errorf("adkrunner: session table check: %w", err)
+	}
+	if missing != "" {
+		return fmt.Errorf("adkrunner: session tables missing: %s (migrations not applied?)", missing)
 	}
 	return nil
 }

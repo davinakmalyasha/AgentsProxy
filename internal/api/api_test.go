@@ -28,6 +28,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 )
 
 type harness struct {
@@ -157,7 +158,7 @@ func setup(t *testing.T) *harness {
 		Cache:   cli,
 		LLM:     llmCli,
 		ADK:     testADKRunner(t, pool, mockLLM.URL),
-		Auth:    &authapi.Auth{Pool: pool, Cache: cli},
+		Auth:    &authapi.Auth{Pool: pool, RDB: rdb},
 		Version: "test",
 	})
 	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey}
@@ -626,6 +627,94 @@ func TestAdmin_Usage(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("status=%d", resp.StatusCode)
+	}
+}
+
+// TestAdmin_ContractBump: canary bump happy path + every rejection.
+// Rollback is just a bump back.
+func TestAdmin_ContractBump(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	alphaID := lookupClientID(t, h.pool, "alpha")
+	bump := func(id, body string) (int, string) {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients/"+id+"/contract", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		resp := mustReq(t, req)
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(raw)
+	}
+	// Happy: bump alpha bookings to v1 (current catalog max).
+	if code, raw := bump(alphaID, `{"feature":"bookings","version":1}`); code != 200 {
+		t.Fatalf("bump status=%d body=%s want 200", code, raw)
+	}
+	var tenant string
+	var ver int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT tenant_id, version FROM tenant_schema_contracts WHERE feature='bookings' AND tenant_id='alpha'`).Scan(&tenant, &ver); err != nil {
+		t.Fatalf("contract row missing: %v", err)
+	}
+	if ver != 1 {
+		t.Errorf("version=%d want 1", ver)
+	}
+	for name, tc := range map[string]struct {
+		id   string
+		body string
+		want int
+	}{
+		"unknown feature":  {alphaID, `{"feature":"nope","version":1}`, 400},
+		"ahead of catalog": {alphaID, `{"feature":"bookings","version":99}`, 400},
+		"version zero":     {alphaID, `{"feature":"bookings","version":0}`, 400},
+		"empty feature":    {alphaID, `{"feature":"","version":1}`, 400},
+		"bad json":         {alphaID, `not-json`, 400},
+		"unknown tenant":   {"00000000-0000-0000-0000-000000000000", `{"feature":"bookings","version":1}`, 404},
+		"bad id":           {"not-a-uuid", `{"feature":"bookings","version":1}`, 400},
+	} {
+		if code, raw := bump(tc.id, tc.body); code != tc.want {
+			t.Errorf("%s: status=%d body=%s want %d", name, code, raw, tc.want)
+		}
+	}
+}
+
+// TestAdmin_TenantHealthAndReload: quarantine surface reports and the
+// reload path re-validates a healthy tenant back to serving.
+func TestAdmin_TenantHealthAndReload(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	adminH := func(method, path, body string) *http.Response {
+		var req *http.Request
+		if body != "" {
+			req, _ = http.NewRequest(method, srv.URL+path, bytes.NewReader([]byte(body)))
+			req.Header.Set("Content-Type", "application/json")
+		} else {
+			req, _ = http.NewRequest(method, srv.URL+path, nil)
+		}
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		return mustReq(t, req)
+	}
+	resp := adminH("GET", "/v1/admin/tenant-health", "")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("health status=%d body=%s", resp.StatusCode, raw)
+	}
+	// Reload the healthy embedded tenant: exercises LoadSingle + Validate
+	// + tool proof + hot-swap for real.
+	resp2 := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"centrum"}`)
+	raw2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("reload status=%d body=%s", resp2.StatusCode, raw2)
+	}
+	// Unknown slug → 400, never quarantine-by-typo.
+	resp3 := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"nope"}`)
+	raw3, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != 400 {
+		t.Errorf("reload unknown status=%d body=%s want 400", resp3.StatusCode, raw3)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -271,6 +272,52 @@ func TestQueue_DrainLeavesNoStrandedRows(t *testing.T) {
 	}
 	if total != 0 {
 		t.Fatalf("rows=%d want 0 (drain must not strand rows)", total)
+	}
+}
+
+func TestQueue_DrainHoldsQuarantinedTenant(t *testing.T) {
+	pool, ctx := queueCtx(t)
+	q := New(pool)
+	f := &fakeSender{}
+
+	if err := q.Enqueue(ctx, "q-hold", "+6281", "held"); err != nil {
+		t.Fatal(err)
+	}
+	tenanthealth.Quarantine("q-hold", "test")
+	defer tenanthealth.Release("q-hold")
+
+	sent, failed := q.Drain(ctx, f)
+	if sent != 0 || failed != 0 {
+		t.Fatalf("sent=%d failed=%d want 0/0 (quarantined tenant held)", sent, failed)
+	}
+	if f.count() != 0 {
+		t.Fatalf("sender calls=%d want 0", f.count())
+	}
+	// Job preserved: present, unarchived, claim undone (read_ct back to 0).
+	var n, readCt int
+	var archivedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(SUM(read_ct),0) FROM notify_jobs WHERE tenant_id='q-hold'`).Scan(&n, &readCt); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || readCt != 0 {
+		t.Errorf("rows=%d read_ct=%d want 1/0 (hold burns nothing)", n, readCt)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT archived_at FROM notify_jobs WHERE tenant_id='q-hold'`).Scan(&archivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if archivedAt != nil {
+		t.Error("held job archived")
+	}
+	// Release → visibility restored (simulate the 5-minute park elapsing)
+	// → next drain delivers normally.
+	tenanthealth.Release("q-hold")
+	if _, err := pool.Exec(ctx, `UPDATE notify_jobs SET vt = now() WHERE tenant_id='q-hold'`); err != nil {
+		t.Fatal(err)
+	}
+	if sent, _ := q.Drain(ctx, f); sent != 1 {
+		t.Fatalf("after release sent=%d want 1", sent)
 	}
 }
 

@@ -36,8 +36,6 @@ type Tool struct {
 	// arguments".
 	Parameters json.RawMessage
 	Run        func(ctx context.Context, tenantID string, args json.RawMessage) string
-	// Roles that may call this tool. Empty = all (legacy). Used for isolation.
-	Roles []string
 	// Tenant is the slug that registered this tool, stamped at build time
 	// from the registry key -- never set by hand. Empty means global: a
 	// hand-built set (tests) is visible to every tenant.

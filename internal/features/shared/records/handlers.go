@@ -24,14 +24,13 @@ import (
 // Handler is the records-feature HTTP handler. It's stateless; the
 // dependencies travel in via Deps at construction.
 type Handler struct {
-	Pool  *pgxpool.Pool
-	Cache *cache.Client
+	Pool *pgxpool.Pool
 }
 
 // New returns a Handler. Kept as a constructor so future fields
 // (e.g. a metrics sink) can be added without changing call sites.
 func New(deps Deps) *Handler {
-	return &Handler{Pool: deps.Pool, Cache: deps.Cache}
+	return &Handler{Pool: deps.Pool}
 }
 
 // ---- payload types ----
@@ -139,8 +138,10 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		if err := usage.Record(r.Context(), h.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
-			slog.Error("usage record failed", "client_id", cm.ID, "err", err)
+		mctx, mcancel := detachedCtx(r.Context())
+		defer mcancel()
+		if err := usage.Record(mctx, h.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
+			slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	}
@@ -152,9 +153,12 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 		if cm == nil {
 			return
 		}
-		kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-		q := strings.TrimSpace(r.URL.Query().Get("q"))
-		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		// One parse: url.ParseQuery is not cached, so every
+		// r.URL.Query() call costs a map plus N slices.
+		qv := r.URL.Query()
+		kind := strings.TrimSpace(qv.Get("kind"))
+		q := strings.TrimSpace(qv.Get("q"))
+		status := strings.TrimSpace(qv.Get("status"))
 		if status == "" {
 			status = "active" // hardening #1: soft-delete leak fix
 		}
@@ -162,31 +166,38 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid status")
 			return
 		}
-		limit := parseLimit(r.URL.Query().Get("limit"))
-		cur, err := decodeCursor(r.URL.Query().Get("before"))
+		limit := parseLimit(qv.Get("limit"))
+		cur, err := decodeCursor(qv.Get("before"))
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 
 		var (
-			items  []recordResp
+			items  = make([]recordResp, 0, limit+1)
 			lastTs time.Time
 			lastID string
 		)
 		err = withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
-			listSQL := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
+			var sb strings.Builder
+			sb.Grow(256)
+			sb.WriteString(`SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 			            FROM tenant_records
-			            WHERE vertical = $1 AND status = $2`
+			            WHERE vertical = $1 AND status = $2`)
 			args := []any{vertical, status}
 			idx := 3
 			if kind != "" {
-				listSQL += fmt.Sprintf(" AND kind = $%d", idx)
+				sb.WriteString(" AND kind = $")
+				sb.WriteString(strconv.Itoa(idx))
 				args = append(args, kind)
 				idx++
 			}
 			if q != "" {
-				listSQL += fmt.Sprintf(" AND (title ILIKE $%d OR payload::text ILIKE $%d)", idx, idx)
+				sb.WriteString(" AND (title ILIKE $")
+				sb.WriteString(strconv.Itoa(idx))
+				sb.WriteString(" OR payload::text ILIKE $")
+				sb.WriteString(strconv.Itoa(idx))
+				sb.WriteString(")")
 				args = append(args, "%"+q+"%")
 				idx++
 			}
@@ -194,14 +205,19 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 			// DESC ordering. The composite condition keeps the sort
 			// stable when two rows share a created_at.
 			if !cur.ts.IsZero() {
-				listSQL += fmt.Sprintf(" AND (created_at, id) < ($%d, $%d::uuid)", idx, idx+1)
+				sb.WriteString(" AND (created_at, id) < ($")
+				sb.WriteString(strconv.Itoa(idx))
+				sb.WriteString(", $")
+				sb.WriteString(strconv.Itoa(idx + 1))
+				sb.WriteString("::uuid)")
 				args = append(args, cur.ts, cur.id.String())
 				idx += 2
 			}
-			listSQL += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", idx)
+			sb.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $")
+			sb.WriteString(strconv.Itoa(idx))
 			args = append(args, limit+1) // +1 over-fetch to detect has_more
 
-			rows, err := tx.Query(r.Context(), listSQL, args...)
+			rows, err := tx.Query(r.Context(), sb.String(), args...)
 			if err != nil {
 				return err
 			}
@@ -214,12 +230,20 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 					return err
 				}
 				if len(payload) == 0 {
-					payload = []byte("{}")
+					payload = emptyPayloadJSON
 				}
 				rec.Payload = json.RawMessage(payload)
 				rec.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 				rec.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
 				items = append(items, rec)
+				// Keep the raw timestamp of the last KEPT row: the
+				// +1 over-fetch row is truncated below, so only the
+				// first `limit` rows may seed the next cursor.
+				// Re-parsing the formatted string would cost a parse
+				// per list request for a value we already hold.
+				if len(items) <= limit {
+					lastTs, lastID = createdAt, rec.ID
+				}
 			}
 			if err := rows.Err(); err != nil {
 				return err
@@ -235,19 +259,14 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 		if hasMore {
 			items = items[:limit]
 		}
-		if hasMore && len(items) > 0 {
-			last := items[len(items)-1]
-			lastTs, _ = time.Parse(time.RFC3339Nano, last.CreatedAt)
-			lastID = last.ID
-		}
 		out := listResp{Items: items, HasMore: hasMore, Limit: limit}
 		if hasMore {
 			uid, _ := uuidFromString(lastID)
 			out.NextCursor = encodeCursor(lastTs, uid)
 		}
 		// Back-compat: include page/limit if the caller asked.
-		if r.URL.Query().Get("page") != "" {
-			out.Page, _ = strconv.Atoi(r.URL.Query().Get("page"))
+		if pv := qv.Get("page"); pv != "" {
+			out.Page, _ = strconv.Atoi(pv)
 			if out.Page < 1 {
 				out.Page = 1
 			}

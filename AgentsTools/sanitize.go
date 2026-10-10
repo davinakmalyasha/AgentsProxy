@@ -129,6 +129,12 @@ func SanitiseReply(text string) string {
 	if t == "" {
 		return "Saya belum bisa menjawab itu. Coba tanya hal yang lebih spesifik tentang data usaha."
 	}
+	// Fast path: every protocol pattern needs '<' (tags) or '"'
+	// (JSON keys). Plain prose with neither can never match, so skip
+	// all 8 regex scans. No false negatives by construction.
+	if !strings.ContainsAny(t, "<\"") {
+		return t
+	}
 	hit := firstMarkupHit(t)
 	if hit == nil {
 		return t
@@ -199,18 +205,11 @@ func firstMarkupHit(text string) *markupHit {
 	return best
 }
 
-// IsOffTopic is the cheap abuse/jailbreak heuristic for the public tiers.
-// Exported so the agent loop shares one copy instead of drifting apart;
-// kept in sanitize because it is input hygiene, not policy. Sports is the
-// default vertical, preserving the exact historical behavior.
-func IsOffTopic(msg string) bool {
-	return IsOffTopicFor(msg, "sports")
-}
-
-// IsOffTopicFor is the same heuristic scoped to a vertical: the
-// jailbreak markers are universal, but the venue words that redeem a
-// message belong to the tenant's domain. A salon tenant's "potong rambut"
-// must count the way a sports tenant's "lapangan" does.
+// IsOffTopicFor is the cheap abuse/jailbreak heuristic for the public
+// tiers, scoped to a vertical: the jailbreak markers are universal, but
+// the venue words that redeem a message belong to the tenant's domain.
+// A salon tenant's "potong rambut" must count the way a sports tenant's
+// "lapangan" does.
 func IsOffTopicFor(msg, vertical string) bool {
 	m := strings.ToLower(msg)
 	// Very cheap heuristic for abuse/jailbreak vs venue talk.

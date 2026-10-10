@@ -71,8 +71,9 @@ runtime's current GC/allocator work as free performance.
 
 - Building `MainTemplates`, DFD milestones, or orders.
 - A database, server, or Redis keyspace per client — one shared schema with `tenant_id` + RLS.
-- ~~No Vercel deploy~~ — **superseded.** Vercel's 300s function ceiling comfortably covers the
-  60s `llm.Client` cap, and `vercel.json` pins `maxDuration: 300`. Vercel, Railway, and VPS
+- ~~No Vercel deploy~~ — **superseded.** Vercel's 300s function ceiling (Fluid Compute
+  default on every plan) comfortably covers one agent turn, and `regions: ["sin1"]`
+  keeps the function next to Supabase ap-southeast-1. Vercel, Railway, and VPS
   are all supported; `BACKGROUND_TICKERS` selects the delivery driver.
 
 ---
@@ -271,7 +272,7 @@ feature owns its handlers.
 
 1. Migration `internal/db/migrations/NNN_<name>.sql`: table + RLS policy + `GRANT ... TO app_runtime`.
 2. `feature.go`: `Kind: ""` (not a `tenant_records` kind), `Routes: routes`.
-3. Handlers use `records.WithTenantTx` (sets `app.tenant_id` for RLS) + `records.RequireClient` / `WriteJSON`.
+3. Handlers use `records.WithTenantTx` (sets `app.tenant_id` for RLS) + `records.RequireIdentity` / `RequireOwner` / `WriteJSON`.
 4. Feature test: isolation **and** the feature's invariant (bookings has a real double-booking concurrency test).
 5. Add `app` role grants for the new tables to `bootstrapAppRole` in every test harness.
 

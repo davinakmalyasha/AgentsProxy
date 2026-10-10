@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
 
@@ -34,13 +34,12 @@ type FeatureSpec struct {
 
 type FeatureAdapter struct {
 	Pool     *pgxpool.Pool
-	Cache    *cache.Client
 	Spec     FeatureSpec
 	Vertical string // closed over at builder time; never read from URL
 }
 
 func NewFeatureAdapter(deps Deps, spec FeatureSpec, vertical string) *FeatureAdapter {
-	return &FeatureAdapter{Pool: deps.Pool, Cache: deps.Cache, Spec: spec, Vertical: vertical}
+	return &FeatureAdapter{Pool: deps.Pool, Spec: spec, Vertical: vertical}
 }
 
 func (a *FeatureAdapter) Routes() http.Handler {
@@ -102,8 +101,10 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if err := usage.Record(r.Context(), a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
-		slog.Error("usage record failed", "client_id", cm.ID, "err", err)
+	mctx, mcancel := detachedCtx(r.Context())
+	defer mcancel()
+	if err := usage.Record(mctx, a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
+		slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
@@ -114,26 +115,29 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vertical := a.Vertical
+	// One parse (see Handler.list for why).
+	qv := r.URL.Query()
 	kind := a.Spec.Kind
 	if kind == "" {
-		kind = r.URL.Query().Get("kind")
+		kind = qv.Get("kind")
 	}
 	status := "active"
-	if s := r.URL.Query().Get("status"); s != "" {
+	if s := qv.Get("status"); s != "" {
 		if s != "active" && s != "deleted" {
 			writeJSONError(w, http.StatusBadRequest, "invalid status")
 			return
 		}
 		status = s
 	}
-	limit := parseLimit(r.URL.Query().Get("limit"))
-	cur, err := decodeCursor(r.URL.Query().Get("before"))
+	limit := parseLimit(qv.Get("limit"))
+	cur, err := decodeCursor(qv.Get("before"))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid cursor")
 		return
 	}
-	var items []recordResp
-	var last recordResp
+	var items = make([]recordResp, 0, limit+1)
+	var lastTs time.Time
+	var lastID string
 	err = withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 		        FROM tenant_records WHERE vertical = $1 AND kind = $2 AND status = $3`
@@ -159,12 +163,15 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if len(payload) == 0 {
-				payload = []byte("{}")
+				payload = emptyPayloadJSON
 			}
 			rec.Payload = json.RawMessage(payload)
 			rec.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			rec.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
 			items = append(items, rec)
+			if len(items) <= limit {
+				lastTs, lastID = createdAt, rec.ID
+			}
 		}
 		return rows.Err()
 	})
@@ -176,13 +183,11 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
-		last = items[len(items)-1]
 	}
 	out := listResp{Items: items, HasMore: hasMore, Limit: limit}
 	if hasMore {
-		uid, _ := uuidFromString(last.ID)
-		ts, _ := time.Parse(time.RFC3339Nano, last.CreatedAt)
-		out.NextCursor = encodeCursor(ts, uid)
+		uid, _ := uuidFromString(lastID)
+		out.NextCursor = encodeCursor(lastTs, uid)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -274,7 +279,7 @@ func (a *FeatureAdapter) patch(w http.ResponseWriter, r *http.Request) {
 		idx++
 	}
 	args = append(args, id, vertical, kind)
-	sql := "UPDATE tenant_records SET " + joinComma(sets) +
+	sql := "UPDATE tenant_records SET " + strings.Join(sets, ", ") +
 		" WHERE id = $" + strconv.Itoa(idx) + "::uuid AND vertical = $" + strconv.Itoa(idx+1) +
 		" AND kind = $" + strconv.Itoa(idx+2)
 	var affected int64
@@ -332,27 +337,4 @@ func (a *FeatureAdapter) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
-}
-
-// featuresVertical is unused now that the adapter closes over the
-// vertical at builder time. Kept as a stub in case a future
-// caller wants to override it via a chi URL param.
-func featuresVertical(r *http.Request) string {
-	if rc := chi.RouteContext(r.Context()); rc != nil {
-		if v := rc.URLParam("vertical"); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func joinComma(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += ", "
-		}
-		out += s
-	}
-	return out
 }

@@ -15,9 +15,22 @@ import (
 )
 
 const (
-	cacheTTL  = 30 * time.Second
 	keyPrefix = "quota:"
 )
+
+// MonthKey is the single source for the monthly quota counter key.
+// usage.Record writes what Check reads: a rename here can never split
+// them silently again.
+func MonthKey(clientID string) string {
+	return keyPrefix + clientID + ":" + time.Now().UTC().Format("200601")
+}
+
+// MonthExpiry is the absolute expiry for a monthly counter: next month
+// start + 1 day grace, so a key always dies shortly after its month.
+func MonthExpiry() int64 {
+	now := time.Now().UTC()
+	return nextMonthStart(now).Add(24 * time.Hour).Unix()
+}
 
 type QuotaExceededError struct {
 	ResetAt time.Time
@@ -38,8 +51,7 @@ func (e *QuotaExceededError) Error() string {
 // non-positive limit denies outright — quota math must never grant.
 func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID string, limit int) (int, time.Time, error) {
 	now := time.Now().UTC()
-	monthKey := now.Format("200601")
-	rkey := keyPrefix + clientID + ":" + monthKey
+	rkey := MonthKey(clientID)
 	resetAt := nextMonthStart(now)
 
 	if limit <= 0 {
@@ -75,7 +87,15 @@ func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID st
 		if used < 0 {
 			used = 0
 		}
-		if err := rdb.Set(ctx, rkey, used, cacheTTL).Err(); err != nil {
+		// Repopulate with the SAME month-anchored expiry the counter
+		// writes use. The old 30s TTL here meant a repopulated key
+		// silently became a 30-second key and the next request re-ran
+		// the full month SUM.
+		ttl := time.Until(nextMonthStart(now).Add(24 * time.Hour))
+		if ttl < time.Minute {
+			ttl = time.Minute
+		}
+		if err := rdb.Set(ctx, rkey, used, ttl).Err(); err != nil {
 			slog.Warn("quota cache repopulate", "client_id", clientID, "err", err)
 		}
 	}
@@ -91,11 +111,11 @@ func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID st
 }
 
 func sumMonthUsage(ctx context.Context, db *pgxpool.Pool, clientID string) (int, error) {
+	// Definer path (migration 053): usage is unreadable to app_runtime
+	// by policy, so the month total comes from a function that can only
+	// ever see this one client's rows.
 	var used int
-	err := db.QueryRow(ctx,
-		`SELECT COALESCE(SUM(tokens_in + tokens_out), 0)::int FROM usage WHERE client_id = $1 AND created_at >= date_trunc('month', now())`,
-		clientID,
-	).Scan(&used)
+	err := db.QueryRow(ctx, `SELECT private.month_tokens($1::uuid)`, clientID).Scan(&used)
 	if err != nil {
 		return 0, err
 	}

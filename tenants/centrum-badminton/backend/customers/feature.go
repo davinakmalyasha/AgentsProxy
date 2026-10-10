@@ -19,6 +19,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
 const featureName = "customers"
@@ -89,7 +90,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			idn.TenantID(), req.Name, req.Phone, req.Notes).Scan(&id)
 	})
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgerr.IsUniqueViolation(err) {
 			records.WriteJSONError(w, http.StatusConflict, "customer with that phone already exists")
 			return
 		}
@@ -104,25 +105,39 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if idn == nil {
 		return
 	}
-	var out []customerResp
-	// One grouped query instead of a per-row correlated count over the
-	// whole booking history. Match by name OR phone: the customer's
-	// phone is the unique key, but legacy/walk-in bookings may carry
-	// only a name — preserve the old name-based count while also
-	// counting phone-matched rows. COUNT(DISTINCT) so a booking that
-	// matches on both never double-counts.
+	limit, lerr := records.ParseLimit(r)
+	if lerr != nil {
+		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	out := make([]customerResp, 0, limit+1)
+	// Paginate the customers FIRST, then aggregate only that page. The
+	// old shape joined every customer against the tenant's whole booking
+	// history, grouped, and discarded all but LIMIT rows — LIMIT bounded
+	// the output, not the work. Match by FK first (023), falling back to
+	// the legacy name/phone match for pre-FK rows; COUNT(DISTINCT) so a
+	// booking matching on both never double-counts.
+	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
-			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
+			`WITH page AS (
+			   SELECT id, tenant_id, name, phone, no_show_count, notes, created_at
+			     FROM sports_customers
+			    WHERE tenant_id = $1 AND deleted_at IS NULL
+			    ORDER BY name
+			    LIMIT $2
+			 )
+			 SELECT p.id::text, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at,
 			        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed'))
-			   FROM sports_customers c
+			   FROM page p
 			   LEFT JOIN sports_bookings b
-			          ON b.tenant_id = c.tenant_id
-			         AND (b.customer_name = c.name OR (c.phone <> '' AND b.customer_phone = c.phone))
-			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
-			  GROUP BY c.id
-			  ORDER BY c.name`,
-			idn.TenantID())
+			          ON b.tenant_id = p.tenant_id
+			         AND (b.customer_id = p.id
+			              OR b.customer_name = p.name
+			              OR (p.phone <> '' AND b.customer_phone = p.phone))
+			  GROUP BY p.id, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at
+			  ORDER BY p.name`,
+			idn.TenantID(), limit+1)
 		if err != nil {
 			return err
 		}
@@ -135,6 +150,11 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			}
 			c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 			out = append(out, c)
+			if len(out) > limit {
+				out = out[:limit]
+				truncated = true
+				break
+			}
 		}
 		return rows.Err()
 	})
@@ -142,7 +162,10 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	if out == nil {
+		out = []customerResp{}
+	}
+	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
 }
 
 // top returns the top customers by visit count (laporan page).
@@ -157,7 +180,7 @@ func (h *handler) top(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	var out []customerResp
+	out := make([]customerResp, 0, limit)
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(),
 			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
@@ -165,7 +188,9 @@ func (h *handler) top(w http.ResponseWriter, r *http.Request) {
 			   FROM sports_customers c
 			   LEFT JOIN sports_bookings b
 			          ON b.tenant_id = c.tenant_id
-			         AND (b.customer_name = c.name OR (c.phone <> '' AND b.customer_phone = c.phone))
+			         AND (b.customer_id = c.id
+			              OR b.customer_name = c.name
+			              OR (c.phone <> '' AND b.customer_phone = c.phone))
 			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
 			  GROUP BY c.id
 			  ORDER BY visits DESC, c.name
@@ -206,7 +231,9 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
 			        (SELECT COUNT(DISTINCT b.id) FROM sports_bookings b
 			          WHERE b.tenant_id=c.tenant_id AND b.status IN ('confirmed','checked_in','completed')
-			            AND (b.customer_name=c.name OR (c.phone <> '' AND b.customer_phone=c.phone)))
+			            AND (b.customer_id=c.id
+			                 OR b.customer_name=c.name
+			                 OR (c.phone <> '' AND b.customer_phone=c.phone)))
 			   FROM sports_customers c WHERE c.id=$1::uuid AND c.tenant_id=$2 AND c.deleted_at IS NULL`,
 			id, idn.TenantID(),
 		).Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits)
@@ -269,7 +296,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		if isUniqueViolation(err) {
+		if pgerr.IsUniqueViolation(err) {
 			records.WriteJSONError(w, http.StatusConflict, "customer with that phone already exists")
 			return
 		}
@@ -313,11 +340,4 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
-}
-
-func isUniqueViolation(err error) bool {
-	if pgErr, ok := err.(interface{ SQLState() string }); ok {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
 }

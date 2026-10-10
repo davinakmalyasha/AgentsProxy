@@ -27,10 +27,16 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
 )
 
 const featureName = "bookings"
+
+// SchemaVersion is this binary's bookings contract (see tenant_schema_contracts
+// + records.CheckContractTx). Bump when the shape this code reads changes,
+// and keep the previous shape readable for one release so rollback is a row.
+const SchemaVersion = 1
 
 func init() { Register() }
 
@@ -38,8 +44,10 @@ func init() { Register() }
 // sports feature wires this to the notify queue in main.go; tests
 // can leave it nil. The tenant is passed explicitly because the
 // enqueue happens outside this request's transaction, so there is no
-// ambient tenant context to read.
-var NotifyFunc func(tenantID, to, text string)
+// ambient tenant context to read. The context is the caller's request
+// context; implementations must detach it (context.WithoutCancel +
+// timeout) so a client disconnect after commit cannot drop the job.
+var NotifyFunc func(ctx context.Context, tenantID, to, text string)
 
 // Register registers the bookings feature. Safe to call from tests
 // after features.ResetForTest().
@@ -189,6 +197,11 @@ var errOutsideRuleHours = errors.New("booking outside the pricing rule's opening
 // a way through rather than showing a generic failure.
 var errSlotBlocked = errors.New("slot is blocked")
 
+// errDuplicateKey is the in-tx signal for "idempotency pre-check found the
+// original row". It never leaves create: the caller maps it to the
+// deduplicated reply below.
+var errDuplicateKey = errors.New("idempotent replay")
+
 // blockReason returns the reason the slot is blocked, or "" when it is free.
 //
 // The database trigger (migration 037) enforces the same rule, because the
@@ -297,6 +310,12 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid status")
 		return
 	}
+	// Idempotency-Key (optional phase, same as payments/kantin/topups): a
+	// repeated key returns the original booking. Absent behaves as before.
+	idemKey, haveIdem, idemErr := records.IdempotencyKey(w, r)
+	if idemErr != nil {
+		return
+	}
 	source := req.Source
 	if source == "" {
 		source = "whatsapp"
@@ -329,6 +348,26 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		closeStr string
 	)
 	err = records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		// Contract gate: a tenant rolled forward past this binary fails
+		// closed here (428 below), scoped to that tenant alone.
+		if err := records.CheckContractTx(r.Context(), tx, idn.TenantID(), featureName, SchemaVersion); err != nil {
+			return err
+		}
+		// Idempotent replay inside the same transaction (single-tx, so the
+		// deadlock retry re-reads instead of double-firing).
+		if haveIdem {
+			var existing, existingStatus string
+			qerr := tx.QueryRow(r.Context(),
+				`SELECT id::text, status FROM sports_bookings WHERE tenant_id=$1 AND idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&existing, &existingStatus)
+			if qerr == nil {
+				id, status = existing, existingStatus
+				return errDuplicateKey
+			}
+			if !errors.Is(qerr, pgx.ErrNoRows) {
+				return qerr
+			}
+		}
 		// Validate the facility exists + is active + within open hours.
 		err := tx.QueryRow(r.Context(),
 			`SELECT name, open_time::text, close_time::text FROM sports_facilities
@@ -358,7 +397,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// forever because payment_status treats a 0 price as unpaid.
 		// Refusing the booking is the honest outcome — the owner has to
 		// set up pricing before taking money for a slot.
-		price, err := pricing.PriceFor(r.Context(), tx, idn.TenantID(), date, start, end)
+		rule, price, err := pricing.RuleAndPriceFor(r.Context(), tx, idn.TenantID(), date, start, end)
 		if err != nil {
 			return err
 		}
@@ -370,10 +409,6 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// Both are now checked and both come from the same owner setting
 		// (see applyHours), so they only diverge when a court is
 		// deliberately closed early.
-		rule, ruleErr := pricing.RuleFor(r.Context(), tx, idn.TenantID(), date)
-		if ruleErr != nil {
-			return ruleErr
-		}
 		ruleOpen, e1 := time.Parse("15:04", strings.TrimSuffix(rule.OpenTime, ":00"))
 		ruleClose, e2 := time.Parse("15:04", strings.TrimSuffix(rule.CloseTime, ":00"))
 		if e1 != nil || e2 != nil {
@@ -415,13 +450,32 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		// the adjustment was.
 		return tx.QueryRow(r.Context(),
 			`INSERT INTO sports_bookings
-			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, override_price, deposit, notes, customer_id, created_by, recurring_series_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::uuid) RETURNING id::text`,
+			   (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status, source, price, override_price, deposit, notes, customer_id, created_by, recurring_series_id, idempotency_key)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::uuid,NULLIF($17,'')) RETURNING id::text`,
 			idn.TenantID(), req.FacilityID, date, start, end, req.CustomerName, req.CustomerPhone, status, source, price,
-			req.OverridePrice, req.Deposit, req.Notes, customerID, createdByArg, nullableUUID(req.RecurringSeriesID),
+			req.OverridePrice, req.Deposit, req.Notes, customerID, createdByArg, nullableUUID(req.RecurringSeriesID), idemKey,
 		).Scan(&id)
 	})
 	if err != nil {
+		// Idempotent replay: the pre-check found the original inside the
+		// same transaction (id/status already pointed at it).
+		if errors.Is(err, errDuplicateKey) {
+			records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "status": status, "deduplicated": true})
+			return
+		}
+		// Lost the insert race with a duplicate key: return the winner.
+		if haveIdem && records.IsUniqueViolation(err) {
+			var existing, existingStatus string
+			qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+				return tx.QueryRow(r.Context(),
+					`SELECT id::text, status FROM sports_bookings WHERE tenant_id=$1 AND idempotency_key=$2`,
+					idn.TenantID(), idemKey).Scan(&existing, &existingStatus)
+			})
+			if qerr == nil {
+				records.WriteJSON(w, http.StatusOK, map[string]any{"id": existing, "status": existingStatus, "deduplicated": true})
+				return
+			}
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			records.WriteJSONError(w, http.StatusNotFound, "facility not found")
 			return
@@ -454,12 +508,19 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 				"belum ada aturan harga untuk tanggal ini — set harga di Pengaturan dulu")
 			return
 		}
+		// Rollout gate: this tenant's contract is ahead of this binary.
+		// 428 (distinct from 500/503) so it reads as "deploy first",
+		// not as a crash or a fence.
+		if errors.Is(err, records.ErrContractMismatch) {
+			records.WriteJSONError(w, http.StatusPreconditionRequired, "schema contract mismatch")
+			return
+		}
 		slog.Error("booking create", "err", err)
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	if NotifyFunc != nil && status == "confirmed" {
-		NotifyFunc(idn.TenantID(), req.CustomerPhone, fmt.Sprintf(
+		NotifyFunc(r.Context(), idn.TenantID(), req.CustomerPhone, fmt.Sprintf(
 			"Booking confirmed: %s at %s, %s %s-%s",
 			req.CustomerName, facility, date.Format("Mon Jan 2"), req.StartTime, req.EndTime))
 	}
@@ -478,6 +539,13 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	dateStr := q.Get("date")
 	facilityID := q.Get("facility_id")
+	if facilityID != "" {
+		if _, err := uuid.Parse(strings.TrimSpace(facilityID)); err != nil {
+			records.WriteJSONError(w, http.StatusBadRequest, "facility_id must be a uuid")
+			return
+		}
+		facilityID = strings.TrimSpace(facilityID)
+	}
 	// ?id=<uuid> narrows to a single booking. The frontend connector has
 	// always sent this for `.eq("id", …)` — the shim's id mapping is
 	// table-agnostic — but this handler never read it. The parameter was
@@ -541,7 +609,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	var out []bookingResp
+	out := make([]bookingResp, 0, limit+1)
 	truncated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
@@ -963,9 +1031,17 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		// Overlap with another active booking → friendly 409, not raw PG text.
-		if strings.Contains(err.Error(), "exclusion constraint") {
-			records.WriteJSONError(w, http.StatusConflict, "slot already booked")
+		// Overlap with another active booking — friendly 409, not raw PG text.
+		// Classified by SQLSTATE: the block trigger raises the same 23P01,
+		// and message-text matching breaks on any server wording change.
+		// A named constraint is the overlap guard; an unnamed 23P01 is
+		// the block trigger.
+		if pgerr.IsExclusion(err) {
+			if pgerr.Constraint(err) != "" {
+				records.WriteJSONError(w, http.StatusConflict, "slot already booked")
+			} else {
+				records.WriteJSONError(w, http.StatusConflict, "slot is blocked")
+			}
 			return
 		}
 		// An extension cannot be repriced without a rule. Say so instead
@@ -1021,12 +1097,21 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	// Optional cancellation note (union rule with the cancel_booking tool:
+	// when money moved, how offline cash was handled). Absent behaves
+	// exactly as before; over-long is 400, never silently cut.
+	note := strings.TrimSpace(r.URL.Query().Get("note"))
+	if len(note) > 500 {
+		records.WriteJSONError(w, http.StatusBadRequest, "note too long (max 500 chars)")
+		return
+	}
 	var currentStatus string
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(r.Context(),
-			`UPDATE sports_bookings SET status = 'cancelled', updated_at = now()
+			`UPDATE sports_bookings SET status = 'cancelled', updated_at = now(),
+			        notes = CASE WHEN $3 = '' THEN notes WHEN notes = '' THEN $3 ELSE notes || E'\n' || $3 END
 			  WHERE id = $1::uuid AND tenant_id = $2 AND status IN (`+cancellableFromSQL+`)`,
-			id, idn.TenantID())
+			id, idn.TenantID(), note)
 		if err != nil {
 			return err
 		}
