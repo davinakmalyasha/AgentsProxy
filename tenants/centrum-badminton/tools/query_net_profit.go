@@ -26,22 +26,22 @@ func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 				To   string `json:"to"`
 			}
 			_ = json.Unmarshal(args, &p)
-		from, to := agentstools.DefaultMonthRange(p.From, p.To)
-		// One round trip, no transaction (was BEGIN + LoadBasis×3 +
-		// expenses + COMMIT = 6 RTs). private.range_summary runs as
-		// money_reader; tenant scoping is its p_tenant predicate.
-		s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
-		if err != nil {
-			return "error: " + err.Error()
-		}
-		b := s.Basis()
-		expenses := s.Expenses
-		// Revenue is the money in, not the money promised. Summing
-		// bookings here made a venue look profitable while nothing
-		// had been collected.
-		net := b.Received() - expenses
-		return fmt.Sprintf("net profit %s (%s to %s): %s, expenses %s",
-			agentstools.Idr(net), from, to, b.Describe(), agentstools.Idr(expenses))
+			from, to := agentstools.DefaultMonthRange(p.From, p.To)
+			// One round trip, no transaction (was BEGIN + LoadBasis×3 +
+			// expenses + COMMIT = 6 RTs). private.range_summary runs as
+			// money_reader; tenant scoping is its p_tenant predicate.
+			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
+			if err != nil {
+				return "error: " + err.Error()
+			}
+			b := s.Basis()
+			expenses := s.Expenses
+			// Revenue is the money in, not the money promised. Summing
+			// bookings here made a venue look profitable while nothing
+			// had been collected.
+			net := b.Received() - expenses
+			return fmt.Sprintf("net profit %s (%s to %s): %s, expenses %s",
+				agentstools.Idr(net), from, to, b.Describe(), agentstools.Idr(expenses))
 		},
 	}
 }

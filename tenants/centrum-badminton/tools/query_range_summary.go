@@ -29,20 +29,20 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 				From string `json:"from"`
 				To   string `json:"to"`
 			}
-		_ = json.Unmarshal(args, &p)
-		from, to := agentstools.DefaultMonthRange(p.From, p.To)
-		// One round trip, no transaction: private.range_summary (056) runs
-		// all seven aggregates server-side (was BEGIN + 7 statements +
-		// COMMIT = 9 RTs). Output formatting below is unchanged.
-		s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
-		if err != nil {
-			return "error: " + err.Error()
-		}
-		b := s.Basis()
-		peak := map[int]int{}
-		for _, hc := range s.Peak {
-			peak[hc[0]] = hc[1]
-		}
+			_ = json.Unmarshal(args, &p)
+			from, to := agentstools.DefaultMonthRange(p.From, p.To)
+			// One round trip, no transaction: private.range_summary (056) runs
+			// all seven aggregates server-side (was BEGIN + 7 statements +
+			// COMMIT = 9 RTs). Output formatting below is unchanged.
+			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
+			if err != nil {
+				return "error: " + err.Error()
+			}
+			b := s.Basis()
+			peak := map[int]int{}
+			for _, hc := range s.Peak {
+				peak[hc[0]] = hc[1]
+			}
 			var peakTxt string
 			if len(peak) > 0 {
 				hours := make([]string, 0, len(peak))
@@ -53,12 +53,12 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 				}
 				peakTxt = ", peak " + strings.Join(hours, ", ")
 			}
-		best := "n/a"
-		if s.BestDay != nil {
-			best = fmt.Sprintf("%s (%.0f)", *s.BestDay, s.BestDayAmt)
-		}
-		return fmt.Sprintf("range %s to %s: %s, expenses %.0f, net %.0f, payments %d, bookings %d, best day %s%s",
-			from, to, b.Describe(), s.Expenses, b.Received()-s.Expenses, b.Count, s.Bookings, best, peakTxt)
+			best := "n/a"
+			if s.BestDay != nil {
+				best = fmt.Sprintf("%s (%.0f)", *s.BestDay, s.BestDayAmt)
+			}
+			return fmt.Sprintf("range %s to %s: %s, expenses %.0f, net %.0f, payments %d, bookings %d, best day %s%s",
+				from, to, b.Describe(), s.Expenses, b.Received()-s.Expenses, b.Count, s.Bookings, best, peakTxt)
 		},
 	}
 }
