@@ -112,13 +112,30 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   ~4ms. If p99 says otherwise, the fix is moving Upstash to
   ap-southeast-1 (RUNBOOK-vercel), not code.
   Trigger: measured limiter latency on the request path.
-- **Reminder delivery repair**: `reminder-tick` UNSCHEDULED on prod 2026-10-10
-  (was firing into the deleted `/deliver-reminders`; per 042 header, not the
-  old keep-it-scheduled note). Re-schedule via `ops/schedule-delivery.sql`
-  when the delivery target lands. The 3 orphaned
+- **Reminder delivery repair**: `reminder-tick` must stay unscheduled until
+  a delivery target lands (was firing into the deleted `/deliver-reminders`;
+  per 042 header, not the old keep-it-scheduled note — corrected 2026-10-11:
+  a prod probe found no pg_cron at all, so there was never anything burning
+  on prod; nothing to unschedule, just do not install it).
+  Re-schedule via `ops/schedule-delivery.sql` (reminder line currently
+  commented out) when the delivery target lands. The 3 orphaned
   driver SQL functions were dropped in 055; a repair re-adds what it
   needs (see 031/042/048 for the bodies).
   Trigger: owner decision on the delivery target (PWA transport vs Edge).
+
+## Environments (deferred tiers — decision 2026-10-11)
+
+- **Cloud staging + per-PR preview DBs**: deferred. Branching needs Pro
+  (~$10/mo per persistent branch) and a second project adds daily
+  connection-string juggling for zero benefit at current scale. Standing
+  replacement, in order: (1) Laragon Postgres for dev (unchanged);
+  (2) scratch-PG validation before every migration lands (full 001→latest
+  chain + seeded edge cases + old-vs-new output diff, the 056 drill);
+  (3) `main` branch protection + release-PR habit for prod.
+  Triggers, any one reopens this: real traffic volume (EXPLAIN-after-volume
+  needs a prod-like planner), a second collaborator, or revenue justifying
+  Pro — then: separate staging project first, per-PR branches second, PITR
+  with Pro.
 
 ## Done (moved here from planning — landed)
 

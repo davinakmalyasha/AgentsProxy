@@ -42,14 +42,14 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 2. Reminder tick — UNSCHEDULED 2026-10-03..2026-10-10 decision.
+-- 2. Reminder tick — DO NOT SCHEDULE (verified 2026-10-11: prod has no
+--    pg_cron at all, so nothing is burning; keep it that way).
 --
 --    The `deliver-reminders` Edge Function is deleted (see 042_drop_telegram.sql).
 --    private.tick_due_reminders() below still posts to '/deliver-reminders',
---    so scheduling `reminder-tick` burns a failed pg_net call every 2 min.
---    UNSCHEDULE on prod until a replacement delivery target lands:
---      select cron.unschedule('reminder-tick');
---    Re-run THIS FILE to re-schedule when the target lands (it uses
+--    so scheduling `reminder-tick` would burn a failed pg_net call every 2 min.
+--    Do NOT run the reminder-tick schedule below until a replacement delivery
+--    target lands — then uncomment it and re-run this file (it uses
 --    CREATE OR REPLACE + cron.schedule with IF NOT EXISTS semantics —
 --    check the job block below).
 -- ---------------------------------------------------------------------------
@@ -162,10 +162,10 @@ BEGIN
     PERFORM cron.unschedule(j);
   END LOOP;
 
-  -- UNSCHEDULED 2026-10-10 (decision): `reminder-tick` posts to the deleted
-  -- '/deliver-reminders' function (see private.tick_due_reminders below).
-  -- Do NOT re-schedule until a replacement delivery target lands — then
-  -- uncomment the reminder-tick line below and re-run this file.
+  -- DO NOT SCHEDULE (verified 2026-10-11): `reminder-tick` posts to the
+  -- deleted '/deliver-reminders' function (see private.tick_due_reminders
+  -- below). Uncomment the reminder-tick line and re-run this file only
+  -- when a replacement delivery target lands.
   -- PERFORM cron.schedule('reminder-tick', '*/2 * * * *',
   --   $$SELECT private.tick_due_reminders()$$);
   PERFORM cron.schedule('reaper-tick', '*/5 * * * *',
