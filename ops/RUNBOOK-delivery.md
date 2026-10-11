@@ -17,7 +17,7 @@ is active per environment.
 | | Long-running host | Serverless |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `true` (default) | `false` |
-| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → reminder function (**PENDING-REPAIR**: `deliver-reminders` is deleted; `reminder-tick` fires with no function — cron kept, scheduled-for-repair) |
+| Reminder delivery | Go ticker, `internal/reminder` | `pg_cron` → reminder function (**NOT ON PROD** — verified 2026-10-11, no pg_cron installed; `deliver-reminders` is deleted, so do not schedule `reminder-tick` until a delivery target lands — re-schedule via `ops/schedule-delivery.sql`) |
 | Notification drain | Go ticker, `internal/notify` | DB Webhook → `deliver-notification`, + cron backstop |
 | Stale-claim reaper | Go boot path | `pg_cron` → `reap_stale_claims` (pure SQL) |
 
@@ -81,10 +81,13 @@ This installs three `pg_cron` jobs (`reminder-tick` every 2 min,
 gated on an `exists()` probe, so an idle system spends one indexed query
 per tick and no Edge Function invocations at all.
 
-> **PENDING-REPAIR:** `reminder-tick` calls `private.tick_due_reminders()`,
-> which posts to the deleted `deliver-reminders` function. The cron is kept
-> (do NOT delete it) and marked scheduled-for-repair until a replacement
-> delivery target lands. See `ops/schedule-delivery.sql`.
+> **NOT ON PROD (verified 2026-10-11 — no pg_cron installed):** `reminder-tick`
+> would call `private.tick_due_reminders()`, which posts to the deleted
+> `deliver-reminders` function. Do NOT install/schedule it until a replacement
+> delivery target (PWA transport) lands. Then re-schedule with
+> `ops/schedule-delivery.sql`. Pending reminder rows survive
+> (the claim path only moves `pending` -> `sending`, nothing is dropped).
+> See `ops/schedule-delivery.sql`.
 
 ## Verify
 
@@ -99,17 +102,17 @@ select jobname, status, start_time from cron.job_run_details
 -- webhook calls (pg_net log)
 select * from net._http_response order by id desc limit 5;
 
-End to end (reminders — PENDING-REPAIR):
+End to end (reminders — NOT ON PROD, see above):
 
 ```sql
 -- with BACKGROUND_TICKERS=false on the running app
 insert into agent_reminders (tenant_id, chat_id, text, remind_at)
 values ('centrum', '<chat_id>', 'DELIVERY SMOKE TEST', now() + interval '2 minutes');
 
-> No delivery is expected until the reminder repair lands: `reminder-tick`
-> currently posts to the deleted `deliver-reminders` function. The row
-> should stay `pending`/`sending`, proving the claim path still enqueues.
-> Do NOT delete the `reminder-tick` cron — it is scheduled-for-repair.
+> No delivery is expected until the reminder repair lands AND `reminder-tick`
+> is installed + scheduled: the row should stay `pending`, proving nothing
+> is dropped while delivery has no target. (The in-app Go ticker claims rows
+> only when a sender is configured, so it also leaves them pending.)
 
 ```sql
 select text, status, attempts, claimed_at

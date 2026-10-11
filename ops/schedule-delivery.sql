@@ -42,13 +42,16 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- 2. Reminder tick — PENDING-REPAIR (2026-10-03).
+-- 2. Reminder tick — DO NOT SCHEDULE (verified 2026-10-11: prod has no
+--    pg_cron at all, so nothing is burning; keep it that way).
 --
 --    The `deliver-reminders` Edge Function is deleted (see 042_drop_telegram.sql).
 --    private.tick_due_reminders() below still posts to '/deliver-reminders',
---    so `reminder-tick` currently fires with no function. The schedule is
---    KEPT (do NOT delete the cron) and marked scheduled-for-repair until a
---    replacement delivery target lands.
+--    so scheduling `reminder-tick` would burn a failed pg_net call every 2 min.
+--    Do NOT run the reminder-tick schedule below until a replacement delivery
+--    target lands — then uncomment it and re-run this file (it uses
+--    CREATE OR REPLACE + cron.schedule with IF NOT EXISTS semantics —
+--    check the job block below).
 -- ---------------------------------------------------------------------------
 --    The exists() gate is the whole point of this being a function
 --    rather than a bare net.http_post in the cron command: a bare post
@@ -159,11 +162,12 @@ BEGIN
     PERFORM cron.unschedule(j);
   END LOOP;
 
-  -- PENDING-REPAIR (2026-10-03): `reminder-tick` posts to the deleted
-  -- '/deliver-reminders' function (see private.tick_due_reminders below).
-  -- Schedule is KEPT (do NOT unschedule/delete the cron); scheduled-for-repair.
-  PERFORM cron.schedule('reminder-tick', '*/2 * * * *',
-    $$SELECT private.tick_due_reminders()$$);
+  -- DO NOT SCHEDULE (verified 2026-10-11): `reminder-tick` posts to the
+  -- deleted '/deliver-reminders' function (see private.tick_due_reminders
+  -- below). Uncomment the reminder-tick line and re-run this file only
+  -- when a replacement delivery target lands.
+  -- PERFORM cron.schedule('reminder-tick', '*/2 * * * *',
+  --   $$SELECT private.tick_due_reminders()$$);
   PERFORM cron.schedule('reaper-tick', '*/5 * * * *',
     $$SELECT private.reap_claims_tick()$$);
   PERFORM cron.schedule('notify-drain', '*/5 * * * *',

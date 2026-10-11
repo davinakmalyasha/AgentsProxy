@@ -103,7 +103,13 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 	}
 	mctx, mcancel := detachedCtx(r.Context())
 	defer mcancel()
-	if err := usage.Record(mctx, a.Pool, nil, cm.ID, "mimo", a.Spec.Name, len(req.Payload)/4, 0); err != nil {
+	// usage.kind is CHECKed to ('chat','business') and no reader discriminates
+	// on it (month_tokens sums kind-agnostic), so record shared-feature
+	// writes as 'business' like Handler.create. Passing Spec.Name here used
+	// to fail the CHECK on every call and silently drop the metering row.
+	// If per-feature metering is ever wanted, add a dedicated column —
+	// do not overload kind.
+	if err := usage.Record(mctx, a.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
 		slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})

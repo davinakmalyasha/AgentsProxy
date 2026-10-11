@@ -1,0 +1,4 @@
+# Solo owner today; auto-assigns review on every PR.
+# A blocking review requirement activates with a second human
+# (required_approving_review_count:1 would deadlock solo merges).
+* @davinakmalyasha

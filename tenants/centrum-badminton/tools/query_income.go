@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"time"
 )
@@ -42,15 +40,13 @@ func queryIncomeTool(pool *pgxpool.Pool) agentstools.Tool {
 				from = now.Format("2006-01") + "-01"
 				to = now.AddDate(0, 1, 0).Format("2006-01-02")
 			}
-			var b agentstools.Basis
-			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				var err error
-				b, err = agentstools.LoadBasis(ctx, tx, tenantID, from, to)
-				return err
-			})
+			// One round trip, no transaction (was BEGIN + LoadBasis×3 +
+			// COMMIT = 5 RTs). See LoadRangeSummary for the scoping note.
+			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
 			if err != nil {
 				return "error: " + err.Error()
 			}
+			b := s.Basis()
 			// "Income" is money in the drawer, not the value of slots that
 			// were reserved. This used to sum booking prices, so a fully
 			// unpaid month reported income while the Laporan screen the

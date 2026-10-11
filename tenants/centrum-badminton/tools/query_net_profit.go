@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,21 +27,15 @@ func queryNetProfitTool(pool *pgxpool.Pool) agentstools.Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			from, to := agentstools.DefaultMonthRange(p.From, p.To)
-			var b agentstools.Basis
-			var expenses float64
-			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				var err error
-				if b, err = agentstools.LoadBasis(ctx, tx, tenantID, from, to); err != nil {
-					return err
-				}
-				return tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(amount),0) FROM sports_expenses
-					  WHERE tenant_id=$1 AND deleted_at IS NULL AND spent_at >= $2::date AND spent_at < $3::date`,
-					tenantID, from, to).Scan(&expenses)
-			})
+			// One round trip, no transaction (was BEGIN + LoadBasis×3 +
+			// expenses + COMMIT = 6 RTs). private.range_summary runs as
+			// money_reader; tenant scoping is its p_tenant predicate.
+			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
 			if err != nil {
 				return "error: " + err.Error()
 			}
+			b := s.Basis()
+			expenses := s.Expenses
 			// Revenue is the money in, not the money promised. Summing
 			// bookings here made a venue look profitable while nothing
 			// had been collected.
