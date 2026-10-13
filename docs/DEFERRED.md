@@ -121,6 +121,13 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   commented out) when the delivery target lands. The 3 orphaned
   driver SQL functions were dropped in 055; a repair re-adds what it
   needs (see 031/042/048 for the bodies).
+  IN PROGRESS 2026-10 (PWA decision): 057 re-adds the quarantine-aware
+  claim + complete/fail drivers, the push_subscriptions registry, and a
+  routable recipient_ref on reminders (scratch-validated on PG18 with
+  claim/complete/fail parity proof). Pinned by
+  TestReminderDrivers_AsDeliveryCaller (delivery_caller executes,
+  app_runtime denied). Remaining: push sender (Go + Edge), set_reminder
+  re-registration, VAPID keys, pg_cron schedule, frontend subscribe UI.
   Trigger: owner decision on the delivery target (PWA transport vs Edge).
 
 ## Environments (deferred tiers — decision 2026-10-11)
