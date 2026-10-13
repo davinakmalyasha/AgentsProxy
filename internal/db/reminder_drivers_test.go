@@ -43,6 +43,24 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 	}
 
 	const tenant = "drv-test"
+	// Cleanup owns a SEPARATE admin pool: t.Cleanup callbacks run AFTER
+	// the test function's deferred closes, so reusing adminPool here
+	// would Exec on a closed pool, fail silently, and leak due rows —
+	// which the reminder package's global-claim Tick would then send,
+	// failing an unrelated package (seen on CI as sent=2 want 1).
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cpool, err := NewPool(cctx, adminDSN)
+		if err != nil {
+			return
+		}
+		defer cpool.Close()
+		cpool.Exec(cctx, `DELETE FROM agent_reminders WHERE tenant_id IN ($1, 'drv-test-q')`, tenant)
+		cpool.Exec(cctx, `DELETE FROM tenant_quarantine WHERE tenant_id = 'drv-test-q'`)
+		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id IN ($1, 'drv-test-q')`, tenant)
+	})
+
 	if _, err := adminPool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
 		 VALUES ('drv', $1, 'drv-hash', 1000000, 'active'),
@@ -71,14 +89,6 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 		`UPDATE agent_reminders SET attempts = 4 WHERE text = 'drv maxed'`); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE tenant_id IN ($1, 'drv-test-q')`, tenant)
-		adminPool.Exec(cctx, `DELETE FROM tenant_quarantine WHERE tenant_id = 'drv-test-q'`)
-		adminPool.Exec(cctx, `DELETE FROM clients WHERE tenant_id IN ($1, 'drv-test-q')`, tenant)
-	})
-
 	callerPool, err := NewPool(ctx, toCallerDSN(dsn))
 	if err != nil {
 		t.Fatal(err)
@@ -110,36 +120,45 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 	if len(claimed) != 2 || !claimed["drv due"] || !claimed["drv maxed"] {
 		t.Errorf("claimed = %v, want exactly {drv due, drv maxed}", claimed)
 	}
-	// claimed_at reread from the row (exact timestamptz round-trip).
-	var claimedAt time.Time
+	// IDs + claimed_at prefetched via admin: delivery_caller holds no
+	// table grants, so subselects inside its queries die with 42501.
+	// The definer boundary is exactly what the least-privilege pin
+	// below asserts — the test must not smuggle table reads across it.
+	var dueID, maxedID, futureID string
+	var claimedAt, maxedClaimedAt time.Time
 	if err := adminPool.QueryRow(ctx,
-		`SELECT claimed_at FROM agent_reminders WHERE text='drv due'`).Scan(&claimedAt); err != nil {
+		`SELECT id::text, claimed_at FROM agent_reminders WHERE text='drv due'`).Scan(&dueID, &claimedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminPool.QueryRow(ctx,
+		`SELECT id::text, claimed_at FROM agent_reminders WHERE text='drv maxed'`).Scan(&maxedID, &maxedClaimedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminPool.QueryRow(ctx,
+		`SELECT id::text FROM agent_reminders WHERE text='drv future'`).Scan(&futureID); err != nil {
 		t.Fatal(err)
 	}
 
 	// Complete: true on match, false on stale claim and bad status.
 	var ok bool
 	if err := callerPool.QueryRow(ctx,
-		`SELECT private.complete_reminder(
-		   (SELECT id FROM agent_reminders WHERE text='drv due'), $1, 'sent')`,
-		claimedAt).Scan(&ok); err != nil {
+		`SELECT private.complete_reminder($1::uuid, $2, 'sent')`,
+		dueID, claimedAt).Scan(&ok); err != nil {
 		t.Fatalf("complete as delivery_caller: %v", err)
 	}
 	if !ok {
 		t.Error("complete_reminder on live claim = false, want true")
 	}
 	if err := callerPool.QueryRow(ctx,
-		`SELECT private.complete_reminder(
-		   (SELECT id FROM agent_reminders WHERE text='drv due'), now(), 'sent')`).Scan(&ok); err != nil {
+		`SELECT private.complete_reminder($1::uuid, now(), 'sent')`, dueID).Scan(&ok); err != nil {
 		t.Fatalf("complete stale claim: %v", err)
 	}
 	if ok {
 		t.Error("complete_reminder on stale claim = true, want false")
 	}
 	if err := callerPool.QueryRow(ctx,
-		`SELECT private.complete_reminder(
-		   (SELECT id FROM agent_reminders WHERE text='drv maxed'),
-		   (SELECT claimed_at FROM agent_reminders WHERE text='drv maxed'), 'bogus')`).Scan(&ok); err != nil {
+		`SELECT private.complete_reminder($1::uuid, $2, 'bogus')`,
+		maxedID, maxedClaimedAt).Scan(&ok); err != nil {
 		t.Fatalf("complete bad status: %v", err)
 	}
 	if ok {
@@ -150,17 +169,15 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 	// row returns NULL, not an error.
 	var status *string
 	if err := callerPool.QueryRow(ctx,
-		`SELECT private.fail_reminder(
-		   (SELECT id FROM agent_reminders WHERE text='drv maxed'),
-		   (SELECT claimed_at FROM agent_reminders WHERE text='drv maxed'))`).Scan(&status); err != nil {
+		`SELECT private.fail_reminder($1::uuid, $2)`,
+		maxedID, maxedClaimedAt).Scan(&status); err != nil {
 		t.Fatalf("fail as delivery_caller: %v", err)
 	}
 	if status == nil || *status != "dead" {
 		t.Errorf("fail at max attempts = %v, want dead", status)
 	}
 	if err := callerPool.QueryRow(ctx,
-		`SELECT private.fail_reminder(
-		   (SELECT id FROM agent_reminders WHERE text='drv future'), now())`).Scan(&status); err != nil {
+		`SELECT private.fail_reminder($1::uuid, now())`, futureID).Scan(&status); err != nil {
 		t.Fatalf("fail non-sending: %v", err)
 	}
 	if status != nil {
@@ -168,14 +185,26 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 	}
 
 	// Least privilege: the runtime role cannot execute the drivers.
+	// NOTE: pgx surfaces server errors lazily — Query itself returns
+	// nil and the 42501 arrives at rows.Err() after iteration. Checking
+	// only the Query error would false-pass this pin.
 	runtimePool, err := NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtimePool.Close()
 	rows2, err := runtimePool.Query(ctx, `SELECT j FROM private.claim_due_reminders(1) AS j`)
+	denied := err != nil
 	if err == nil {
-		rows2.Close()
+		defer rows2.Close()
+		for rows2.Next() {
+		}
+		if rerr := rows2.Err(); rerr != nil {
+			denied = true
+			err = rerr
+		}
+	}
+	if !denied {
 		t.Error("claim as app_runtime succeeded, want 42501 denial")
 	} else if !strings.Contains(err.Error(), "42501") && !strings.Contains(err.Error(), "permission denied") {
 		t.Errorf("claim as app_runtime: unexpected error %v (want permission denied)", err)

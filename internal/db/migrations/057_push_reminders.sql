@@ -164,6 +164,16 @@ ALTER FUNCTION private.claim_due_reminders(integer)              OWNER TO delive
 ALTER FUNCTION private.complete_reminder(uuid, timestamptz, text)  OWNER TO delivery_worker;
 ALTER FUNCTION private.fail_reminder(uuid, timestamptz, integer)   OWNER TO delivery_worker;
 
+-- Least privilege (beyond 031): 031 granted EXECUTE to delivery_caller
+-- but never revoked the default PUBLIC execute, so any role — including
+-- app_runtime on the agent request path — could claim any tenant's
+-- reminders (the claim takes no tenant predicate). These three REVOKEs
+-- close that; the Edge credential keeps its explicit grant, Go uses raw
+-- SQL and never calls these functions.
+REVOKE ALL ON FUNCTION private.claim_due_reminders(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.complete_reminder(uuid, timestamptz, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.fail_reminder(uuid, timestamptz, integer) FROM PUBLIC;
+
 GRANT EXECUTE ON FUNCTION
   private.claim_due_reminders(integer),
   private.complete_reminder(uuid, timestamptz, text),

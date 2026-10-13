@@ -46,6 +46,13 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   reads to owner; `payments:patch` to owner. CHANGES who can do what —
   needs frontend coordination + owner sign-off, never silent.
   Trigger: second staff role, external API consumers, or any auth incident.
+- **Notify driver PUBLIC-execute**: 057 revoked default PUBLIC EXECUTE on
+  the three reminder drivers (031 granted delivery_caller but never
+  revoked PUBLIC, so app_runtime could claim any tenant's reminders).
+  The sibling notify drivers (claim/delete/archive_notification, 031)
+  share the pattern and were left untouched as out-of-scope live code —
+  same one-line REVOKE, needs its own failing-first pin before landing.
+  Trigger: next touch of the notify path, or the push Phase 2 work.
 - **Fresh-DB RLS gap on clients/usage**: RLS on those two tables was
   enabled out-of-band on production (033), never by migration — so a
   database built purely from migrations has NO RLS there and the
