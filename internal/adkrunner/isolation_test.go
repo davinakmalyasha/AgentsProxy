@@ -57,6 +57,7 @@ func TestRoleIsolation_ToolSets(t *testing.T) {
 var mutatingTools = []string{
 	"book_slot",
 	"cancel_booking",
+	"set_reminder",
 	"adjust_stock",
 	"topup_member",
 	"record_staff_payment",
