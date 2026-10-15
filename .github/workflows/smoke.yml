@@ -1,0 +1,31 @@
+# Post-deploy / uptime smoke (postmortem 2026-10-14).
+#
+# The Oct 10 CORS outage sat red for 4 days because nothing watches prod.
+# This pings the public health endpoint on a schedule plus on demand.
+# It asserts HTTP 200 AND status ok: boot crashes yield Vercel's 500 page
+# (no JSON), degraded DB/Redis yields 500 with status degraded — both fail.
+#
+# If the production alias ever changes, update PROD_URL below (and only
+# there). The endpoint is public and returns status only, no PII.
+name: smoke
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  prod-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PROD_URL: https://agents-proxy-nine.vercel.app
+    steps:
+      - name: probe /healthz
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 "$PROD_URL/healthz")
+          cat /tmp/health.json
+          echo "http=$code"
+          test "$code" = "200"
+          grep -q '"status":"ok"' /tmp/health.json
