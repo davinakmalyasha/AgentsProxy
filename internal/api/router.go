@@ -33,6 +33,10 @@ type Deps struct {
 	// Admin (super-operator) wiring for the REST /admin surface.
 	AdminPool *pgxpool.Pool // nil when the app pool doubles for it
 	AdminKey  string        // ADMIN_API_KEY
+	// Origins is the DB-backed CORS registry (migration 058). Nil keeps
+	// the static env list only (tests, local dev); production wires it
+	// at boot and exits when it cannot load (fail closed).
+	Origins *middleware.DBResolver
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -46,7 +50,8 @@ func NewRouter(d Deps) http.Handler {
 	// methods): chi patterns are exact and features mix "/" vs "/name"
 	// styles, which 404s half the matrix otherwise.
 	r.Use(middleware.StripTrailingSlash)
-	r.Use(middleware.CORS(d.Cfg.AllowOrigins))
+	// CORS: static env list ∪ DB registry (nil resolver = static only).
+	r.Use(middleware.CORSResolving(d.Cfg.AllowOrigins, d.Origins))
 	// Compress JSON responses over 1KB (list endpoints); already-
 	// compressed bodies (.xlsx) and small payloads pass through.
 	r.Use(middleware.Gzip)
@@ -126,6 +131,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Patch("/clients/{id}", records.WithValidID(adm.Patch))
 			r.Post("/clients/{id}/contract", records.WithValidID(adm.ContractBump))
 			r.Get("/usage", adm.Usage)
+			r.Get("/origins", adm.OriginsList)
+			r.Post("/origins", adm.OriginsCreate)
+			r.Delete("/origins", adm.OriginsDelete)
+			r.Post("/origin-suffixes", adm.SuffixCreate)
+			r.Delete("/origin-suffixes", adm.SuffixDelete)
 			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool}
 			r.Get("/tenant-health", TenantHealth(thDeps))
 			r.Post("/tenant-health/reload", TenantReload(thDeps))

@@ -29,6 +29,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	// Phase 4/6 sports-vertical custom features.
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
@@ -191,6 +192,24 @@ func main() {
 	// client buckets as one IP.
 	api.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
 
+	// CORS origin registry (migration 058): exact origins + suffix rules
+	// loaded from the database, merged with the static env list at the
+	// router. Boot-load failure is fatal (fail closed — boot already
+	// exits without a database). Refresh runs gated like every other
+	// background loop; on serverless each cold start reloads instead.
+	origins, err := middleware.NewDBResolver(bootCtx, pool)
+	if err != nil {
+		slog.Error("origins load", "err", err)
+		os.Exit(1)
+	}
+	ex, su := origins.Counts()
+	slog.Info("origins loaded", "exact", ex, "suffix", su)
+	if cfg.BackgroundTickers {
+		// Background context, NOT bootCtx (30s timeout): the loop must
+		// outlive boot. Read-only refresher; dies with the process.
+		origins.Start(context.Background(), time.Minute)
+	}
+
 	// Per-tenant agent configuration, collected not thrown: each tenant
 	// validates independently. A bad tenant is quarantined (fenced with
 	// an honest 503) while healthy tenants serve. Only zero healthy
@@ -307,6 +326,7 @@ func main() {
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,
+		Origins:   origins,
 	})
 
 	// Background reclaim for chat-generated .xlsx (not on the

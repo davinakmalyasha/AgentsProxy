@@ -19,6 +19,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
@@ -33,6 +34,11 @@ type createClientReq struct {
 	MonthlyQuotaTokens int      `json:"monthly_quota_tokens"`
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
+	// Origins optionally registers frontend origins in the same call
+	// (migration 058): one round trip for new-project onboarding.
+	// Validated BEFORE the client insert so a bad origin fails fast
+	// without creating a half-provisioned tenant.
+	Origins []string `json:"origins"`
 }
 
 type createClientResp struct {
@@ -123,6 +129,17 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Validate origins before creating anything: a bad origin must
+	// fail the whole provisioning call, not half of it.
+	validOrigins := make([]string, 0, len(req.Origins))
+	for _, raw := range req.Origins {
+		o, err := middleware.ValidateOrigin(raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		validOrigins = append(validOrigins, o)
+	}
 	tok, hash, err := auth.GenerateToken()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "token gen")
@@ -151,6 +168,19 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		Vertical:           req.Vertical,
 		Features:           req.Features,
 	})
+	// Register validated origins (created_by marks the provisioning path).
+	// Best-effort after the client exists: the tenant is usable without
+	// them (env allowlist still merges), and a failed insert here must
+	// not roll back provisioning — the admin origins endpoint retries it.
+	for _, o := range validOrigins {
+		if _, err := a.Pool.Exec(r.Context(),
+			`INSERT INTO frontend_origins (tenant_id, origin, label, created_by)
+			 VALUES ($1, $2, 'provisioning', 'provisioning')
+			 ON CONFLICT (tenant_id, origin) DO NOTHING`,
+			req.TenantID, o); err != nil {
+			slog.Warn("admin origins provisioning failed", "tenant", req.TenantID, "origin", o, "err", err)
+		}
+	}
 	// A fresh tenant must resolve immediately: clear any negative
 	// tenant-known entry so public reads don't 404 it for 30s.
 	if err := records.EvictTenantKnown(r.Context(), cache.RDBOf(a.Cache), req.TenantID); err != nil {
