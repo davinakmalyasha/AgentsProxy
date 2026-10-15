@@ -5,6 +5,29 @@ import (
 	"net/http"
 )
 
+// CORSResolving is CORS plus the DB origin registry (migration 058):
+// an origin is allowed when it is in the static list OR the resolver
+// allows it. A nil resolver degrades exactly to CORS(staticExtra), so
+// tests and local dev never need a database. Static entries stay
+// exact-only (no suffix interpretation); suffix rules live in the DB.
+func CORSResolving(staticExtra []string, res *DBResolver) func(http.Handler) http.Handler {
+	static := CORS(staticExtra)
+	if res == nil {
+		return static
+	}
+	return func(next http.Handler) http.Handler {
+		staticH := static(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" && res.Allowed(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+			staticH.ServeHTTP(w, r)
+		})
+	}
+}
+
 // CORS emits permissive Access-Control headers from the configured
 // allow-list. If "*" is in the list, allows any origin. Credentials
 // are always off (per PRD/STANDARDS).
