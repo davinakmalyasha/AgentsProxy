@@ -21,11 +21,20 @@ jobs:
     env:
       PROD_URL: https://agents-proxy-nine.vercel.app
     steps:
-      - name: probe /healthz
+      - name: probe /healthz (3 attempts, 20s apart)
+        # Retries are load-bearing, not politeness: a single sample can
+        # catch a cold start mid-wiring (observed once: redis:false on an
+        # otherwise healthy deploy, green on immediate re-probe). Three
+        # spaced samples distinguish a flap from an outage before paging.
         run: |
           set -euo pipefail
-          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 "$PROD_URL/healthz")
+          ok=0
+          for i in 1 2 3; do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 "$PROD_URL/healthz") || code="000"
+            if [ "$code" = "200" ] && grep -q '"status":"ok"' /tmp/health.json; then ok=1; break; fi
+            echo "attempt $i: http=$code — retrying in 20s"
+            sleep 20
+          done
           cat /tmp/health.json
-          echo "http=$code"
-          test "$code" = "200"
-          grep -q '"status":"ok"' /tmp/health.json
+          echo "http=$code attempts_used=$i"
+          test "$ok" = "1"
