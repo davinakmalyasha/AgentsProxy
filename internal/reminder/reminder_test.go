@@ -23,7 +23,7 @@ type fakeSender struct {
 	sent []string
 }
 
-func (f *fakeSender) Send(_ context.Context, chatID int64, text string) error {
+func (f *fakeSender) Send(_ context.Context, _, _ string, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, text)
@@ -211,7 +211,7 @@ type slowSender struct {
 	sent int
 }
 
-func (f *slowSender) Send(_ context.Context, chatID int64, _ string) error {
+func (f *slowSender) Send(_ context.Context, _, _ string, _ string) error {
 	time.Sleep(500 * time.Millisecond)
 	f.mu.Lock()
 	f.sent++

@@ -25,7 +25,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -39,10 +38,10 @@ import (
 // every other tenant's reminders while still bounding outbound load.
 const maxConcurrentSends = 8
 
-// SendFunc delivers a reminder to a recipient. The recipient is currently
-// the legacy chat identifier; the PWA transport will replace it with a
-// user/device recipient.
-type SendFunc func(ctx context.Context, recipientID int64, text string) error
+// SendFunc delivers a reminder to a recipient. The recipient is the
+// push recipient_ref (migration 057), resolved to subscriptions at
+// send time — never a bare address. Tenant scopes the lookup.
+type SendFunc func(ctx context.Context, tenantID, recipientRef, text string) error
 
 // Scheduler polls for due reminders.
 type Scheduler struct {
@@ -82,8 +81,8 @@ func (s *Scheduler) loop() {
 }
 
 type dueReminder struct {
-	id, tenant, recipient, text string
-	claimedAt                   time.Time
+	id, tenant, recipient, recipientRef, text string
+	claimedAt                                 time.Time
 }
 
 // Tick processes one batch of due reminders.
@@ -124,10 +123,10 @@ func (s *Scheduler) Tick() {
 			UPDATE agent_reminders r
 			   SET status = 'sending', claimed_at = clock_timestamp()
 			  FROM due WHERE r.id = due.id
-			RETURNING r.id, r.tenant_id, r.chat_id, r.text, r.attempts,
+			RETURNING r.id, r.tenant_id, r.chat_id, r.recipient_ref, r.text, r.attempts,
 			          r.claimed_at
 		)
-		SELECT c.id::text, c.tenant_id, c.chat_id, c.text, c.claimed_at
+		SELECT c.id::text, c.tenant_id, c.chat_id, c.recipient_ref, c.text, c.claimed_at
 		  FROM claimed c`, 50)
 	if err != nil {
 		slog.Warn("reminder query", "err", err)
@@ -137,7 +136,7 @@ func (s *Scheduler) Tick() {
 	var batch []dueReminder
 	for rows.Next() {
 		var d dueReminder
-		if err := rows.Scan(&d.id, &d.tenant, &d.recipient, &d.text, &d.claimedAt); err != nil {
+		if err := rows.Scan(&d.id, &d.tenant, &d.recipient, &d.recipientRef, &d.text, &d.claimedAt); err != nil {
 			slog.Warn("reminder scan", "err", err)
 			return
 		}
@@ -181,17 +180,25 @@ func (s *Scheduler) Tick() {
 }
 
 func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
-	recipientID, err := strconv.ParseInt(d.recipient, 10, 64)
-	if err != nil || recipientID == 0 {
-		// Permanently undeliverable — dead-letter instead of retrying
-		// every minute forever (the old poison loop).
-		s.markDead(ctx, d, "bad recipient")
-		return
-	}
-	sendErr := s.deliver(ctx, d, recipientID)
+	// No per-tick recipient validation: routability is enforced at
+	// creation (set_reminder requires recipient_ref) and an empty ref
+	// fails transiently in deliver, preserving the row. The old
+	// int64-parse dead-letter path died with the Telegram transport —
+	// poison rows of that shape cannot be created anymore.
+	sendErr := s.deliver(ctx, d)
 	if sendErr != nil {
 		if errors.Is(sendErr, errHandledDead) {
 			return // already dead-lettered inside deliver
+		}
+		if errors.Is(sendErr, errNoSubscriptions) {
+			// No addressability yet (no devices subscribed, or an
+			// empty recipient_ref on a pre-push row): hold the row in
+			// pending WITHOUT burning attempts. Missing address is
+			// not a delivery failure — bumping here would dead-letter
+			// every reminder within 5 ticks of the sender going live
+			// before any device subscribes.
+			s.releaseClaim(ctx, d)
+			return
 		}
 		slog.Warn("reminder send", "id", d.id, "err", sendErr)
 		s.bumpAttempts(ctx, d)
@@ -222,11 +229,11 @@ func (s *Scheduler) sendOne(ctx context.Context, d dueReminder) {
 // deliver sends through the configured transport. Without a sender it
 // returns an error without dead-lettering, so Tick's early return (and
 // the claim-scoped updates) preserve rows until PWA delivery lands.
-func (s *Scheduler) deliver(ctx context.Context, d dueReminder, recipientID int64) error {
+func (s *Scheduler) deliver(ctx context.Context, d dueReminder) error {
 	if s.Send == nil {
 		return errors.New("reminder delivery unavailable")
 	}
-	return s.Send(ctx, recipientID, "⏰ Reminder: "+d.text)
+	return s.Send(ctx, d.tenant, d.recipientRef, "⏰ Reminder: "+d.text)
 }
 
 var errHandledDead = errors.New("reminder dead-lettered")

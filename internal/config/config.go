@@ -64,6 +64,12 @@ type Config struct {
 	SupabaseStorageKey string
 	ReportBucket       string
 	ReportMaxBytes     int
+	// PWA Web Push (VAPID) for reminder delivery. Empty keys keep the
+	// scheduler in preserve mode (nil sender): rows accumulate as
+	// pending, nothing dead-letters. Set all three to go live.
+	VAPIDPublicKey  string
+	VAPIDPrivateKey string
+	VAPIDSubject    string
 	// BackgroundTickers runs this process's own background loops: the
 	// 60s reminder ticker and the notify drain loop. Both mean the same
 	// thing - "am I a long-lived process that can own background work?"
@@ -126,6 +132,9 @@ func Load() (*Config, error) {
 		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),
 		ReportBucket:            getenv("REPORT_BUCKET", "reports"),
 		ReportMaxBytes:          getenvPositiveInt("REPORT_MAX_BYTES", 15000000),
+		VAPIDPublicKey:          os.Getenv("VAPID_PUBLIC_KEY"),
+		VAPIDPrivateKey:         os.Getenv("VAPID_PRIVATE_KEY"),
+		VAPIDSubject:            getenv("VAPID_SUBJECT", "mailto:admin@localhost"),
 		BackgroundTickers:       true, // set below (strict parse, may error)
 	}
 	// Strict booleans: an unrecognised value is a boot error, not a
@@ -266,11 +275,11 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
-		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.BackgroundTickers, c.RunMigrations,
+		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
 	)
 }
 

@@ -355,10 +355,24 @@ func TestAdjustStock_Runs(t *testing.T) {
 	}
 }
 
-func TestSetReminder_RemovedUntilPWATransport(t *testing.T) {
+func TestSetReminder_RequiresRecipient(t *testing.T) {
 	_, pool, _ := toolTestPool(t)
-	if _, ok := agentstools.NewToolSetFor(pool, "centrum", "owner").Get("set_reminder"); ok {
-		t.Fatal("set_reminder must stay unregistered until the PWA delivery transport lands")
+	tool, ok := agentstools.NewToolSetFor(pool, "centrum", "owner").Get("set_reminder")
+	if !ok {
+		t.Fatal("set_reminder is not registered")
+	}
+	ctx := context.Background()
+	for _, args := range []string{
+		`{}`,
+		`{"text":"x","remind_at":"2030-01-01 10:00"}`,
+		`{"text":"x","remind_at":"2030-01-01 10:00","recipient":"not-an-email"}`,
+		`{"text":"x","remind_at":"not-a-date","recipient":"owner@example.id"}`,
+		`{"text":"x","remind_at":"2000-01-01 10:00","recipient":"owner@example.id"}`,
+	} {
+		out := tool.Run(ctx, "tool-test", json.RawMessage(args))
+		if !strings.HasPrefix(out, "error:") {
+			t.Errorf("args=%s -> %q, want error:", args, out)
+		}
 	}
 }
 

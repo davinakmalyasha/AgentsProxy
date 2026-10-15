@@ -95,6 +95,16 @@ func NewRouter(d Deps) http.Handler {
 			r.Mount("/auth", d.Auth.Routes())
 		}
 
+		// PWA push subscriptions (Phase 2): staff-session authed,
+		// tenant-scoped by the session. The app pool + GUC scoping
+		// match every other tenant write. Skipped without an Auth
+		// backend (same guard as /auth above).
+		if d.Auth != nil {
+			pushH := &Push{Pool: d.Pool, Auth: d.Auth}
+			r.Post("/push/subscriptions", pushH.Subscribe)
+			r.Delete("/push/subscriptions", pushH.Unsubscribe)
+		}
+
 		// Per-vertical feature platform. Only verticals with live tenants
 		// mount (plus any vertical with registered custom features);
 		// the rest serve nothing today. Zero live tenants — a fresh

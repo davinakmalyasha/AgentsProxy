@@ -40,63 +40,56 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// A poison row (undeliverable chat) must flip to dead, not retry forever.
-//
-// The row is seeded already-claimed, matching the state sendOne
-// actually receives from Tick(). sendOne scopes its UPDATE by
-// claimed_at, so passing a hand-built dueReminder with a zero
-// claimedAt would (correctly) match nothing - the claim token is what
-// makes a stale send unable to clobber a row the reaper handed back.
-func TestSendOneDeadLettersBadChat(t *testing.T) {
+// A persistently failing destination must eventually dead-letter the
+// row (attempts cap), not retry forever. Routability is enforced at
+// creation (recipient_ref required), so delivery failures are transient
+// by design and dead arrives via the attempts ladder — there is no
+// poison-row shortcut anymore (it died with the Telegram chat IDs).
+func TestSendPersistentFailureEventuallyDead(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	tenant := os.Getenv("TEST_TENANT")
-	if tenant == "" {
-		tenant = "dev"
-	}
-	var id string
-	var claimedAt time.Time
-	err := records.WithTenantTx(ctx, pool, tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO agent_reminders (tenant_id, chat_id, text, remind_at, status, claimed_at)
-			 VALUES ($1,'not-a-chat','TEST-DEAD-ROW', now() - interval '1 minute', 'sending', now())
-			 RETURNING id::text, claimed_at`, tenant).Scan(&id, &claimedAt)
-	})
-	// Unknown tenant (no clients row) → FK error: skip, env has no seed tenant.
-	if err != nil {
-		t.Skipf("cannot seed (tenant %q?): %v", tenant, err)
+	const tenant = "rem-push"
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
+		 VALUES ('rem-push', $1, 'hash-rempush', 1000000, 'active')
+		 ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(),
-			`DELETE FROM agent_reminders WHERE id=$1::uuid`, id)
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_, _ = pool.Exec(cctx, `DELETE FROM agent_reminders WHERE tenant_id = $1`, tenant)
+		_, _ = pool.Exec(cctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
 	})
-	s := &Scheduler{Pool: pool, Send: func(ctx context.Context, chatID int64, text string) error {
-		return errors.New("unreachable in this test")
-	}}
-	s.sendOne(ctx, dueReminder{id: id, tenant: tenant, recipient: "not-a-chat", text: "x", claimedAt: claimedAt})
-	var status string
-	err = records.WithTenantTx(ctx, pool, tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT status FROM agent_reminders WHERE id=$1::uuid`, id).Scan(&status)
-	})
-	if err != nil {
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM agent_reminders WHERE tenant_id = $1`, tenant); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_reminders (tenant_id, chat_id, text, remind_at, recipient_ref)
+		 VALUES ($1, '', 'TEST-PUSH-FAIL', now() - interval '1 minute', 'owner')`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scheduler{Pool: pool, Send: func(context.Context, string, string, string) error {
+		return errors.New("push service down")
+	}}
+	var status string
+	var attempts int
+	for i := 0; i < 7; i++ {
+		s.Tick()
+		if err := pool.QueryRow(ctx,
+			`SELECT status, attempts FROM agent_reminders WHERE tenant_id = $1`, tenant).Scan(&status, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if status == "dead" {
+			break
+		}
 	}
 	if status != "dead" {
-		t.Fatalf("status = %q, want dead", status)
+		t.Fatalf("status = %q after repeated failures, want dead", status)
 	}
-	// Verification reads must be tenant-scoped too: agent_reminders is
-	// FORCE RLS, so a bare query with no app.tenant_id set correctly
-	// matches nothing.
-	var claimedNull bool
-	if err := records.WithTenantTx(ctx, pool, tenant, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT claimed_at IS NULL FROM agent_reminders WHERE id=$1::uuid`, id).Scan(&claimedNull)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !claimedNull {
-		t.Error("claimed_at should be cleared once the row is terminal")
+	if attempts != 5 {
+		t.Errorf("attempts = %d, want 5 (cap, then dead-letter)", attempts)
 	}
 }
 
