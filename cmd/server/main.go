@@ -65,6 +65,16 @@ func main() {
 		slog.Error("config load", "err", err)
 		os.Exit(1)
 	}
+	// Boot-success line (postmortem 2026-10-14): the Oct 10 CORS outage
+	// was diagnosed from this file's absence in the logs — the server
+	// died at config load with nothing prior. Effective env + allowlist
+	// (never secrets) prints on every boot so the next misconfiguration
+	// is diagnosable from the first log screen.
+	slog.Info("config loaded",
+		"env", cfg.Env,
+		"allowOrigins", cfg.AllowOrigins,
+		"runMigrations", cfg.RunMigrations,
+		"backgroundTickers", cfg.BackgroundTickers)
 
 	// Sentry after config: a single source for DSN/env/release/rate.
 	// config.Load cannot fail on a missing DSN (empty disables), so the
