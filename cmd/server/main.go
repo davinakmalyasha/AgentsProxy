@@ -302,12 +302,22 @@ func main() {
 	// Reminder scheduler (admin pool so it can see all tenants' due
 	// reminders; per-row completion UPDATEs are RLS-scoped).
 	//
-	// Telegram delivery was deleted. There is currently no PWA delivery
-	// transport, so the scheduler preserves due rows until that lands
-	// instead of dead-lettering them. BACKGROUND_TICKERS=false on
-	// serverless: the function is destroyed between requests so the 60s
-	// ticker would never tick.
-	remSched := reminder.New(adminPool, nil)
+	// Push sender is live only with VAPID keys configured; without them
+	// the scheduler preserves due rows instead of dead-lettering them.
+	// Rows for recipients with no subscribed devices are likewise held
+	// (no attempts burned), so going live before any device subscribes
+	// is safe. BACKGROUND_TICKERS=false on serverless: the function is
+	// destroyed between requests so the 60s ticker would never tick.
+	var reminderSend reminder.SendFunc
+	if cfg.VAPIDPublicKey != "" && cfg.VAPIDPrivateKey != "" {
+		reminderSend = (&reminder.PushSender{
+			Pool: adminPool, VAPIDPublic: cfg.VAPIDPublicKey,
+			VAPIDPrivate: cfg.VAPIDPrivateKey, Subject: cfg.VAPIDSubject,
+		}).Send
+	} else {
+		slog.Info("reminder push sender disabled (no VAPID keys); preserving pending rows")
+	}
+	remSched := reminder.New(adminPool, reminderSend)
 	if cfg.BackgroundTickers {
 		remSched.Start()
 	} else {
