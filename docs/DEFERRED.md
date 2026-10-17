@@ -130,12 +130,18 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   needs (see 031/042/048 for the bodies).
   IN PROGRESS 2026-10 (PWA decision): 057 re-adds the quarantine-aware
   claim + complete/fail drivers, the push_subscriptions registry, and a
-  routable recipient_ref on reminders (scratch-validated on PG18 with
-  claim/complete/fail parity proof). Pinned by
+  routable recipient_ref on reminders; pinned by
   TestReminderDrivers_AsDeliveryCaller (delivery_caller executes,
-  app_runtime denied). Remaining: push sender (Go + Edge), set_reminder
-  re-registration, VAPID keys, pg_cron schedule, frontend subscribe UI.
-  Trigger: owner decision on the delivery target (PWA transport vs Edge).
+  app_runtime denied). Landed since: Go PushSender + Edge driver +
+  set_reminder recipient + VAPID config (#9); pg_cron reminder/reaper
+  ticks installed (ops/schedule-reminders.sql); 059 moves the Edge
+  driver to RPC-only DB access (delivery_caller holds no table grants)
+  with release-without-burning parity, pinned by
+  TestReminderPushRPCs_AsDeliveryCaller. Remaining: delivery_caller
+  credential match on prod (edge secret password mismatch found via
+  net._http_response), frontend subscribe env + branch merge, first
+  live delivery E2E. Trigger: owner decision on the delivery target
+  (PWA transport vs Edge).
 
 ## Environments (deferred tiers — decision 2026-10-11)
 
