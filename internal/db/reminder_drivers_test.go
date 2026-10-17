@@ -432,6 +432,15 @@ func TestReminderPushRPCs_AsDeliveryCaller(t *testing.T) {
 	if claimedCount != 1 || relText != "push release me" || relID == "" || relClaimedAt == "" {
 		t.Fatalf("claimed %d rows (text=%q id=%q), want exactly the seeded due row", claimedCount, relText, relID)
 	}
+	// 060: the RPC claim stamps millisecond precision because
+	// postgres.js (the Edge driver's client) truncates ISO strings to
+	// ms on bind — a microsecond claim could never be released,
+	// completed, or failed from the Edge path.
+	if ts, perr := time.Parse(time.RFC3339Nano, relClaimedAt); perr != nil {
+		t.Errorf("claim claimed_at %q not RFC3339: %v", relClaimedAt, perr)
+	} else if ts.Nanosecond()%1_000_000 != 0 {
+		t.Errorf("claim claimed_at %q has sub-millisecond precision; postgres.js cannot round-trip it", relClaimedAt)
+	}
 	if err := callerPool.QueryRow(ctx,
 		`SELECT private.release_reminder($1::uuid, $2::timestamptz)`, relID, relClaimedAt).Scan(&ok); err != nil {
 		t.Fatal(err)
