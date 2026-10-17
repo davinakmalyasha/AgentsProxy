@@ -3,9 +3,9 @@
 // Interop verified 2026-10-15 by Deno round-trip (encrypt → decrypt
 // with known keys → plaintext; VAPID JWT verified against the public
 // key), not against a live push service. The Go PushSender
-// (internal/reminder, webpush-go) is the primary driver; this Edge
-// driver exists for serverless ticks and must stay UNSCHEDULED until
-// the pg_cron proposal lands.
+// (internal/reminder, webpush-go) is the long-running-host driver; this
+// Edge driver serves the pg_cron ticks (ops/schedule-reminders.sql,
+// installed on prod 2026-10-15). Both share the same claim protocol.
 
 const RS = 4096;
 

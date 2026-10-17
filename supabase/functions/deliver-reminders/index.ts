@@ -2,31 +2,34 @@
 //
 // Mirrors deliver-notification (same claim/complete/fail shape, same
 // report envelope), but each claimed row fans out to that recipient's
-// live push subscriptions instead of one phone number:
+// live push subscriptions instead of one phone number.
+//
+// All database access goes through owner-scoped SECURITY DEFINER RPCs
+// (migration 059): delivery_caller holds EXECUTE on them and NO table
+// grants, so this file must never touch a table directly.
 //
 //   1. claim a batch via private.claim_due_reminders (quarantine-aware,
-//      tenant-scoped by the claim itself — the function sees all tenants
-//      because pg_cron has no tenant context, same as the Go ticker on
-//      the admin pool).
-//   2. load subscriptions for (tenant_id, recipient_ref); none →
-//      release the claim WITHOUT failing (missing addressability is
-//      not a delivery failure — mirrors Scheduler errNoSubscriptions).
-//      There is no release RPC that preserves attempts... fail_reminder
-//      bumps, so instead: complete_reminder(..., 'pending') is NOT a
-//      valid status; use a direct UPDATE back to pending via the
-//      delivery_caller table rights? delivery_caller has NO table
-//      grants by design. Therefore: call fail_reminder ONLY on real
-//      send failures; for no-subscriptions, leave the row claimed and
-//      let reap_stale_claims hand it back after the window. A claimed
-//      row is invisible to other drivers, so nothing double-sends; the
-//      reaper restores it. Slow (10 min) but safe and correct.
-//   3. push per subscription (VAPID keys from env); 410/404 prunes the
-//      subscription row; any 2xx → complete_reminder 'sent'; all failed
-//      → fail_reminder (attempts ladder to dead at 5, same as Go).
+//      cross-tenant by design — pg_cron has no tenant context, same as
+//      the Go ticker on the admin pool). The payload carries tenant_id,
+//      recipient_ref, text and claimed_at.
+//   2. resolve subscriptions via private.push_subscriptions_for; none
+//      (or an empty recipient_ref on a pre-push row) → the claim is
+//      handed back to pending WITHOUT burning attempts via
+//      private.release_reminder — missing addressability is not a
+//      delivery failure (mirrors Go Scheduler errNoSubscriptions →
+//      releaseClaim). A released row is due again immediately, so the
+//      next tick retries it; nothing double-sends because the claim
+//      protocol keeps rows invisible while 'sending'.
+//   3. push per subscription (VAPID keys from env); 404/410 →
+//      private.push_subscription_gone prunes the endpoint; any 2xx →
+//      private.push_subscription_touch stamps last_used_at and
+//      complete_reminder 'sent'; all failed → fail_reminder (attempts
+//      ladder to dead at 5, same as Go).
 //
 // Trigger: pg_cron every 2 min behind the any_reminders_due() probe
-// (ops/schedule-delivery.sql) — NOT YET SCHEDULED. Deploy first,
-// schedule with the pg_cron proposal.
+// (ops/schedule-reminders.sql, installed on prod 2026-10-15). The Go
+// PushSender (internal/reminder) is the long-running-host driver; both
+// share the atomic claim and are safe to run together.
 //
 // Env: DELIVERY_DATABASE_URL (delivery_caller credential), VAPID_PUBLIC_KEY,
 // VAPID_PRIVATE_KEY, VAPID_SUBJECT (mailto/contact).
@@ -44,6 +47,7 @@ interface ClaimedReminder {
   chat_id: string;
   text: string;
   attempts: number;
+  recipient_ref: string;
   claimed_at: string;
 }
 
@@ -80,11 +84,6 @@ async function sendPush(
   }
 }
 
-// NOTE: this Edge driver exists for serverless ticks but stays
-// UNSCHEDULED until the pg_cron proposal lands. The Go PushSender
-// (internal/reminder) is the primary driver. Crypto (crypto.ts) is
-// round-trip verified in Deno; the claim/complete/fail plumbing below
-// mirrors deliver-notification.
 function reminderPayload(text: string): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(
     JSON.stringify({ title: "Centrum Badminton", body: `⏰ Reminder: ${text}`, url: "/app" }),
@@ -101,6 +100,10 @@ Deno.serve(async () => {
   }
   const sql = postgres(dsn, { max: 1, prepare: false });
   const report = { claimed: 0, sent: 0, held: 0, failed: 0, dead: 0 };
+  // Failure localization for ops: the driver_error response (stored by
+  // pg_net in net._http_response) says which phase threw, without
+  // exposing raw error text on a publicly invokable endpoint.
+  let stage = "claim";
 
   try {
     const rows = await sql<{ j: ClaimedReminder }[]>`
@@ -110,23 +113,23 @@ Deno.serve(async () => {
     );
     report.claimed = batch.length;
 
+    stage = "deliver";
+    const release = async (rem: ClaimedReminder) => {
+      await sql`select private.release_reminder(${rem.id}::uuid, ${rem.claimed_at}::timestamptz)`;
+    };
+
     for (const rem of batch) {
-      // The claim payload has no recipient_ref (031-era shape kept for
-      // compat): resolve via the row for routing.
-      const got = await sql<{ recipient_ref: string }[]>`
-        select recipient_ref from agent_reminders where id = ${rem.id}::uuid`;
-      const ref = got[0]?.recipient_ref ?? "";
+      const ref = rem.recipient_ref ?? "";
       if (!ref) {
-        // Unroutable pre-push row: hold by doing nothing — the reaper
-        // hands it back after the window (see header note on why we
-        // must not fail_reminder here).
+        await release(rem);
         report.held++;
         continue;
       }
       const subs = await sql<PushSub[]>`
-        select endpoint, p256dh, auth from push_subscriptions
-         where tenant_id = ${rem.tenant_id} and user_ref = ${ref}`;
+        select endpoint, p256dh, auth
+          from private.push_subscriptions_for(${rem.tenant_id}, ${ref})`;
       if (subs.length === 0) {
+        await release(rem);
         report.held++;
         continue;
       }
@@ -139,14 +142,12 @@ Deno.serve(async () => {
             subject: vapidSubject,
           });
           if (st === 404 || st === 410) {
-            await sql`delete from push_subscriptions
-               where tenant_id = ${rem.tenant_id} and endpoint = ${sub.endpoint}`;
+            await sql`select private.push_subscription_gone(${rem.tenant_id}, ${sub.endpoint})`;
             continue;
           }
           if (st >= 200 && st < 300) {
             sent = true;
-            await sql`update push_subscriptions set last_used_at = now()
-               where tenant_id = ${rem.tenant_id} and endpoint = ${sub.endpoint}`;
+            await sql`select private.push_subscription_touch(${rem.tenant_id}, ${sub.endpoint})`;
           }
         } catch (err) {
           console.error(JSON.stringify({ event: "push_send_failed", id: rem.id, err: String(err) }));
@@ -163,9 +164,9 @@ Deno.serve(async () => {
       }
     }
   } catch (err) {
-    console.error(JSON.stringify({ event: "reminder_driver_error", err: String(err) }));
+    console.error(JSON.stringify({ event: "reminder_driver_error", stage, err: String(err) }));
     await sql.end({ timeout: 1 });
-    return new Response(JSON.stringify({ ...report, driver_error: true }), {
+    return new Response(JSON.stringify({ ...report, driver_error: true, stage }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });

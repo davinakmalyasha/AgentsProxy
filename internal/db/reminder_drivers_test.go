@@ -101,6 +101,7 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 		t.Fatalf("claim as delivery_caller: %v", err)
 	}
 	claimed := map[string]bool{}
+	claimedRefs := map[string]string{}
 	for rows.Next() {
 		var raw []byte
 		var payload map[string]any
@@ -111,7 +112,9 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 			t.Fatal(err)
 		}
 		text, _ := payload["text"].(string)
+		ref, _ := payload["recipient_ref"].(string)
 		claimed[text] = true
+		claimedRefs[text] = ref
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -119,6 +122,11 @@ func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
 	}
 	if len(claimed) != 2 || !claimed["drv due"] || !claimed["drv maxed"] {
 		t.Errorf("claimed = %v, want exactly {drv due, drv maxed}", claimed)
+	}
+	// 059: routing rides the payload — the Edge driver must not need a
+	// follow-up table read to find the recipient.
+	if claimedRefs["drv due"] != "owner" || claimedRefs["drv maxed"] != "owner" {
+		t.Errorf("claim payload recipient_ref = %v, want owner on both rows", claimedRefs)
 	}
 	// IDs + claimed_at prefetched via admin: delivery_caller holds no
 	// table grants, so subselects inside its queries die with 42501.
@@ -225,4 +233,285 @@ func toCallerDSN(dsn string) string {
 		return dsn
 	}
 	return dsn[:i+3] + "delivery_caller" + rest[at:]
+}
+
+// TestReminderPushRPCs_AsDeliveryCaller pins migration 059: the Edge
+// driver's RPC-only surface. delivery_caller executes the push helpers
+// and release_reminder but still holds NO table grants; app_runtime
+// executes none of them.
+//
+// Covered, through the real functions on a migrated database:
+//   - push_subscriptions_for: tenant+ref scoped, empty ref returns none.
+//   - push_subscription_touch: stamps last_used_at; false when missing.
+//   - push_subscription_gone: deletes the row; false when missing.
+//   - release_reminder: back to pending with attempts intact; false on
+//     a stale/no-longer-claimed row.
+//   - least privilege: app_runtime gets 42501 on every RPC, and
+//     delivery_caller gets 42501 on direct table reads.
+//
+// Seeding and cleanup run on the admin pool (delivery_caller holds no
+// table grants by design); cleanup owns a separate pool (see the note
+// in TestReminderDrivers_AsDeliveryCaller).
+func TestReminderPushRPCs_AsDeliveryCaller(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	if adminDSN == "" {
+		adminDSN = dsn
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	adminPool, err := NewPool(ctx, adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminPool.Close()
+	if err := Migrate(ctx, adminPool); err != nil {
+		t.Fatal(err)
+	}
+
+	const tenantA, tenantB = "push-test", "push-test-b"
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cpool, err := NewPool(cctx, adminDSN)
+		if err != nil {
+			return
+		}
+		defer cpool.Close()
+		cpool.Exec(cctx, `DELETE FROM agent_reminders WHERE tenant_id IN ($1, $2)`, tenantA, tenantB)
+		cpool.Exec(cctx, `DELETE FROM push_subscriptions WHERE tenant_id IN ($1, $2)`, tenantA, tenantB)
+		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	if _, err := adminPool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
+		 VALUES ('pusha', $1, 'push-hash-a', 1000000, 'active'),
+		        ('pushb', $2, 'push-hash-b', 1000000, 'active')
+		 ON CONFLICT (tenant_id) DO NOTHING`, tenantA, tenantB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx,
+		`DELETE FROM agent_reminders WHERE tenant_id IN ($1, $2)`, tenantA, tenantB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx,
+		`DELETE FROM push_subscriptions WHERE tenant_id IN ($1, $2)`, tenantA, tenantB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminPool.Exec(ctx,
+		`INSERT INTO push_subscriptions (tenant_id, user_ref, endpoint, p256dh, auth) VALUES
+		 ($1, 'dev', 'https://push.test/ep1', 'k1', 'a1'),
+		 ($1, 'dev', 'https://push.test/ep2', 'k2', 'a2'),
+		 ($1, 'other', 'https://push.test/ep3', 'k3', 'a3'),
+		 ($2, 'dev', 'https://push.test/ep4', 'k4', 'a4')`, tenantA, tenantB); err != nil {
+		t.Fatal(err)
+	}
+
+	callerPool, err := NewPool(ctx, toCallerDSN(dsn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer callerPool.Close()
+
+	// Lookup: exactly this tenant's ref rows, endpoint-ordered; the
+	// same-ref subscription of the other tenant must not leak in.
+	rows, err := callerPool.Query(ctx,
+		`SELECT endpoint FROM private.push_subscriptions_for($1, 'dev')`, tenantA)
+	if err != nil {
+		t.Fatalf("push_subscriptions_for as delivery_caller: %v", err)
+	}
+	var endpoints []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			t.Fatal(err)
+		}
+		endpoints = append(endpoints, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 2 ||
+		endpoints[0] != "https://push.test/ep1" || endpoints[1] != "https://push.test/ep2" {
+		t.Errorf("push_subscriptions_for = %v, want exactly [ep1 ep2] (tenant+ref scoped)", endpoints)
+	}
+	var none int
+	if err := callerPool.QueryRow(ctx,
+		`SELECT count(*) FROM private.push_subscriptions_for($1, '')`, tenantA).Scan(&none); err != nil {
+		t.Fatal(err)
+	}
+	if none != 0 {
+		t.Errorf("push_subscriptions_for with empty ref = %d rows, want 0", none)
+	}
+
+	// Touch: boolean result, and the admin sees the effect.
+	var ok bool
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.push_subscription_touch($1, 'https://push.test/ep1')`, tenantA).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("touch on live endpoint = false, want true")
+	}
+	if err := adminPool.QueryRow(ctx,
+		`SELECT last_used_at IS NOT NULL FROM push_subscriptions
+		  WHERE tenant_id = $1 AND endpoint = 'https://push.test/ep1'`, tenantA).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("touch did not stamp last_used_at")
+	}
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.push_subscription_touch($1, 'https://push.test/missing')`, tenantA).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("touch on missing endpoint = true, want false")
+	}
+
+	// Gone: deletes exactly the one row, idempotent on the second call.
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.push_subscription_gone($1, 'https://push.test/ep2')`, tenantA).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("gone on live endpoint = false, want true")
+	}
+	var subCount int
+	if err := adminPool.QueryRow(ctx,
+		`SELECT count(*) FROM push_subscriptions
+		  WHERE tenant_id = $1 AND endpoint = 'https://push.test/ep2'`, tenantA).Scan(&subCount); err != nil {
+		t.Fatal(err)
+	}
+	if subCount != 0 {
+		t.Error("gone did not delete the subscription row")
+	}
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.push_subscription_gone($1, 'https://push.test/ep2')`, tenantA).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("gone on already-deleted endpoint = true, want false")
+	}
+
+	// Release: claim a due row, hand it back without burning attempts.
+	if _, err := adminPool.Exec(ctx,
+		`INSERT INTO agent_reminders (tenant_id, chat_id, text, remind_at, recipient_ref, attempts)
+		 VALUES ($1, '1', 'push release me', now() - interval '1 minute', 'dev', 2)`, tenantA); err != nil {
+		t.Fatal(err)
+	}
+	rows2, err := callerPool.Query(ctx, `SELECT j FROM private.claim_due_reminders(20) AS j`)
+	if err != nil {
+		t.Fatalf("claim as delivery_caller: %v", err)
+	}
+	var relID, relClaimedAt, relText string
+	claimedCount := 0
+	for rows2.Next() {
+		var raw []byte
+		var payload map[string]any
+		if err := rows2.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatal(err)
+		}
+		claimedCount++
+		relText, _ = payload["text"].(string)
+		relID, _ = payload["id"].(string)
+		relClaimedAt, _ = payload["claimed_at"].(string)
+	}
+	rows2.Close()
+	if err := rows2.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if claimedCount != 1 || relText != "push release me" || relID == "" || relClaimedAt == "" {
+		t.Fatalf("claimed %d rows (text=%q id=%q), want exactly the seeded due row", claimedCount, relText, relID)
+	}
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.release_reminder($1::uuid, $2::timestamptz)`, relID, relClaimedAt).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("release_reminder on live claim = false, want true")
+	}
+	var status string
+	var attempts int
+	var claimedAt *time.Time
+	if err := adminPool.QueryRow(ctx,
+		`SELECT status, attempts, claimed_at FROM agent_reminders WHERE id = $1::uuid`, relID).
+		Scan(&status, &attempts, &claimedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempts != 2 || claimedAt != nil {
+		t.Errorf("after release: status=%q attempts=%d claimed_at=%v, want pending/2/nil", status, attempts, claimedAt)
+	}
+	if err := callerPool.QueryRow(ctx,
+		`SELECT private.release_reminder($1::uuid, $2::timestamptz)`, relID, relClaimedAt).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("release_reminder on non-sending row = true, want false")
+	}
+
+	// Least privilege: app_runtime cannot execute any 059 RPC. pgx
+	// surfaces 42501 lazily, so iterate before checking rows.Err().
+	// The statements are harmless if a denial ever regresses silently:
+	// they match no rows for tenant 'x'.
+	runtimePool, err := NewPool(ctx, toRuntimeDSN(dsn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimePool.Close()
+	for _, stmt := range []string{
+		`SELECT * FROM private.push_subscriptions_for('x', 'y')`,
+		`SELECT private.push_subscription_touch('x', 'y')`,
+		`SELECT private.push_subscription_gone('x', 'y')`,
+		`SELECT private.release_reminder('00000000-0000-0000-0000-000000000000'::uuid, now())`,
+	} {
+		rows3, qerr := runtimePool.Query(ctx, stmt)
+		denied := qerr != nil
+		if qerr == nil {
+			for rows3.Next() {
+			}
+			if rerr := rows3.Err(); rerr != nil {
+				denied = true
+				qerr = rerr
+			}
+			rows3.Close()
+		}
+		if !denied {
+			t.Errorf("app_runtime executed %q, want 42501", stmt)
+		} else if !strings.Contains(qerr.Error(), "42501") && !strings.Contains(qerr.Error(), "permission denied") {
+			t.Errorf("app_runtime on %q: unexpected error %v (want permission denied)", stmt, qerr)
+		}
+	}
+
+	// The Edge credential still holds zero table grants (059 keeps every
+	// row touch behind definer functions).
+	for _, stmt := range []string{
+		`SELECT count(*) FROM push_subscriptions`,
+		`SELECT count(*) FROM agent_reminders`,
+	} {
+		rows4, qerr := callerPool.Query(ctx, stmt)
+		denied := qerr != nil
+		if qerr == nil {
+			for rows4.Next() {
+			}
+			if rerr := rows4.Err(); rerr != nil {
+				denied = true
+				qerr = rerr
+			}
+			rows4.Close()
+		}
+		if !denied {
+			t.Errorf("delivery_caller read %q, want 42501", stmt)
+		} else if !strings.Contains(qerr.Error(), "42501") && !strings.Contains(qerr.Error(), "permission denied") {
+			t.Errorf("delivery_caller on %q: unexpected error %v (want permission denied)", stmt, qerr)
+		}
+	}
 }
