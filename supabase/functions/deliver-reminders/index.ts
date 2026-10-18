@@ -61,7 +61,7 @@ async function sendPush(
   sub: PushSub,
   payload: Uint8Array<ArrayBuffer>,
   vapid: { publicKey: string; privateKey: string; subject: string },
-): Promise<number> {
+): Promise<{ status: number; detail: string }> {
   const aud = new URL(sub.endpoint).origin;
   const auth = await vapidAuth(vapid.publicKey, vapid.privateKey, vapid.subject, aud);
   const body = await encryptPush({ p256dh: sub.p256dh, auth: sub.auth }, payload);
@@ -78,7 +78,12 @@ async function sendPush(
       body: body as BodyInit,
       signal: ctrl.signal,
     });
-    return res.status;
+    // Non-2xx without a 404/410: the detail is the only way ops can tell
+    // a VAPID rejection from a bad endpoint. FCM errors are short JSON.
+    const detail = res.status >= 200 && res.status < 300
+      ? ""
+      : (await res.text().catch(() => "")).slice(0, 300);
+    return { status: res.status, detail };
   } finally {
     clearTimeout(t);
   }
@@ -136,7 +141,7 @@ Deno.serve(async () => {
       let sent = false;
       for (const sub of subs) {
         try {
-          const st = await sendPush(sub, reminderPayload(rem.text), {
+          const { status: st, detail } = await sendPush(sub, reminderPayload(rem.text), {
             publicKey: vapidPublic,
             privateKey: vapidPrivate,
             subject: vapidSubject,
@@ -148,7 +153,9 @@ Deno.serve(async () => {
           if (st >= 200 && st < 300) {
             sent = true;
             await sql`select private.push_subscription_touch(${rem.tenant_id}, ${sub.endpoint})`;
+            continue;
           }
+          console.error(JSON.stringify({ event: "push_send_status", id: rem.id, status: st, detail }));
         } catch (err) {
           console.error(JSON.stringify({ event: "push_send_failed", id: rem.id, err: String(err) }));
         }
