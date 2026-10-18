@@ -19,7 +19,13 @@ ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 out="$OUT_DIR/agents_proxy-$ts.sql.gz"
 
 echo "[backup] dumping $ADMIN_URL -> $out"
-pg_dump --no-owner --no-privileges --clean --if-exists "$ADMIN_URL" | gzip -9 > "$out"
+# App schemas only. The platform layers (auth/storage/vault/...) are
+# Supabase-managed and covered by the platform WAL-G backups; including
+# them breaks portable restores (hosted-only extensions, pg_cron config
+# table data, event triggers) and drags platform PII (auth password
+# hashes) into the artifact.
+pg_dump --no-owner --no-privileges --clean --if-exists \
+  --schema=public --schema=private "$ADMIN_URL" | gzip -9 > "$out"
 ls -lh "$out"
 
 # Retention: prune backups older than KEEP_DAYS.

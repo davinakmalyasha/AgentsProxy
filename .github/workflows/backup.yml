@@ -97,7 +97,14 @@ jobs:
           psql --version
           DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres"
           ls -lh backups/
-          # Prod has pg_cron/pg_net (hosted-only extensions) that the
+          # App objects reference btree_gist (sports_bookings_no_overlap
+          # EXCLUDE constraint: text equality in GiST). The hosted
+          # extensions schema is not in the scoped dump; vanilla
+          # postgres:17 ships btree_gist contrib. Install it into its own
+          # schema — into public it would block the dump's DROP SCHEMA
+          # public, and gist/text has exactly one opclass anywhere.
+          psql "$DSN" -q -c 'CREATE SCHEMA IF NOT EXISTS ext; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA ext'
+          # Prod also has pg_cron/pg_net (hosted-only extensions) that the
           # vanilla postgres:17 smoke image cannot install; the platform
           # layer restores those. This smoke proves schema + data:
           gunzip -c backups/*.sql.gz | grep -vE '^(CREATE|COMMENT ON|ALTER) EXTENSION' | psql "$DSN" -v ON_ERROR_STOP=1 -q
