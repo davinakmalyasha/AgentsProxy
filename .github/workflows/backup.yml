@@ -97,7 +97,10 @@ jobs:
           psql --version
           DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres"
           ls -lh backups/
-          gunzip -c backups/*.sql.gz | psql "$DSN" -v ON_ERROR_STOP=1 -q
+          # Prod has pg_cron/pg_net (hosted-only extensions) that the
+          # vanilla postgres:17 smoke image cannot install; the platform
+          # layer restores those. This smoke proves schema + data:
+          gunzip -c backups/*.sql.gz | grep -vE '^(CREATE|COMMENT ON|ALTER) EXTENSION' | psql "$DSN" -v ON_ERROR_STOP=1 -q
           mig=$(psql "$DSN" -tAc "select count(*) from schema_migrations where version like '%.sql'")
           echo "migrations recorded in dump: $mig"
           test "$mig" -ge 50
