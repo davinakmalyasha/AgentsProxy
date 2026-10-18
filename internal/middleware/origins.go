@@ -15,7 +15,7 @@ import (
 )
 
 // errBadSuffix rejects suffix rules that could over-match.
-var errBadSuffix = errors.New("suffix must look like .example.com (leading dot, no scheme/slashes)")
+var errBadSuffix = errors.New("suffix must look like .example.com (dot boundary) or -team.example.com (hyphen boundary): no scheme/slashes/spaces")
 
 // errBadOrigin rejects registry values that could over-match or
 // misroute: wildcards, non-https (except loopback for dev), paths.
@@ -84,13 +84,36 @@ func NormalizeOrigin(s string) string {
 	return strings.ToLower(s)
 }
 
-// ParseSuffix validates a suffix rule: leading dot, something real
-// after it, no scheme/slashes/spaces. The leading dot IS the
-// evil-subdomain defense: "https://evil-example.com" does not end
-// with ".example.com", while "https://a.example.com" does.
+// ParseSuffix validates a suffix rule: a boundary character, something
+// real after it, no scheme/slashes/spaces. Two boundary forms exist:
+//
+//   - leading dot: domain scopes like ".example.com". The dot IS the
+//     evil-subdomain defense: "https://evil-example.com" does not end
+//     with ".example.com", while "https://a.example.com" does.
+//   - leading hyphen: label scopes like "-my-team.vercel.app", for
+//     providers that allocate hostnames inside a managed namespace
+//     whose trailing segment is a unique account slug (Vercel preview
+//     hosts: <project>-<hash>-<team>.vercel.app). Another account's
+//     host ends with its own slug, so the hyphen boundary holds there.
+//
+// Hyphen rules additionally require at least two dots: a short rule
+// like "-vercel.app" would match registrable look-alikes such as
+// "evil-vercel.app" (hyphens are valid label characters against the
+// public suffix), so two dots keep the scope inside one provider's
+// managed namespace.
 func ParseSuffix(s string) (string, error) {
 	n := NormalizeOrigin(s)
-	if !strings.HasPrefix(n, ".") || len(n) < 3 || strings.ContainsAny(n, "/: ") {
+	if len(n) < 3 || strings.ContainsAny(n, "/: ") {
+		return "", errBadSuffix
+	}
+	switch {
+	case strings.HasPrefix(n, "."):
+		// Domain-boundary scope; unchanged from the original format.
+	case strings.HasPrefix(n, "-"):
+		if len(n) < 4 || n[1] == '.' || n[1] == '-' || strings.Count(n, ".") < 2 {
+			return "", errBadSuffix
+		}
+	default:
 		return "", errBadSuffix
 	}
 	return n, nil

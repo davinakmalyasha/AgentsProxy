@@ -13,7 +13,7 @@ import (
 func testSet() *OriginSet {
 	return &OriginSet{
 		exact:    map[string]struct{}{"https://a.example.com": {}},
-		suffixes: []string{".example.com"},
+		suffixes: []string{".example.com", "-my-team.vercel.app"},
 	}
 }
 
@@ -37,6 +37,8 @@ func TestOriginSet_AllowedMatrix(t *testing.T) {
 		"https://b.example.com",      // suffix
 		"https://deep.b.example.com", // nested suffix
 		"https://B.EXAMPLE.COM/",     // normalization
+		// Hyphen-boundary suffix: provider-managed preview hosts.
+		"https://centrum-badminton-9i427fi8w-my-team.vercel.app",
 	}
 	for _, o := range allow {
 		if !s.Allowed(o) {
@@ -50,6 +52,9 @@ func TestOriginSet_AllowedMatrix(t *testing.T) {
 		"https://example.com.evil.com", // suffix in the middle
 		"https://example.com",          // apex is NOT covered by .example.com
 		"https://other.org",
+		"https://my-team.vercel.app",           // hyphen apex NOT covered
+		"https://my-team.vercel.app.evil.com",  // suffix in the middle
+		"https://x-my-team.vercel.app.evil.co", // trailing junk
 	}
 	for _, o := range deny {
 		if s.Allowed(o) {
@@ -66,7 +71,15 @@ func TestParseSuffix(t *testing.T) {
 	if got, err := ParseSuffix(".example.com"); err != nil || got != ".example.com" {
 		t.Errorf("ParseSuffix valid = %q, %v", got, err)
 	}
-	for _, bad := range []string{"", "example.com", "*", "*.example.com", "https://x.com", ".", ".a b", ".a/b"} {
+	// Hyphen boundary: provider-team label scope (needs two dots).
+	if got, err := ParseSuffix("-my-team.vercel.app"); err != nil || got != "-my-team.vercel.app" {
+		t.Errorf("ParseSuffix hyphen valid = %q, %v", got, err)
+	}
+	for _, bad := range []string{
+		"", "example.com", "*", "*.example.com", "https://x.com", ".", ".a b", ".a/b",
+		"-", "-vercel.app", "-.com", // hyphen rules need >= 2 dots
+		"-.a.b", // boundary only
+	} {
 		if got, err := ParseSuffix(bad); err == nil {
 			t.Errorf("ParseSuffix(%q) = %q, want error", bad, got)
 		}
