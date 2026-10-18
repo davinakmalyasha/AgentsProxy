@@ -27,12 +27,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install PostgreSQL 17 client
+        # Dearmor as the runner user: `sudo gpg` in a piped step tries to
+        # open /dev/tty and dies (observed on the first live run).
         run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor > /tmp/pgdg.gpg
+          sudo install -m 0644 /tmp/pgdg.gpg /usr/share/keyrings/pgdg.gpg
           . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
@@ -42,6 +43,10 @@ jobs:
           DATABASE_URL_ADMIN: ${{ secrets.BACKUP_DATABASE_URL }}
           BACKUP_DIR: backups
         run: |
+          # pg_wrapper still selects the runner's preinstalled 16 as
+          # /usr/bin/pg_dump; pin the 17 binary path explicitly.
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pg_dump --version
           bash ops/backup.sh
           ls -lh backups/
 
@@ -77,11 +82,10 @@ jobs:
 
       - name: Install PostgreSQL 17 client
         run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor > /tmp/pgdg.gpg
+          sudo install -m 0644 /tmp/pgdg.gpg /usr/share/keyrings/pgdg.gpg
           . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
@@ -89,9 +93,25 @@ jobs:
       - name: Restore + sanity
         run: |
           set -euo pipefail
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          psql --version
           DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres"
           ls -lh backups/
-          gunzip -c backups/*.sql.gz | psql "$DSN" -v ON_ERROR_STOP=1 -q
+          # App objects reference btree_gist (sports_bookings_no_overlap
+          # EXCLUDE constraint: text equality in GiST). The hosted
+          # extensions schema is not in the scoped dump; vanilla
+          # postgres:17 ships btree_gist contrib. Install it into its own
+          # schema — into public it would block the dump's DROP SCHEMA
+          # public, and gist/text has exactly one opclass anywhere.
+          psql "$DSN" -q -c 'CREATE SCHEMA IF NOT EXISTS ext; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA ext'
+          # RLS policies name app_runtime (033/041-era TO clauses).
+          # Roles are cluster-level and owned by the bootstrap layer,
+          # not by the logical dump.
+          psql "$DSN" -q -c "DO \$\$ BEGIN CREATE ROLE app_runtime NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          # Prod also has pg_cron/pg_net (hosted-only extensions) that the
+          # vanilla postgres:17 smoke image cannot install; the platform
+          # layer restores those. This smoke proves schema + data:
+          gunzip -c backups/*.sql.gz | grep -vE '^(CREATE|COMMENT ON|ALTER) EXTENSION' | psql "$DSN" -v ON_ERROR_STOP=1 -q
           mig=$(psql "$DSN" -tAc "select count(*) from schema_migrations where version like '%.sql'")
           echo "migrations recorded in dump: $mig"
           test "$mig" -ge 50
