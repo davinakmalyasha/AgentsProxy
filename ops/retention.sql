@@ -18,6 +18,10 @@
 --
 -- Local dev (Laragon) does not need this: the Go janitor owns the 3
 -- small tables there. Keep the Go janitor as the local fallback.
+--
+-- Installed on prod 2026-10-17: job retention-tick active (17 3 * * *);
+-- manual tick proof ran all 7 targets (0 deleted on the still-empty
+-- dataset). First-run fix lives in §2 (unschedule by jobid lookup).
 
 -- ---------------------------------------------------------------------------
 -- 1. The tick. Batched deletes: an unbounded DELETE on a large table
@@ -94,10 +98,13 @@ ALTER FUNCTION private.retention_tick() OWNER TO postgres;
 REVOKE ALL ON FUNCTION private.retention_tick() FROM PUBLIC;
 
 -- ---------------------------------------------------------------------------
--- 2. Schedule. Unschedule first so re-running is idempotent. 03:17
+-- 2. Schedule. Remove first so re-running is idempotent. Unschedule-by-
+--    lookup, not cron.unschedule('name'): the name form RAISES on a
+--    missing job (XX000 "could not find valid entry"), which would make
+--    the first run fail; the jobid form over zero rows is a no-op. 03:17
 --    local — off-peak, and off the :00/:05 marks every other job uses.
 -- ---------------------------------------------------------------------------
-SELECT cron.unschedule('retention-tick');
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'retention-tick';
 SELECT cron.schedule('retention-tick', '17 3 * * *', $$SELECT private.retention_tick()$$);
 
 -- ---------------------------------------------------------------------------
