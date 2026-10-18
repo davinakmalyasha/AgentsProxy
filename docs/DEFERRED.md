@@ -98,7 +98,14 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   DONE 2026-10 (perf pass) for pruning: ops/retention.sql (pg_cron
   retention_tick for usage/events/notify_jobs/sessions/report backstop,
   batched deletes) + Go janitor/sweeper gated on BACKGROUND_TICKERS +
-  retention indexes + BRIN. Backup scheduling (R18) still open.
+  retention indexes + BRIN. R18 DONE 2026-10-18: .github/workflows/
+  backup.yml runs ops/backup.sh nightly with a backup_reader credential
+  (062: LOGIN BYPASSRLS + pg_read_all_data; GitHub secret
+  BACKUP_DATABASE_URL) and restores the dump into a postgres:17 smoke
+  job. Platform layer: WAL-G daily backups on, pitr_enabled=false — the
+  dump is the independent, off-platform copy. Retention tick installed
+  on prod 2026-10-17 (retention-tick active); smoke.yml now probes the
+  frontend too.
 - **Pool tuning beyond admin**: runtime pool Min/Max per deploy shape.
   Trigger: another EMAXCONNSESSION-class incident.
 - **ADK session-table RLS**: `sessions/events/app_states/user_states`

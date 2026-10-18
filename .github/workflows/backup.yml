@@ -1,0 +1,101 @@
+# R18: nightly logical backup (ops/backup.sh) + restore smoke.
+#
+# Independent of the platform's WAL-G daily backups (pitr_enabled=false
+# as of 2026-10-18): this dump is restorable anywhere, and the smoke job
+# proves it by restoring into a scratch postgres:17 and running sanity
+# queries. pg_dump must match the server major (17): installed from PGDG
+# in both jobs (17.6+ dumps emit \restrict, which older psql rejects).
+#
+# Secret: BACKUP_DATABASE_URL — backup_reader credential (migration 062:
+# LOGIN BYPASSRLS + pg_read_all_data; BYPASSRLS is REQUIRED or every
+# FORCE-RLS tenant table dumps empty), pooler session mode, sslmode=require.
+name: backup
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 01:00 Asia/Jakarta (UTC+7)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Dump via ops/backup.sh
+        env:
+          DATABASE_URL_ADMIN: ${{ secrets.BACKUP_DATABASE_URL }}
+          BACKUP_DIR: backups
+        run: |
+          bash ops/backup.sh
+          ls -lh backups/
+
+      - name: Upload dump artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: backups/*.sql.gz
+          retention-days: 30
+          if-no-files-found: error
+
+  restore-smoke:
+    needs: dump
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      pg17:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: db-backup
+          path: backups
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Restore + sanity
+        run: |
+          set -euo pipefail
+          DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres"
+          ls -lh backups/
+          gunzip -c backups/*.sql.gz | psql "$DSN" -v ON_ERROR_STOP=1 -q
+          mig=$(psql "$DSN" -tAc "select count(*) from schema_migrations where version like '%.sql'")
+          echo "migrations recorded in dump: $mig"
+          test "$mig" -ge 50
+          for t in clients tenant_records agent_reminders usage sports_bookings push_subscriptions; do
+            n=$(psql "$DSN" -tAc "select count(*) from \"$t\"")
+            echo "$t: $n rows"
+          done
