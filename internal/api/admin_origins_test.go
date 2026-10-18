@@ -113,8 +113,8 @@ func TestAdmin_OriginsCRUD(t *testing.T) {
 		t.Error("deleted origin still allowed")
 	}
 
-	// Suffix rules: bare/Star forms rejected, dotted form round-trips.
-	for _, bad := range []string{`{"suffix":"example.com"}`, `{"suffix":"*"}`, `{"suffix":"https://x.com"}`} {
+	// Suffix rules: bare/Star forms rejected, dot + hyphen forms round-trip.
+	for _, bad := range []string{`{"suffix":"example.com"}`, `{"suffix":"*"}`, `{"suffix":"https://x.com"}`, `{"suffix":"-vercel.app"}`} {
 		resp := adminReq("POST", "/v1/admin/origin-suffixes", h.adminKey, bad)
 		resp.Body.Close()
 		if resp.StatusCode != 400 {
@@ -137,6 +137,26 @@ func TestAdmin_OriginsCRUD(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("suffix delete status=%d want 200", resp.StatusCode)
+	}
+
+	// Hyphen-boundary form round-trips too (provider team namespaces).
+	resp = adminReq("POST", "/v1/admin/origin-suffixes", h.adminKey, `{"suffix":"-team.preview.example","note":"probe-hyphen"}`)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Errorf("hyphen suffix create status=%d want 201", resp.StatusCode)
+	}
+	set, err = middleware.LoadOrigins(ctx, h.pool)
+	if err != nil {
+		t.Fatalf("LoadOrigins hyphen suffix: %v", err)
+	}
+	if !set.Allowed("https://centrum-badminton-9i427fi8w-team.preview.example") ||
+		set.Allowed("https://team.preview.example") {
+		t.Error("hyphen suffix rule misapplied through the DB path")
+	}
+	resp = adminReq("DELETE", "/v1/admin/origin-suffixes?suffix=-team.preview.example", h.adminKey, "")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("hyphen suffix delete status=%d want 200", resp.StatusCode)
 	}
 }
 

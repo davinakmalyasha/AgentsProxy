@@ -155,7 +155,9 @@ func (a *Admin) OriginsDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": origin})
 }
 
-// SuffixCreate registers a dot-boundary suffix rule (".example.com").
+// SuffixCreate registers a boundary suffix rule: ".example.com" (dot
+// boundary, domain scopes) or "-team.example.com" (hyphen boundary,
+// provider team namespaces like Vercel preview hosts).
 // Tenant-less by design: it covers conventional subdomains across all
 // tenants, so it stays rare and audited. Exact origins are the norm.
 func (a *Admin) SuffixCreate(w http.ResponseWriter, r *http.Request) {
