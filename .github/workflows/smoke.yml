@@ -38,3 +38,24 @@ jobs:
           cat /tmp/health.json
           echo "http=$code attempts_used=$i"
           test "$ok" = "1"
+
+  frontend-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FRONTEND_URL: https://centrum-badminton.vercel.app
+    steps:
+      - name: probe frontend root (3 attempts, 20s apart)
+        # Same retry philosophy as prod-health above: one sample can
+        # catch a cold start; three spaced samples distinguish a flap.
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in 1 2 3; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 "$FRONTEND_URL/") || code="000"
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            echo "attempt $i: http=$code — retrying in 20s"
+            sleep 20
+          done
+          echo "http=$code attempts_used=$i"
+          test "$ok" = "1"
