@@ -43,6 +43,10 @@ jobs:
           DATABASE_URL_ADMIN: ${{ secrets.BACKUP_DATABASE_URL }}
           BACKUP_DIR: backups
         run: |
+          # pg_wrapper still selects the runner's preinstalled 16 as
+          # /usr/bin/pg_dump; pin the 17 binary path explicitly.
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          pg_dump --version
           bash ops/backup.sh
           ls -lh backups/
 
@@ -89,6 +93,8 @@ jobs:
       - name: Restore + sanity
         run: |
           set -euo pipefail
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          psql --version
           DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres"
           ls -lh backups/
           gunzip -c backups/*.sql.gz | psql "$DSN" -v ON_ERROR_STOP=1 -q
