@@ -32,24 +32,34 @@ function unb64url(s: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+// RFC 5869 HKDF via raw HMAC. WebCrypto's "HKDF" deriveBits always does
+// extract+expand together, which cannot express the RFC 8291/8188 chain
+// (extract → expand → extract → expand). Building both halves from
+// HMAC-SHA-256 is exact:
+//   Extract(salt, ikm) = HMAC(key=salt, msg=ikm)
+//   Expand(prk, info, L) = T(1) || T(2) || ... ; T(i) = HMAC(key=prk, T(i-1) || info || i)
+async function hmac(keyBytes: Uint8Array<ArrayBuffer>, msg: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+	const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+	return new Uint8Array(await crypto.subtle.sign("HMAC", key, msg));
+}
+
 async function hkdfExtract(salt: Uint8Array<ArrayBuffer>, ikm: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
-	const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
-	const bits = await crypto.subtle.deriveBits(
-		{ name: "HKDF", hash: "SHA-256", salt: salt, info: new Uint8Array(0) },
-		key,
-		256,
-	);
-	return new Uint8Array(bits);
+	return hmac(salt, ikm);
 }
 
 async function hkdfExpand(prk: Uint8Array<ArrayBuffer>, info: Uint8Array<ArrayBuffer>, len: number): Promise<Uint8Array<ArrayBuffer>> {
-	const key = await crypto.subtle.importKey("raw", prk, "HKDF", false, ["deriveBits"]);
-	const bits = await crypto.subtle.deriveBits(
-		{ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: info },
-		key,
-		len * 8,
-	);
-	return new Uint8Array(bits);
+	const key = await crypto.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+	const out = new Uint8Array(len);
+	let prev = new Uint8Array(0);
+	let off = 0;
+	let i = 1;
+	while (off < len) {
+		prev = new Uint8Array(await crypto.subtle.sign("HMAC", key, concat(prev, info, new Uint8Array([i++]))));
+		const take = Math.min(prev.length, len - off);
+		out.set(prev.subarray(0, take), off);
+		off += take;
+	}
+	return out;
 }
 
 export interface PushKeys {
@@ -84,7 +94,13 @@ export async function encryptPush(keys: PushKeys, plaintext: Uint8Array<ArrayBuf
   const ecdh = new Uint8Array(ecdhBits);
   const enc = new TextEncoder();
   const keyInfo = concat(enc.encode("WebPush: info\x00"), uaPub, asPubRaw);
-  const prk = await hkdfExpand(await hkdfExtract(authSecret, ecdh), keyInfo, 32);
+  // RFC 8291 §3.4: PRK_key = Extract(auth_secret, ecdh); IKM = Expand(PRK_key, key_info, 32).
+  const ikm = await hkdfExpand(await hkdfExtract(authSecret, ecdh), keyInfo, 32);
+  // RFC 8188 §2.1: PRK = Extract(record_salt, IKM) — the second extract
+  // is load-bearing: expanding straight from IKM produces a payload the
+  // browser cannot decrypt, and FCM accepts it anyway (it never decrypts),
+  // so the failure is silent until a device test.
+  const prk = await hkdfExtract(salt, ikm);
   const cek = await hkdfExpand(prk, enc.encode("Content-Encoding: aes128gcm\x00"), 16);
   const nonce = await hkdfExpand(prk, enc.encode("Content-Encoding: nonce\x00"), 12);
 
