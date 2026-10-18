@@ -136,20 +136,19 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   commented out) when the delivery target lands. The 3 orphaned
   driver SQL functions were dropped in 055; a repair re-adds what it
   needs (see 031/042/048 for the bodies).
-  IN PROGRESS 2026-10 (PWA decision): 057 re-adds the quarantine-aware
-  claim + complete/fail drivers, the push_subscriptions registry, and a
-  routable recipient_ref on reminders; pinned by
-  TestReminderDrivers_AsDeliveryCaller (delivery_caller executes,
-  app_runtime denied). Landed since: Go PushSender + Edge driver +
-  set_reminder recipient + VAPID config (#9); pg_cron reminder/reaper
-  ticks installed (ops/schedule-reminders.sql); 059 moves the Edge
-  driver to RPC-only DB access (delivery_caller holds no table grants)
-  with release-without-burning parity, pinned by
-  TestReminderPushRPCs_AsDeliveryCaller. Remaining: delivery_caller
-  credential match on prod (edge secret password mismatch found via
-  net._http_response), frontend subscribe env + branch merge, first
-  live delivery E2E. Trigger: owner decision on the delivery target
-  (PWA transport vs Edge).
+  DONE 2026-10-18 (PWA Web Push, live-verified end to end):
+  057 re-added the quarantine-aware drivers + push_subscriptions +
+  recipient_ref; 059 moved the Edge driver to RPC-only DB access
+  (delivery_caller holds no table grants) with release-without-burning
+  parity; 060 fixed postgres.js millisecond truncation that made
+  release/complete/fail never match the claim; the Edge encoder's
+  missing RFC 8188 second HKDF extract was found only by a real-device
+  test (FCM accepts undecryptable bodies) and is now pinned by
+  crypto_test.ts; the frontend subscribes through a same-origin shim
+  (the httpOnly session cookie made the old client-side read fail with
+  "no session"). E2E proof: real Chrome subscription → FCM → displayed
+  notification, plus the negative ladder (bogus endpoint → dead at 5,
+  DNS error logged). VAPID keys + delivery_caller password rotated.
 
 ## Environments (deferred tiers — decision 2026-10-11)
 

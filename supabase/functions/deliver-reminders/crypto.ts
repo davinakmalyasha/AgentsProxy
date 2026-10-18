@@ -1,11 +1,16 @@
 // RFC8291 aes128gcm Web Push encryption + VAPID signing (WebCrypto).
 //
-// Interop verified 2026-10-15 by Deno round-trip (encrypt → decrypt
-// with known keys → plaintext; VAPID JWT verified against the public
-// key), not against a live push service. The Go PushSender
-// (internal/reminder, webpush-go) is the long-running-host driver; this
-// Edge driver serves the pg_cron ticks (ops/schedule-reminders.sql,
-// installed on prod 2026-10-15). Both share the same claim protocol.
+// Interop: live-verified 2026-10-18 — a real Chrome subscription
+// received and displayed a production reminder end to end. That test
+// caught what the earlier Deno round-trip could not: the encoder was
+// missing RFC 8188's second HKDF extract (PRK = Extract(record_salt,
+// IKM)); FCM accepted the opaque body (it never decrypts) and every
+// browser dropped it silently. Both halves are pinned by crypto_test.ts
+// against an RFC-written decryptor — not a shared helper, so a shared
+// misunderstanding fails the test. The Go PushSender (internal/reminder,
+// webpush-go) is the long-running-host driver; this Edge driver serves
+// the pg_cron ticks (ops/schedule-reminders.sql). Both share the same
+// claim protocol.
 
 const RS = 4096;
 
