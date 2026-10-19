@@ -270,8 +270,10 @@ func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	if strings.Contains(out, "error") {
 		t.Fatalf("top_customers error: %s", out)
 	}
-	if !strings.Contains(out, "Rina (0812-1111-1111): 2 visits") {
-		t.Errorf("top_customers=%q want 'Rina (phone): 2 visits'", out)
+	// Phones are canonicalized at the storage boundary (065), so the
+	// display carries the +62 form even though the fixture typed 0812-.
+	if !strings.Contains(out, "Rina (+6281211111111): 2 visits") {
+		t.Errorf("top_customers=%q want 'Rina (+62…): 2 visits'", out)
 	}
 	if strings.Contains(out, "Rina S.:") {
 		t.Errorf("top_customers=%q should not double-count name variants", out)

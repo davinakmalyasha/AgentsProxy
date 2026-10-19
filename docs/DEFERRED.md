@@ -37,8 +37,13 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   PARTIAL 2026-10: contract_gate_test locks the gated/exempt set — a new
   write path cannot slip in ungated without declaring itself. Full
   gating of the other 11 still open (needs per-feature verification).
-- **Phone normalization**: `0812` vs `62812` vs `+62` split customer identity.
-  Trigger: duplicate-customer complaint, or tenant #2.
+- **Phone normalization**: DONE 2026-10-19 (065). `private.normalize_phone`
+  canonicalizes to `+62…` for Indonesian shapes (foreign `+` numbers keep
+  their code); SECURITY DEFINER BEFORE triggers on `sports_customers.phone`
+  and `sports_bookings.customer_phone` cover every writer, and the existing
+  UNIQUE (tenant_id, phone) now catches mixed-format duplicates. Backfill
+  normalized existing rows with a collision guard. Pinned by
+  TestNormalizePhone (function corpus + trigger storage behavior).
 - **Cancel-note on HTTP**: currently optional; tool requires when paid.
   Trigger: owner asks for enforced money notes in the app flow.
 
