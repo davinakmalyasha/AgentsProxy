@@ -106,7 +106,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireIdentity(w, r)
+	idn := records.RequireOwner(w, r)
 	if idn == nil {
 		return
 	}
@@ -185,7 +185,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
-	idn := records.RequireIdentity(w, r)
+	idn := records.RequireOwner(w, r)
 	if idn == nil {
 		return
 	}

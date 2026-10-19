@@ -23,7 +23,7 @@ import (
 
 // recordsHarness wires a router with the records feature mounted
 // under a single vertical. The runtime pool connects as the
-// non-superuser `app` role so RLS applies — this is how production
+// non-superuser `app_runtime` role so RLS applies — this is how production
 // runs and the only way to catch cross-tenant leaks.
 type recordsHarness struct {
 	router http.Handler
@@ -52,9 +52,6 @@ func setupRecords(t *testing.T) *recordsHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := bootstrapAppRole(ctx, adminPool); err != nil {
-		t.Fatal(err)
-	}
 	if err := db.Migrate(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +60,7 @@ func setupRecords(t *testing.T) *recordsHarness {
 	}
 
 	// Runtime pool connects as `app` so RLS applies.
-	pool, err := db.NewPool(ctx, toAppDSN(dsn))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatalf("connect as app: %v", err)
 	}
@@ -94,34 +91,7 @@ func setupRecords(t *testing.T) *recordsHarness {
 	return &recordsHarness{router: wrapped, pool: pool, rdb: rdb, admin: adminPool}
 }
 
-func bootstrapAppRole(ctx context.Context, admin *pgxpool.Pool) error {
-	stmts := []string{
-		`DO $$ BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app') THEN
-				CREATE ROLE app LOGIN;
-			ELSE
-				ALTER ROLE app LOGIN;
-			END IF;
-		END $$`,
-		`GRANT USAGE ON SCHEMA public TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON clients TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
-		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
-	}
-	for _, s := range stmts {
-		if _, err := admin.Exec(ctx, s); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func toAppDSN(dsn string) string {
+func toRuntimeDSN(dsn string) string {
 	i := strings.Index(dsn, "://")
 	if i < 0 {
 		return dsn
@@ -131,7 +101,7 @@ func toAppDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
-	return dsn[:i+3] + "app" + rest[at:]
+	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
 func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status, vertical string, features []string) {

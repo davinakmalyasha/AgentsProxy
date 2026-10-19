@@ -53,7 +53,6 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	bootstrapAppRole(t, ctx, adminPool)
 	if err := db.Migrate(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 
-	pool, err := db.NewPool(ctx, toAppDSN(dsn))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatalf("connect as app: %v", err)
 	}
@@ -96,45 +95,7 @@ func setup(t *testing.T) *harness {
 	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
 }
 
-func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
-	t.Helper()
-	stmts := []string{
-		`DO $$ BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app') THEN
-				CREATE ROLE app LOGIN;
-			ELSE
-				ALTER ROLE app LOGIN;
-			END IF;
-		END $$`,
-		`GRANT USAGE ON SCHEMA public TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON clients TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
-		`GRANT SELECT ON tenant_schema_contracts TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_pricing_rules TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_expenses TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_recurring_series TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_products TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sales TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sale_items TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_stock_movements TO app`,
-		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
-	}
-	for _, s := range stmts {
-		if _, err := admin.Exec(ctx, s); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func toAppDSN(dsn string) string {
+func toRuntimeDSN(dsn string) string {
 	i := strings.Index(dsn, "://")
 	if i < 0 {
 		return dsn
@@ -144,7 +105,7 @@ func toAppDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
-	return dsn[:i+3] + "app" + rest[at:]
+	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
 func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
@@ -260,7 +221,7 @@ func TestPricing_PriceForDayAndEvening(t *testing.T) {
 	defer cancel()
 	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
 
-	pool, err := db.NewPool(ctx, toAppDSN(os.Getenv("DATABASE_URL")))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("DATABASE_URL")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +325,7 @@ func TestPricing_TombstoneDelete(t *testing.T) {
 	// Price resolution no longer sees the tombstoned rule: with no other
 	// rule covering the date, the booking-time lookup reports ErrNoRule
 	// instead of pricing from a deleted row.
-	pool, err := db.NewPool(ctx, toAppDSN(os.Getenv("DATABASE_URL")))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("DATABASE_URL")))
 	if err != nil {
 		t.Fatal(err)
 	}

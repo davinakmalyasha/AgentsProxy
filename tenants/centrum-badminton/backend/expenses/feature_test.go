@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
+	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
@@ -51,7 +52,6 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	bootstrapAppRole(t, ctx, adminPool)
 	if err := db.Migrate(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 
-	pool, err := db.NewPool(ctx, toAppDSN(dsn))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatalf("connect as app: %v", err)
 	}
@@ -87,49 +87,15 @@ func setup(t *testing.T) *harness {
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	features.ResetForTest()
 	Register()
-	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
+	fr := features.BuildVerticalRouter(features.BuilderDeps{
+		Pool:  pool,
+		Cache: cli,
+		Auth:  &authapi.Auth{Pool: adminPool},
+	}, "sports")
 	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
 }
 
-func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
-	t.Helper()
-	stmts := []string{
-		`DO $$ BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app') THEN
-				CREATE ROLE app LOGIN;
-			ELSE
-				ALTER ROLE app LOGIN;
-			END IF;
-		END $$`,
-		`GRANT USAGE ON SCHEMA public TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON clients TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
-		`GRANT SELECT ON tenant_schema_contracts TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_payments TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_pricing_rules TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_expenses TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_customers TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_court_blocks TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_recurring_series TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_products TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sales TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_sale_items TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_kantin_stock_movements TO app`,
-		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
-	}
-	for _, s := range stmts {
-		if _, err := admin.Exec(ctx, s); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func toAppDSN(dsn string) string {
+func toRuntimeDSN(dsn string) string {
 	i := strings.Index(dsn, "://")
 	if i < 0 {
 		return dsn
@@ -139,7 +105,7 @@ func toAppDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
-	return dsn[:i+3] + "app" + rest[at:]
+	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
 func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
@@ -338,5 +304,80 @@ func TestExpenses_Isolation(t *testing.T) {
 	items, _ := mL["items"].([]any)
 	if len(items) != 0 {
 		t.Errorf("B saw %d expenses, want 0", len(items))
+	}
+}
+
+// doReqAuth is doReq with an explicit identity header: "session" sets
+// X-Session-Token, "client" sets X-Client-Token.
+func doReqAuth(t *testing.T, h http.Handler, method, path, kind, token, body string) *http.Response {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	var req *http.Request
+	if body != "" {
+		req, _ = http.NewRequest(method, srv.URL+path, bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req, _ = http.NewRequest(method, srv.URL+path, nil)
+	}
+	switch kind {
+	case "session":
+		req.Header.Set("X-Session-Token", token)
+	case "client":
+		req.Header.Set("X-Client-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// TestExpenses_RoleMatrix pins the owner-only expense surface (deferred
+// RBAC tightening): list/getOne are owner now; create was already owner,
+// and client tokens keep the documented integration access.
+func TestExpenses_RoleMatrix(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	testutil.SeedStaffSession(t, ctx, h.adminPool, "ex-a", "owner@ex.test", "owner", "sess-ex-owner")
+	testutil.SeedStaffSession(t, ctx, h.adminPool, "ex-a", "staff@ex.test", "pegawai", "sess-ex-staff")
+
+	// Seed one expense as the client token (client passes the owner tier
+	// by design — the integration model).
+	seedResp := doReq(t, h.router, "POST", "/expenses", "tok-ex-a",
+		`{"category":"listrik","amount":15000,"note":"matrix"}`)
+	if seedResp.StatusCode != 201 {
+		t.Fatalf("seed expense status=%d body=%s", seedResp.StatusCode, readAll(t, seedResp))
+	}
+	expID, _ := readJSON(t, seedResp)["id"].(string)
+	if expID == "" {
+		t.Fatal("seed expense id missing")
+	}
+
+	cases := []struct {
+		name, method, path, kind, token, body string
+		want                                  int
+	}{
+		{"list owner", "GET", "/expenses", "session", "sess-ex-owner", "", 200},
+		{"list pegawai", "GET", "/expenses", "session", "sess-ex-staff", "", 403},
+		{"list client", "GET", "/expenses", "client", "tok-ex-a", "", 200},
+		{"get owner", "GET", "/expenses/" + expID, "session", "sess-ex-owner", "", 200},
+		{"get pegawai", "GET", "/expenses/" + expID, "session", "sess-ex-staff", "", 403},
+		{"get client", "GET", "/expenses/" + expID, "client", "tok-ex-a", "", 200},
+		{"patch owner", "PATCH", "/expenses/" + expID, "session", "sess-ex-owner", `{"amount":16000}`, 200},
+		{"patch pegawai", "PATCH", "/expenses/" + expID, "session", "sess-ex-staff", `{"amount":16000}`, 403},
+		{"create pegawai", "POST", "/expenses", "session", "sess-ex-staff",
+			`{"category":"lainnya","amount":1000}`, 403},
+		{"create owner", "POST", "/expenses", "session", "sess-ex-owner",
+			`{"category":"lainnya","amount":1000}`, 201},
+	}
+	for _, tc := range cases {
+		resp := doReqAuth(t, h.router, tc.method, tc.path, tc.kind, tc.token, tc.body)
+		if resp.StatusCode != tc.want {
+			t.Errorf("%s: status=%d want %d body=%s", tc.name, resp.StatusCode, tc.want, readAll(t, resp))
+			continue
+		}
+		resp.Body.Close()
 	}
 }

@@ -52,7 +52,6 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	bootstrapAppRole(t, ctx, adminPool)
 	if err := db.Migrate(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +68,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 
-	pool, err := db.NewPool(ctx, toAppDSN(dsn))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatalf("connect as app: %v", err)
 	}
@@ -89,36 +88,7 @@ func setup(t *testing.T) *harness {
 	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
 }
 
-func bootstrapAppRole(t *testing.T, ctx context.Context, admin *pgxpool.Pool) {
-	t.Helper()
-	stmts := []string{
-		`DO $$ BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='app') THEN
-				CREATE ROLE app LOGIN;
-			ELSE
-				ALTER ROLE app LOGIN;
-			END IF;
-		END $$`,
-		`GRANT USAGE ON SCHEMA public TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON clients TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_facilities TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_bookings TO app`,
-		`GRANT SELECT ON tenant_schema_contracts TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_inventory TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_members TO app`,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON sports_member_topups TO app`,
-		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app`,
-	}
-	for _, s := range stmts {
-		if _, err := admin.Exec(ctx, s); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func toAppDSN(dsn string) string {
+func toRuntimeDSN(dsn string) string {
 	i := strings.Index(dsn, "://")
 	if i < 0 {
 		return dsn
@@ -128,7 +98,7 @@ func toAppDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
-	return dsn[:i+3] + "app" + rest[at:]
+	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
 func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {

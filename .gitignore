@@ -50,3 +50,6 @@ laporan-*.xlsx
 
 # Vercel build output at repo root (buildCommand -o server)
 /server
+
+# Supabase CLI local state
+supabase/.temp/
