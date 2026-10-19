@@ -31,8 +31,8 @@ BEGIN
     RETURN 0;
   END IF;
 
-  SELECT value INTO v_url FROM vault.decrypted_secrets WHERE name = 'report_worker_url';
-  SELECT value INTO v_tok FROM vault.decrypted_secrets WHERE name = 'report_worker_token';
+  SELECT decrypted_secret INTO v_url FROM vault.decrypted_secrets WHERE name = 'report_worker_url';
+  SELECT decrypted_secret INTO v_tok FROM vault.decrypted_secrets WHERE name = 'report_worker_token';
   IF v_url IS NULL OR v_tok IS NULL OR v_url = '' OR v_tok = '' THEN
     RETURN 0;
   END IF;
