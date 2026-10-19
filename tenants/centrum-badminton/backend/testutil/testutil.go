@@ -15,9 +15,12 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 )
 
 // testLockID serialises test setup across the sports packages. Distinct
@@ -48,4 +51,26 @@ func LockAndRun(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) erro
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// SeedStaffSession creates a staff user and a live X-Session-Token
+// session for role-matrix tests. The session goes through
+// private.create_session (the same definer login uses) with
+// auth.HashToken, so the lookup takes the exact production path.
+func SeedStaffSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID, email, role, rawToken string) {
+	t.Helper()
+	var userID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, is_active)
+		 VALUES ($1, $2, 'x', $3, 'Matrix Test', true)
+		 ON CONFLICT (tenant_id, email)
+		 DO UPDATE SET role = EXCLUDED.role, is_active = true
+		 RETURNING id::text`, tenantID, email, role).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`SELECT private.create_session($1::uuid, $2, now() + interval '1 hour')`,
+		userID, auth.HashToken(rawToken)); err != nil {
+		t.Fatal(err)
+	}
 }

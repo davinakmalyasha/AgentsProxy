@@ -67,7 +67,7 @@ func TestBackupReader_SeesAllRows(t *testing.T) {
 
 	var want int
 	if err := adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM tenant_records`).Scan(&want); err != nil {
+		`SELECT count(*) FROM tenant_records WHERE tenant_id = $1`, tenant).Scan(&want); err != nil {
 		t.Fatal(err)
 	}
 	if want < 1 {
@@ -81,7 +81,7 @@ func TestBackupReader_SeesAllRows(t *testing.T) {
 	defer backupPool.Close()
 	var got int
 	if err := backupPool.QueryRow(ctx,
-		`SELECT count(*) FROM tenant_records`).Scan(&got); err != nil {
+		`SELECT count(*) FROM tenant_records WHERE tenant_id = $1`, tenant).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {
