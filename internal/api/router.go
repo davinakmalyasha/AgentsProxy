@@ -86,8 +86,22 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/history", agentH.ClearHistory)
 		})
 
+		// AdminPool for the admin surface below and the report-jobs
+		// worker (cross-tenant claim). Fallback when the caller doubles
+		// them (see Deps.AdminPool).
+		adminPool := d.AdminPool
+		if adminPool == nil {
+			adminPool = d.Pool
+		}
+
 		// WS2: chat-generated .xlsx downloads — token IS the auth (tenant-scoped, 30-min TTL)
 		reportsH := &Reports{Pool: d.Pool}
+		// Deferred report builds (migration 064): the agent tool returns
+		// a job link; pg_cron claims one job per tick via the internal
+		// endpoint. The token header keeps the build surface closed.
+		jobsH := &ReportJobs{Pool: d.Pool, AdminPool: adminPool, Token: d.Cfg.ReportWorkerToken}
+		r.Get("/reports/jobs/{id}", jobsH.Get)
+		r.Post("/internal/report-jobs/build", jobsH.Build)
 		r.Get("/reports/{token}", reportsH.Download)
 
 		// Staff login (Phase 7): email+password → session token.
@@ -127,12 +141,7 @@ func NewRouter(d Deps) http.Handler {
 		// SQLSTATE 42501, which admin.Create reported as a bare 500
 		// "internal" — leaving no supported way to provision a tenant at all.
 		// Use the admin pool, falling back to the app pool when the caller
-		// doubles them (see Deps.AdminPool).
-		adminPool := d.AdminPool
-		if adminPool == nil {
-			adminPool = d.Pool
-		}
-
+		// doubles them (adminPool computed above).
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
 			adm := &Admin{Pool: adminPool, Cache: d.Cache}

@@ -11,15 +11,18 @@ import (
 )
 
 type Config struct {
-	Port               string
-	Env                string
-	DatabaseURL        string
-	DatabaseAdminURL   string
-	RedisURL           string
-	LLMBaseURL         string
-	LLMAPIKey          string
-	LLMModel           string
-	AdminAPIKey        string
+	Port             string
+	Env              string
+	DatabaseURL      string
+	DatabaseAdminURL string
+	RedisURL         string
+	LLMBaseURL       string
+	LLMAPIKey        string
+	LLMModel         string
+	AdminAPIKey      string
+	// ReportWorkerToken authenticates the pg_cron report worker
+	// (migration 064). Empty disables the internal build endpoint.
+	ReportWorkerToken  string
 	MaxTokensPerReq    int
 	RateLimitPerMinute int
 	AllowOrigins       []string
@@ -106,6 +109,7 @@ func Load() (*Config, error) {
 		LLMAPIKey:               os.Getenv("LLM_API_KEY"),
 		LLMModel:                getenv("LLM_MODEL", "deepseek-chat"),
 		AdminAPIKey:             os.Getenv("ADMIN_API_KEY"),
+		ReportWorkerToken:       os.Getenv("REPORT_WORKER_TOKEN"),
 		MaxTokensPerReq:         getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
 		RateLimitPerMinute:      getenvInt("RATE_LIMIT_PER_MINUTE", 180),
 		AllowOrigins:            splitCSV(getenv("ALLOW_ORIGINS", "*")),
@@ -275,9 +279,9 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
-		redact(c.AdminAPIKey, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
+		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
 		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
 	)

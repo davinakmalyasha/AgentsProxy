@@ -40,8 +40,10 @@ const (
 
 // ReportsDir is where chat-generated .xlsx files live, tenant
 // subdirectories beneath it. Exported so the download sweeper cleans
-// the same directory the tools write: one path, two users.
-const ReportsDir = "data/reports"
+// the same directory the tools write: one path, two users. A var (not
+// const) so tests can point the local backend at a temp dir;
+// production never sets it.
+var ReportsDir = "data/reports"
 
 var (
 	hexTokenRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
