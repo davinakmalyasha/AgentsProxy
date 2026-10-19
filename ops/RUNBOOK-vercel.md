@@ -66,3 +66,36 @@ It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
 
 Neither is a correctness problem. Both are why `BACKGROUND_TICKERS=false` and
 Supabase-side delivery are required rather than optional.
+
+## Scheduled jobs & backups
+
+| Where | Job | Schedule (UTC) | What |
+|---|---|---|---|
+| Supabase pg_cron | `reminder-tick` | `*/2` | probe-gated Edge invocation (only when a reminder is due) |
+| Supabase pg_cron | `reaper-tick` | `*/5` | hands back orphaned claims (older than 10 min) |
+| Supabase pg_cron | `retention-tick` | `17 20` (03:17 WIB) | batched deletes: sessions 7d, sent reminders 90d, dead 30d, usage 400d, archived notify 14d, events 180d, report backstop |
+| GitHub Actions | `backup.yml` | `0 18` (01:00 WIB) | pg_dump of `public`+`private` → artifact (30d) → restore-smoke into postgres:17 |
+| GitHub Actions | `smoke.yml` | `*/30` | backend `/healthz` + frontend probe (3 attempts each) |
+| GitHub Actions | `security.yml` | Mondays 06:17 | govulncheck + gitleaks |
+
+- pg_cron evaluates schedules in the **database** timezone (UTC on
+  Supabase). The first retention install said "03:17 local" and actually
+  fired at 03:17 UTC; corrected 2026-10-19.
+- GitHub scheduled runs can queue late (tens of minutes); that is normal
+  and does not affect correctness.
+- Backup credential: migration 062 creates `backup_reader`
+  (`LOGIN BYPASSRLS` + `pg_read_all_data`). BYPASSRLS is load-bearing:
+  every tenant table is FORCE RLS, and a NOBYPASSRLS reader would dump
+  **empty tables**. The password lives only in the GitHub secret
+  `BACKUP_DATABASE_URL` (pooler session mode, `sslmode=require`). Rotate
+  like any privileged credential.
+- Dump scope is `public`+`private` only. Platform schemas
+  (auth/storage/vault) are Supabase-managed and covered by the platform's
+  daily WAL-G backups; including them breaks portable restores and drags
+  platform PII (auth password hashes) into the artifact. Platform PITR is
+  off (`pitr_enabled=false`); the nightly dump is the independent,
+  off-platform copy.
+- Verify: `gh run list --workflow backup.yml --limit 3`, then download
+  `db-backup` and restore into a scratch database
+  (`gunzip -c *.sql.gz | psql <scratch>`); the smoke job does exactly
+  this on every run, including a schema_migrations count and row probes.

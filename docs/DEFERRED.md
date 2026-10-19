@@ -28,7 +28,9 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   DONE 2026-10 (perf pass): set-based sale/void (unnest), window-function
   stock_after, single-query availability, paginated customer visits,
   RuleAndPriceFor single lookup, batched reminder writes. The availability
-  in-process map is still unbounded per instance (see below).
+  in-process map is bounded since the same pass (`maxAvailCacheEntries`
+  + 3 s TTL, tenants/centrum-badminton/backend/availability/feature.go);
+  the old "unbounded" note here was stale (corrected 2026-10-19).
 - **Contracts on 2/14 features**: bookings + pricing gated; gate the rest or
   document exemptions.
   Trigger: first v2 schema change on an ungated feature.
@@ -87,7 +89,10 @@ a backward-compat note (frozen UI strings in `actions.ts` / `kantin/actions.ts`
   (was a seq scan per agent turn, now index-only), tenant_records list
   indexes, money WIB-day partials, and 12 write-amplifying duplicates
   dropped. Re-verify with EXPLAIN after real traffic (blocks in §11).
-- **Availability cache decision**: in-process map (unbounded, per-instance).
+- **Availability cache decision**: RESOLVED 2026-10-19 — the in-process
+  map is bounded (`maxAvailCacheEntries`, 3 s TTL, availability/feature.go);
+  the stale "unbounded" note was wrong. The trigger below still stands for
+  the per-instance nature.
   Trigger: multi-instance divergence or memory growth.
 - **Quota-Redis role**: currently hint-or-deny hybrid; revisit if Redis load grows.
   Trigger: Redis cost/latency.

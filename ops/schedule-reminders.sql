@@ -20,7 +20,9 @@
 -- Behavior before secrets land (DELIVERY_DATABASE_URL / VAPID_* unset on
 -- the function): ticks that find due rows POST into a 500 (missing DSN,
 -- claimed nothing — the DSN check precedes the claim). Safe noise until
--- the env sweep; after secrets, first tick delivers.
+-- the env sweep; after secrets, first tick delivers. Secrets are live on
+-- prod since 2026-10-18 (see ops/RUNBOOK-delivery.md); this paragraph
+-- records the pre-secret transient only.
 --
 -- Removal (rollback / repair): SELECT cron.unschedule('reminder-tick');
 -- Rows stay pending by construction — unscheduling loses nothing.

@@ -260,7 +260,7 @@ concurrent boots cannot race.
 | Sports identity | `021`, `022` | `sports_users`, `sports_sessions` |
 | Gap-filling | `013b`, `023`, `028`, `034`, `035`, `037`–`039`, `044` | booking lifecycle, WIB day-expression indexes, venue hours, price recalc trigger, court-block guard, series↔booking link, kantin soft-void, kantin tenant indexes |
 | Agent (Telegram removed by `042`) | `011`–`013`, `024`–`026`, `042` | `agent_bindings`, `agent_reminders`, `agent_staff_payments` (`telegram_bots` created by `025`–`026`, dropped by `042`) |
-| Delivery | `029`–`031`, `036` | `notify_jobs`, reminder claim protocol, `delivery_worker` / `delivery_caller` least-privilege roles |
+| Delivery | `029`–`031`, `036`, `057`–`062` | `notify_jobs`, reminder claim protocol, `delivery_worker` / `delivery_caller` least-privilege roles, PWA push registry + RPC-only Edge access (057–060), `backup_reader` (062) |
 | Sessions / RLS / misc | `027` (retired stub), `032`, `033`, `040`, `041`, `043` | session tenant scoping, `clients`/`usage` policies, `sports_users.phone`, ADK sessions (`041`), report objects (`043`) |
 
 > **Two known sharp edges.** `027` is a deliberately retired no-op stub, kept in place so the
@@ -581,7 +581,7 @@ and on serverless the only always-on thing is the database. Hence `pg_cron`.
 
 | | Long-running host | Serverless |
 |---|---|---|
-| Trigger | Go ticker, 60s | `pg_cron` → reminder Edge Function (**PENDING-REPAIR**: `deliver-reminders` is deleted, `reminder-tick` currently has no target) |
+| Trigger | Go ticker, 60s | `pg_cron` → `deliver-reminders` Edge Function (probe-gated, every 2 min) |
 | Notify drain | Go ticker, 5s | DB Webhook on INSERT (instant) + cron backstop |
 | Stale-claim reaper | Go boot path | `pg_cron` → `reap_stale_claims` (pure SQL, no HTTP) |
 
@@ -601,6 +601,13 @@ Drivers only ever read `status = 'pending'`, so a claimed row is invisible to th
 mark a row the reaper already handed back. `private.reap_stale_claims()` returns claims older than
 10 minutes to `pending`; that window is many times the per-row send budget, so a slow-but-alive
 driver is never robbed mid-send.
+
+The Edge driver uses the RPC equivalent (`private.claim_due_reminders`, 059), which also returns
+`recipient_ref` (routing needs no follow-up table read) and stamps
+`date_trunc('milliseconds', clock_timestamp())` (060). The millisecond precision is deliberate:
+postgres.js truncates ISO timestamps to milliseconds when binding, so a microsecond `claimed_at`
+would never match the follow-up complete/fail/release writes — FCM would accept every send while
+rows silently stuck or re-delivered after the reaper.
 
 **Why not hold `FOR UPDATE` across the send?** The send is an HTTP call to the delivery target. Holding a
 row lock for its duration means a long-running transaction on the shared pool. The status flip
@@ -624,7 +631,7 @@ The Supabase driver gets a **strictly narrower** path:
 | Role | Attributes | Reach |
 |---|---|---|
 | `delivery_worker` | `NOLOGIN BYPASSRLS` | owns the claim functions, so they execute with its rights |
-| `delivery_caller` | `LOGIN NOBYPASSRLS` | `EXECUTE` on the claim functions **and nothing else** — no `USAGE` on `public`, no table grants |
+| `delivery_caller` | `LOGIN NOBYPASSRLS` | `EXECUTE` on the driver RPCs (claim/complete/fail/release + the push-subscription helpers) **and nothing else** — no `USAGE` on `public`, no table grants |
 
 The ownership reassignment in migration 031 is load-bearing: without it the functions stay owned
 by the migration runner and `SECURITY DEFINER` executes as superuser, bypassing every policy with
