@@ -173,6 +173,31 @@ func TestReportJobs_BuildAndDownload(t *testing.T) {
 	if pResp.StatusCode != 409 {
 		t.Fatalf("pending job status=%d want 409", pResp.StatusCode)
 	}
+
+	// Repeat clicks re-mint the SAME object (066): one manifest row,
+	// rotated hash. On the pre-066 code the second mint hit the
+	// unique(object_key) constraint and the failure path deleted the
+	// shared object — breaking the first link too.
+	againResp, err := noFollow.Get(srv.URL + "/v1/reports/jobs/" + jobID + ".xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer againResp.Body.Close()
+	if againResp.StatusCode != 302 {
+		t.Fatalf("second click status=%d want 302", againResp.StatusCode)
+	}
+	loc2 := againResp.Header.Get("Location")
+	if loc2 == "" || loc2 == loc {
+		t.Fatalf("second click location=%q, want a fresh token", loc2)
+	}
+	file2, err := http.Get(srv.URL + loc2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file2.Body.Close()
+	if file2.StatusCode != 200 {
+		t.Fatalf("second download status=%d want 200", file2.StatusCode)
+	}
 }
 
 // toReportRuntimeDSN rewrites a DSN to app_runtime (the runtime role).

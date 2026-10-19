@@ -605,7 +605,12 @@ func MintReportToken(ctx context.Context, pool *pgxpool.Pool, tenant, objectKey 
 		`SELECT private.mint_report($1,$2,$3,$4,$5)`,
 		reportTokenHash(token), SafeTenant(tenant), objectKey, size, int(reportTTL.Seconds())).Scan(&minted); err != nil {
 		_ = ReportRDB.Del(rctx, reportTokenPrefix+token).Err()
-		_ = ReportStorage.Delete(ctx, SafeTenant(tenant), objectKey)
+		// Do NOT delete the object here. Mint is also called on repeat
+		// downloads (deferred job links) and a transient DB failure must
+		// not destroy a file other valid links still reference. An
+		// object whose very first mint failed may be left behind; the
+		// 30-minute re-mint path (066 upsert) and the storage backstop
+		// make that far cheaper than a broken download.
 		return "", err
 	}
 	return token, nil
