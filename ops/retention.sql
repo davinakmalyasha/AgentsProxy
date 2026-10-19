@@ -19,9 +19,9 @@
 -- Local dev (Laragon) does not need this: the Go janitor owns the 3
 -- small tables there. Keep the Go janitor as the local fallback.
 --
--- Installed on prod 2026-10-17: job retention-tick active (17 3 * * *);
--- manual tick proof ran all 7 targets (0 deleted on the still-empty
--- dataset). First-run fix lives in §2 (unschedule by jobid lookup).
+-- Installed on prod 2026-10-18 (first scheduled run 2026-10-19
+-- 03:17 UTC, succeeded, full 7-row report). First-run fix lives in §2
+-- (unschedule by jobid lookup).
 
 -- ---------------------------------------------------------------------------
 -- 1. The tick. Batched deletes: an unbounded DELETE on a large table
@@ -101,11 +101,16 @@ REVOKE ALL ON FUNCTION private.retention_tick() FROM PUBLIC;
 -- 2. Schedule. Remove first so re-running is idempotent. Unschedule-by-
 --    lookup, not cron.unschedule('name'): the name form RAISES on a
 --    missing job (XX000 "could not find valid entry"), which would make
---    the first run fail; the jobid form over zero rows is a no-op. 03:17
---    local — off-peak, and off the :00/:05 marks every other job uses.
+--    the first run fail; the jobid form over zero rows is a no-op.
+--
+--    pg_cron evaluates the schedule in the DATABASE timezone — UTC on
+--    Supabase, NOT the project's local WIB. The first install used
+--    '17 3 * * *' believing it meant 03:17 local; it fired at 03:17 UTC
+--    (10:17 WIB, mid-morning). 20:17 UTC = 03:17 WIB, off-peak, and off
+--    the :00/:05 marks every other job uses.
 -- ---------------------------------------------------------------------------
 SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'retention-tick';
-SELECT cron.schedule('retention-tick', '17 3 * * *', $$SELECT private.retention_tick()$$);
+SELECT cron.schedule('retention-tick', '17 20 * * *', $$SELECT private.retention_tick()$$);
 
 -- ---------------------------------------------------------------------------
 -- 3. Show what got installed.
