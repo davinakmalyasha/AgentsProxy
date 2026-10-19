@@ -38,6 +38,7 @@ Set in the dashboard, never in git.
 | `REDIS_URL` | `rediss://…` **in ap-southeast-1 (Singapore)** | Cache, quota, rate limits — every request pays 1–3 sequential Redis round trips, so a cross-region Upstash adds 100–500ms per request. Same-region (`sin1` ↔ ap-southeast-1) keeps them at ~1–2ms. |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | as `.env` | |
 | `ADMIN_API_KEY` | 64 hex chars | |
+| `REPORT_WORKER_TOKEN` | 64 hex chars | Enables the deferred report worker endpoint (`POST /v1/internal/report-jobs/build`, migration 064). Must match the Supabase Vault secret `report_worker_token` used by the `report-jobs-tick` cron. Empty disables the endpoint (503). |
 | `SENTRY_DSN` | optional | Empty disables Sentry entirely |
 
 ## Deploy
@@ -74,6 +75,7 @@ Supabase-side delivery are required rather than optional.
 | Supabase pg_cron | `reminder-tick` | `*/2` | probe-gated Edge invocation (only when a reminder is due) |
 | Supabase pg_cron | `reaper-tick` | `*/5` | hands back orphaned claims (older than 10 min) |
 | Supabase pg_cron | `retention-tick` | `17 20` (03:17 WIB) | batched deletes: sessions 7d, sent reminders 90d, dead 30d, usage 400d, archived notify 14d, events 180d, report backstop |
+| Supabase pg_cron | `report-jobs-tick` | `* * * * *` | deferred report builds (064): reaps stale `working` jobs, then posts ONE build to the backend worker. No-op until the Vault secrets `report_worker_url` + `report_worker_token` exist (see `ops/schedule-report-jobs.sql`). |
 | GitHub Actions | `backup.yml` | `0 18` (01:00 WIB) | pg_dump of `public`+`private` → artifact (30d) → restore-smoke into postgres:17 |
 | GitHub Actions | `smoke.yml` | `*/30` | backend `/healthz` + frontend probe (3 attempts each) |
 | GitHub Actions | `security.yml` | Mondays 06:17 | govulncheck + gitleaks |

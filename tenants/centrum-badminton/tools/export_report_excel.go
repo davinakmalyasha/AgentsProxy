@@ -48,6 +48,19 @@ func exportReportExcelTool(pool *pgxpool.Pool) agentstools.Tool {
 			if err0 != nil || err1 != nil || !d1.After(d0) || d1.Sub(d0).Hours()/24 > agentstools.MaxReportDays {
 				return "error: invalid range (need from < to, max 1 year)"
 			}
+			// Large ranges outlive the agent-turn budget (the builder
+			// raises statement_timeout to 120s; TurnTimeout is ~80s), so
+			// they are built by the deferred worker instead. The job link
+			// answers 409 until the file exists, then redirects.
+			if agentstools.ShouldDeferReport(d0, d1) {
+				days := int(d1.Sub(d0).Hours() / 24)
+				job, err := agentstools.EnqueueReportJob(ctx, pool, tenantID, from, to, typ)
+				if err != nil {
+					return "error: " + err.Error()
+				}
+				return fmt.Sprintf("%s/v1/reports/jobs/%s.xlsx\nLaporan %s-%s (%d hari) sedang disiapkan. Tautan aktif dalam ~1 menit; klik lagi bila belum siap.",
+					agentstools.XLSXMarkerPrefix, job.ID, from, to, days)
+			}
 			data, err := agentstools.FetchReportData(ctx, pool, tenantID, from, to)
 			if err != nil {
 				return "error: " + err.Error()
