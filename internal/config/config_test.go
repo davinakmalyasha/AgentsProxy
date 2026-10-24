@@ -60,6 +60,7 @@ func TestString_RedactsSecrets(t *testing.T) {
 	t.Setenv("LLM_API_KEY", "sk-test")
 	t.Setenv("ADMIN_API_KEY", "supersecret12345")
 	t.Setenv("SENTRY_DSN", "https://abc123@sentry.io/456")
+	t.Setenv("REDIS_URL", "rediss://default:redispass@redis-host.upstash.io:6379")
 	c, _ := Load()
 	s := c.String()
 	if strings.Contains(s, "supersecret12345") {
@@ -70,6 +71,12 @@ func TestString_RedactsSecrets(t *testing.T) {
 	}
 	if strings.Contains(s, "abc123") {
 		t.Errorf("sentry DSN leaked: %s", s)
+	}
+	if strings.Contains(s, "redispass") {
+		t.Errorf("redis password leaked: %s", s)
+	}
+	if !strings.Contains(s, "redis-host.upstash.io:6379") {
+		t.Errorf("redis host should stay visible: %s", s)
 	}
 }
 
