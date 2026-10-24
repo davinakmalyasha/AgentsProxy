@@ -280,7 +280,7 @@ func splitCSV(s string) []string {
 func (c *Config) String() string {
 	return fmt.Sprintf(
 		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
-		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), c.RedisURL, c.LLMBaseURL, c.LLMModel,
+		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), redactDSN(c.RedisURL), c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
 		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
