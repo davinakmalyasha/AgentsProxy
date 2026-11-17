@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/agency/response"
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/pdf"
+	"github.com/davinakmalyasha/agents-proxy/internal/agency/response"
 )
 
 // Store fetches document data.
