@@ -23,6 +23,42 @@ func TestPasswordPolicy(t *testing.T) {
 	}
 }
 
+func TestOTPHash(t *testing.T) {
+	a, b := HashOTPCode("123456"), HashOTPCode("123456")
+	if a != b || len(a) != 64 {
+		t.Fatalf("hash not deterministic hex64: %q", a)
+	}
+	if HashOTPCode("123456") == HashOTPCode("654321") {
+		t.Fatal("different codes must hash differently")
+	}
+}
+
+func TestGenerateOTPCode(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		c, err := generateOTPCode()
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if len(c) != 6 {
+			t.Fatalf("want 6 digits, got %q", c)
+		}
+		for _, r := range c {
+			if r < '0' || r > '9' {
+				t.Fatalf("non-digit in %q", c)
+			}
+		}
+	}
+}
+
+func TestMaskEmail(t *testing.T) {
+	if got := maskEmail("admin@dfdagency.com"); got != "ad***@dfdagency.com" {
+		t.Fatalf("got %q", got)
+	}
+	if got := maskEmail("a@x.id"); got != "***" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestSecureCompare(t *testing.T) {
 	hash, err := platformauth.HashPassword("demo1234")
 	if err != nil {

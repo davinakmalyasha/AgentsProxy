@@ -18,12 +18,26 @@ import (
 type Service struct {
 	logger         *slog.Logger
 	agencyWhatsapp string
+	resendKey      string
+	resendFrom     string
+	client         *http.Client
 }
 
 // New builds a notification service.
 func New(logger *slog.Logger, agencyWhatsapp string) *Service {
-	return &Service{logger: logger, agencyWhatsapp: agencyWhatsapp}
+	return &Service{logger: logger, agencyWhatsapp: agencyWhatsapp, client: &http.Client{Timeout: 15 * time.Second}}
 }
+
+// WithResend enables real email delivery via Resend. Without it SendEmail
+// stays log-only (dev); callers needing delivery must fail closed.
+func (s *Service) WithResend(apiKey, from string) *Service {
+	s.resendKey = apiKey
+	s.resendFrom = from
+	return s
+}
+
+// ResendConfigured reports whether real email delivery is available.
+func (s *Service) ResendConfigured() bool { return s.resendKey != "" && s.resendFrom != "" }
 
 // SendWhatsApp accepts a WhatsApp message for delivery.
 func (s *Service) SendWhatsApp(ctx context.Context, to, message string) error {
@@ -38,9 +52,28 @@ func (s *Service) SendWhatsApp(ctx context.Context, to, message string) error {
 	return nil
 }
 
-// SendEmail accepts an email for delivery.
+// SendEmail delivers via Resend, or logs when unconfigured (dev).
 func (s *Service) SendEmail(ctx context.Context, to, subject, html string) error {
-	s.logger.InfoContext(ctx, "email outbox", "to", to, "subject", subject)
+	if !s.ResendConfigured() {
+		s.logger.InfoContext(ctx, "email outbox (unconfigured)", "to", to, "subject", subject)
+		return nil
+	}
+	body, _ := json.Marshal(map[string]any{"from": s.resendFrom, "to": []string{to}, "subject": subject, "html": html})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.resendKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("resend: status %d: %s", resp.StatusCode, string(b))
+	}
 	return nil
 }
 

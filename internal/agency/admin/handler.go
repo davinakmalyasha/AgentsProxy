@@ -43,7 +43,6 @@ func (h *Handler) RegisterRoutes(r chi.Router, guard func(http.Handler) http.Han
 	r.With(guard).Method("POST", "/users", http.HandlerFunc(h.createUser))
 	r.With(guard).Method("PUT", "/users/{id}", http.HandlerFunc(h.updateUser))
 	r.With(guard).Method("DELETE", "/users/{id}", http.HandlerFunc(h.deleteUser))
-	r.With(guard).Method("POST", "/users/{id}/resend-invite", http.HandlerFunc(h.resendInvite))
 	r.With(guard).Method("POST", "/users/{id}/revoke", http.HandlerFunc(h.revokeSessions))
 
 	// Leads
@@ -143,12 +142,11 @@ func (h *Handler) getUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username   string `json:"username"`
-		Email      string `json:"email"`
-		Password   string `json:"password"`
-		Role       string `json:"role"`
-		LeadID     *int64 `json:"leadId"`
-		SendInvite *bool  `json:"sendInvite"`
+		Username string `json:"username"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+		LeadID   *int64 `json:"leadId"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -169,8 +167,8 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		response.ValidationError(w, "Invalid role", map[string]string{"role": "unknown role"})
 		return
 	}
-	if role != "CLIENT" && len(body.Password) < 8 {
-		response.ValidationError(w, "Invalid user", map[string]string{"password": "min 8 chars"})
+	if !platformauth.ValidPassword(body.Password) {
+		response.ValidationError(w, "Invalid user", map[string]string{"password": "min 8 chars with letters and numbers"})
 		return
 	}
 	user, err := h.store.CreateUser(r.Context(), body.Username, body.Email, body.Password, role, body.LeadID)
@@ -182,19 +180,8 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, h.logger, err)
 		return
 	}
-	// CLIENT accounts (or explicit sendInvite) get a passwordless invite.
-	inviteURL := ""
-	sendInvite := body.SendInvite == nil || *body.SendInvite
-	if (sendInvite && role == "CLIENT") || (body.SendInvite != nil && *body.SendInvite) {
-		_, url, _, err := h.store.IssueInvite(r.Context(), user.ID, h.frontendURL)
-		if err != nil {
-			h.logger.ErrorContext(r.Context(), "issue invite failed", "error", err)
-		} else {
-			inviteURL = url
-		}
-	}
 	h.audit(r, "CREATE_USER", "User ID: "+itoa64(user.ID), nil)
-	response.Created(w, map[string]any{"user": user, "inviteUrl": inviteURL}, "User created")
+	response.Created(w, map[string]any{"user": user}, "User created")
 }
 
 func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
@@ -253,20 +240,6 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit(r, "DELETE_USER", "User ID: "+itoa64(id), nil)
 	response.OK(w, nil, "User deleted")
-}
-
-func (h *Handler) resendInvite(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt(w, r)
-	if !ok {
-		return
-	}
-	_, url, expiry, err := h.store.IssueInvite(r.Context(), id, h.frontendURL)
-	if err != nil {
-		writeErr(w, h.logger, err)
-		return
-	}
-	h.audit(r, "RESEND_INVITE", "User "+itoa64(id), map[string]any{"inviteUrl": url})
-	response.OK(w, map[string]any{"inviteUrl": url, "expiry": expiry}, "Invite sent")
 }
 
 func (h *Handler) revokeSessions(w http.ResponseWriter, r *http.Request) {
