@@ -62,13 +62,14 @@ type Handler struct {
 	jwtSecret      string
 	jwtTTL         time.Duration
 	secure         bool
+	env            string
 	googleClientID string
 	notifier       Notifier
 }
 
 // NewHandler builds an auth handler.
-func NewHandler(store *Store, pool *pgxpool.Pool, logger *slog.Logger, jwtSecret string, jwtTTL time.Duration, secure bool, googleClientID string, notifier Notifier) *Handler {
-	return &Handler{store: store, pool: pool, logger: logger, jwtSecret: jwtSecret, jwtTTL: jwtTTL, secure: secure, googleClientID: googleClientID, notifier: notifier}
+func NewHandler(store *Store, pool *pgxpool.Pool, logger *slog.Logger, jwtSecret string, jwtTTL time.Duration, secure bool, env, googleClientID string, notifier Notifier) *Handler {
+	return &Handler{store: store, pool: pool, logger: logger, jwtSecret: jwtSecret, jwtTTL: jwtTTL, secure: secure, env: env, googleClientID: googleClientID, notifier: notifier}
 }
 
 // RegisterRoutes mounts auth chi routes (mounted under /api/v1/auth).
@@ -127,9 +128,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 // startOTP issues the second-step email code for superadmins.
 func (h *Handler) startOTP(w http.ResponseWriter, r *http.Request, user User) {
-	if h.notifier == nil || !h.notifier.ResendConfigured() {
+	unconfigured := h.notifier == nil || !h.notifier.ResendConfigured()
+	if unconfigured && strings.EqualFold(h.env, "production") {
 		// Fail closed in production: password alone must never suffice.
-		// Dev (log-only notifier) still works so the flow stays testable.
 		if h.logger != nil {
 			h.logger.WarnContext(r.Context(), "otp email unavailable", "user", user.ID)
 		}

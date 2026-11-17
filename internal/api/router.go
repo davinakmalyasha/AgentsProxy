@@ -172,6 +172,7 @@ func NewRouter(d Deps) http.Handler {
 	agencyDeps := agency.Deps{
 		Pool:               adminPool,
 		Logger:             nil, // agency falls back to slog.Default (JSON, redacting)
+		Env:                d.Cfg.Env,
 		JWTSecret:          d.Cfg.AgencyJWTSecret,
 		JWTTTL:             d.Cfg.AgencyJWTTTL,
 		SecureCookie:       false,

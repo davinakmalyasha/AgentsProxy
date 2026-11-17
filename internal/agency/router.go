@@ -39,6 +39,7 @@ type Notifier = notify.Service
 type Deps struct {
 	Pool         *pgxpool.Pool
 	Logger       *slog.Logger
+	Env          string
 	JWTSecret    string
 	JWTTTL       time.Duration
 	SecureCookie bool
@@ -80,7 +81,7 @@ func NewRouter(d Deps) chi.Router {
 	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(3, time.Hour))
 
 	// Human auth.
-	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.GoogleClientID, notifier)
+	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.Env, d.GoogleClientID, notifier)
 	r.Route("/auth", func(r chi.Router) {
 		authH.RegisterRoutes(r, ratelimit.NewRateLimiter(5, 15*time.Minute))
 	})
