@@ -5,14 +5,14 @@
 # tenantembed.go), so it is re-included after the blanket *.md rule.
 bin/
 data/
-docs/
-shots/
-appendonlydir/
-.playwright-mcp/
-.commandcode/
-supabase/
-ops/
-scripts/
+/docs/
+/shots/
+/appendonlydir/
+/.playwright-mcp/
+/.commandcode/
+/supabase/
+/ops/
+/scripts/
 *.md
 !tenants/**/*.md
 *.png
