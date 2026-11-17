@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -96,6 +97,14 @@ type Config struct {
 	// lock; run migrations as a deploy step instead (make migrate /
 	// Docker entrypoint / CI).
 	RunMigrations bool
+	// Agency plane (DFD ops: catalog, intake, portal, admin, agent API).
+	// JWT_SECRET enables /api/v1/* + /api/agent/* + /mcp; empty disables
+	// the plane (those routes answer 503) so existing proxy-only deploys
+	// keep booting unchanged.
+	AgencyJWTSecret string
+	AgencyJWTTTL    time.Duration
+	AgencyFrontend  string
+	AgencyWhatsapp  string
 }
 
 func Load() (*Config, error) {
@@ -136,6 +145,10 @@ func Load() (*Config, error) {
 		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),
 		ReportBucket:            getenv("REPORT_BUCKET", "reports"),
 		ReportMaxBytes:          getenvPositiveInt("REPORT_MAX_BYTES", 15000000),
+		AgencyJWTSecret:         os.Getenv("JWT_SECRET"),
+		AgencyJWTTTL:            time.Duration(getenvPositiveInt("JWT_TTL_HOURS", 720)) * time.Hour,
+		AgencyFrontend:          getenv("FRONTEND_URL", "http://localhost:3000"),
+		AgencyWhatsapp:          os.Getenv("AGENCY_WHATSAPP"),
 		VAPIDPublicKey:          os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey:         os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject:            getenv("VAPID_SUBJECT", "mailto:admin@localhost"),
@@ -279,11 +292,12 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t agency=%t frontend=%s}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), redactDSN(c.RedisURL), c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
 		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
+		c.AgencyJWTSecret != "", c.AgencyFrontend,
 	)
 }
 
