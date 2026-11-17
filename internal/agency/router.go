@@ -39,12 +39,20 @@ type Notifier = notify.Service
 type Deps struct {
 	Pool         *pgxpool.Pool
 	Logger       *slog.Logger
+	Env          string
 	JWTSecret    string
 	JWTTTL       time.Duration
 	SecureCookie bool
 	FrontendURL  string
 
 	AgencyWhatsapp string
+
+	// GoogleClientID enables POST /auth/google; empty disables it (503).
+	GoogleClientID string
+	// ResendKey/ResendFrom enable the superadmin OTP email. Empty keeps
+	// SendEmail log-only (dev); the OTP step fails closed in production.
+	ResendKey  string
+	ResendFrom string
 
 	SupabaseURL        string
 	SupabaseServiceKey string
@@ -62,7 +70,7 @@ func (d Deps) logger() *slog.Logger {
 func NewRouter(d Deps) chi.Router {
 	r := chi.NewRouter()
 	logger := d.logger()
-	notifier := notify.New(logger, d.AgencyWhatsapp)
+	notifier := notify.New(logger, d.AgencyWhatsapp).WithResend(d.ResendKey, d.ResendFrom)
 	docsStore := docs.NewStore(d.Pool)
 
 	// Public catalog reads.
@@ -73,12 +81,9 @@ func NewRouter(d Deps) chi.Router {
 	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(3, time.Hour))
 
 	// Human auth.
-	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie)
+	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.Env, d.GoogleClientID, notifier)
 	r.Route("/auth", func(r chi.Router) {
-		authH.RegisterRoutes(r,
-			ratelimit.NewRateLimiter(5, 15*time.Minute),
-			ratelimit.NewRateLimiter(10, 15*time.Minute),
-		)
+		authH.RegisterRoutes(r, ratelimit.NewRateLimiter(5, 15*time.Minute))
 	})
 
 	cookieAuth := agencyauth.CookieAuth(d.JWTSecret, d.Pool, d.JWTTTL)
@@ -122,7 +127,7 @@ func NewRouter(d Deps) chi.Router {
 func NewAgentRouter(d Deps) chi.Router {
 	r := chi.NewRouter()
 	logger := d.logger()
-	notifier := notify.New(logger, d.AgencyWhatsapp)
+	notifier := notify.New(logger, d.AgencyWhatsapp).WithResend(d.ResendKey, d.ResendFrom)
 	r.Use(agencyauth.APIKeyAuth(d.Pool, "agent"))
 	agent.NewHandler(agent.NewStore(d.Pool), d.Pool, logger, notifier).RegisterRoutes(r)
 	return r
@@ -132,7 +137,7 @@ func NewAgentRouter(d Deps) chi.Router {
 // the caller, scope agent).
 func NewMCPHandler(d Deps) http.Handler {
 	logger := d.logger()
-	notifier := notify.New(logger, d.AgencyWhatsapp)
+	notifier := notify.New(logger, d.AgencyWhatsapp).WithResend(d.ResendKey, d.ResendFrom)
 	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return mcpserver.Build(mcpserver.Deps{
 			Store:    agent.NewStore(d.Pool),

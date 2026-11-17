@@ -34,6 +34,8 @@ func TestRouter_ChiRoutesRegistered(t *testing.T) {
 		"POST /orders",
 		"GET /orders/track/{orderId}",
 		"POST /auth/login",
+		"POST /auth/login/verify",
+		"POST /auth/google",
 		"GET /auth/me",
 		"POST /auth/change-password",
 		"GET /users",
@@ -90,6 +92,12 @@ func TestRouter_GuardsBeforeStores(t *testing.T) {
 
 	if code := serve("POST", "/leads", "", nil); code != http.StatusBadRequest {
 		t.Errorf("POST /leads empty body = %d, want 400 (no DB hit)", code)
+	}
+	if code := serve("POST", "/auth/login/verify", `{}`, nil); code != http.StatusBadRequest {
+		t.Errorf("POST /auth/login/verify empty = %d, want 400", code)
+	}
+	if code := serve("POST", "/auth/google", `{"idToken":"x"}`, nil); code != http.StatusServiceUnavailable {
+		t.Errorf("POST /auth/google unconfigured = %d, want 503 (no DB hit)", code)
 	}
 	if code := serve("GET", "/auth/me", "", nil); code != http.StatusUnauthorized {
 		t.Errorf("GET /auth/me no cookie = %d, want 401", code)

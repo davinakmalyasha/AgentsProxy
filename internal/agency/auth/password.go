@@ -20,6 +20,24 @@ func HashPassword(plaintext string) (string, error) {
 	return string(hash), nil
 }
 
+// ValidPassword reports whether the new password meets the policy: min 8
+// chars with at least one letter and one digit.
+func ValidPassword(password string) bool {
+	if len(password) < 8 {
+		return false
+	}
+	var hasLetter, hasDigit bool
+	for _, r := range password {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	return hasLetter && hasDigit
+}
+
 // CheckPassword reports whether the plaintext matches the stored bcrypt hash.
 func CheckPassword(hash, plaintext string) bool {
 	if hash == "" || plaintext == "" {

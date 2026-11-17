@@ -2,8 +2,6 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"strings"
 	"time"
 
@@ -64,27 +62,16 @@ func (s *Store) ListUsers(ctx context.Context, role, search string, limit, offse
 	return out, total, rows.Err()
 }
 
-// CreateUser inserts a user. CLIENT accounts get no password until invite.
+// CreateUser inserts a user with a real password credential.
 func (s *Store) CreateUser(ctx context.Context, username, email, password, role string, leadID *int64) (*ManagedUser, error) {
-	hash := ""
-	if password != "" {
-		h, err := platformauth.HashPassword(password)
-		if err != nil {
-			return nil, err
-		}
-		hash = h
-	} else {
-		// Unusable placeholder; invite flow sets the real credential.
-		h, err := platformauth.HashPassword("unusable-" + username)
-		if err != nil {
-			return nil, err
-		}
-		hash = h
+	hash, err := platformauth.HashPassword(password)
+	if err != nil {
+		return nil, err
 	}
 	username = strings.TrimSpace(username)
 	email = normalizeEmail(email)
 	var u ManagedUser
-	err := s.pool.QueryRow(ctx, `INSERT INTO users (username, email, password_hash, role, lead_id)
+	err = s.pool.QueryRow(ctx, `INSERT INTO users (username, email, password_hash, role, lead_id)
 		VALUES ($1,$2,$3,$4,$5)
 		RETURNING id, username, email, role, lead_id, created_at, updated_at`,
 		username, email, hash, role, leadID,
@@ -164,33 +151,6 @@ func (s *Store) RevokeSessions(ctx context.Context, id int64) error {
 	_, err := s.pool.Exec(ctx, `UPDATE users SET token_version = token_version + 1
 		WHERE id = $1 AND deleted_at IS NULL`, id)
 	return err
-}
-
-// IssueInvite creates a fresh 48h invite token for the user.
-func (s *Store) IssueInvite(ctx context.Context, userID int64, frontendURL string) (token, inviteURL string, expiry time.Time, err error) {
-	var raw [32]byte
-	if _, err = rand.Read(raw[:]); err != nil {
-		return "", "", time.Time{}, err
-	}
-	token = hex.EncodeToString(raw[:])
-	expiry = time.Now().Add(48 * time.Hour)
-	if err = s.pool.QueryRow(ctx, `UPDATE users SET invite_token = $1, invite_token_expiry = $2
-		WHERE id = $3 AND deleted_at IS NULL RETURNING id`,
-		token, expiry, userID).Scan(new(int64)); err != nil {
-		return "", "", time.Time{}, err
-	}
-	base := strings.TrimSuffix(strings.TrimSpace(frontendURL), "/")
-	if base == "" {
-		base = "http://localhost:3000"
-	}
-	inviteURL = base + "/client/invite?token=" + token
-	return token, inviteURL, expiry, nil
-}
-
-// UserEmail returns the email for notifications.
-func (s *Store) UserEmail(ctx context.Context, userID int64) (email, username string, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT email, username FROM users WHERE id = $1`, userID).Scan(&email, &username)
-	return email, username, err
 }
 
 func itoa(n int) string {

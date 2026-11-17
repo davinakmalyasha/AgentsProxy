@@ -105,6 +105,13 @@ type Config struct {
 	AgencyJWTTTL    time.Duration
 	AgencyFrontend  string
 	AgencyWhatsapp  string
+	// Google OAuth client ID (aud) for agency "Continue with Google".
+	// Empty disables POST /api/v1/auth/google (503).
+	GoogleClientID string
+	// Resend email for the superadmin OTP step. Empty keeps SendEmail
+	// log-only (dev); the OTP step fails closed in production.
+	ResendAPIKey string
+	EmailFrom    string
 }
 
 func Load() (*Config, error) {
@@ -149,6 +156,9 @@ func Load() (*Config, error) {
 		AgencyJWTTTL:            time.Duration(getenvPositiveInt("JWT_TTL_HOURS", 720)) * time.Hour,
 		AgencyFrontend:          getenv("FRONTEND_URL", "http://localhost:3000"),
 		AgencyWhatsapp:          os.Getenv("AGENCY_WHATSAPP"),
+		GoogleClientID:          strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
+		ResendAPIKey:            os.Getenv("RESEND_API_KEY"),
+		EmailFrom:               getenv("EMAIL_FROM", "DFD Agency <hello@dfdagency.com>"),
 		VAPIDPublicKey:          os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey:         os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject:            getenv("VAPID_SUBJECT", "mailto:admin@localhost"),

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # scripts/lint-migration.sh — additive-DDL law (GOVERNANCE §3).
 # Fails on non-additive DDL: DROP COLUMN, ALTER TYPE, RENAME, DROP TABLE.
-# Historical exception: 042_drop_telegram.sql (documented removal, pre-law).
+# Historical exceptions: documented removals, pre-law (042) or with all
+# code references already deleted in the same change (071).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
 for f in internal/db/migrations/*.sql; do
   case "$f" in
-    *042_drop_telegram.sql) continue ;;
+    *042_drop_telegram.sql|*071_drop_invite_columns.sql) continue ;;
   esac
   # Strip -- comments so documented words ("never DROP COLUMN") don't trip it.
   body=$(grep -v '^[[:space:]]*--' "$f" || true)

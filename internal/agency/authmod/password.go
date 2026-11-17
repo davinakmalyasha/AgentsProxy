@@ -1,11 +1,13 @@
 // Package auth implements human authentication: cookie login/logout/me,
-// password change, and single-use invite verification.
+// password change, email OTP second step, and Google sign-in.
 package auth
 
 import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+
+	platformauth "github.com/davinakmalyasha/agents-proxy/internal/agency/auth"
 )
 
 // NormalizeEmail lowercases and trims for case-insensitive uniqueness.
@@ -27,20 +29,5 @@ func SecureCompare(password, hash string) bool {
 	return ok && hash != ""
 }
 
-// ValidPassword reports whether the new password meets the policy: min 8
-// chars with at least one letter and one digit.
-func ValidPassword(password string) bool {
-	if len(password) < 8 {
-		return false
-	}
-	var hasLetter, hasDigit bool
-	for _, r := range password {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-			hasLetter = true
-		case r >= '0' && r <= '9':
-			hasDigit = true
-		}
-	}
-	return hasLetter && hasDigit
-}
+// ValidPassword delegates to the shared policy (agency/auth).
+func ValidPassword(password string) bool { return platformauth.ValidPassword(password) }

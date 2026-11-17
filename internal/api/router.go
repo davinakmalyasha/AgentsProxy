@@ -172,11 +172,15 @@ func NewRouter(d Deps) http.Handler {
 	agencyDeps := agency.Deps{
 		Pool:               adminPool,
 		Logger:             nil, // agency falls back to slog.Default (JSON, redacting)
+		Env:                d.Cfg.Env,
 		JWTSecret:          d.Cfg.AgencyJWTSecret,
 		JWTTTL:             d.Cfg.AgencyJWTTTL,
 		SecureCookie:       false,
 		FrontendURL:        d.Cfg.AgencyFrontend,
 		AgencyWhatsapp:     d.Cfg.AgencyWhatsapp,
+		GoogleClientID:     d.Cfg.GoogleClientID,
+		ResendKey:          d.Cfg.ResendAPIKey,
+		ResendFrom:         d.Cfg.EmailFrom,
 		SupabaseURL:        d.Cfg.SupabaseURL,
 		SupabaseServiceKey: d.Cfg.SupabaseStorageKey,
 		SupabaseBucket:     d.Cfg.ReportBucket,
