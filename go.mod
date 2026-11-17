@@ -18,6 +18,8 @@ require (
 	github.com/xuri/excelize/v2 v2.11.1-0.20260915055537-22f76f9acb94
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sync v0.23.0
+	google.golang.org/adk/v2 v2.5.0
+	google.golang.org/api v0.298.0
 	google.golang.org/genai v1.71.0
 )
 
@@ -64,8 +66,6 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/adk/v2 v2.5.0 // indirect
-	google.golang.org/api v0.298.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
