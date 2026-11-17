@@ -15,6 +15,8 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
+	agencynotify "github.com/davinakmalyasha/agents-proxy/internal/agency/notify"
+	agencyworker "github.com/davinakmalyasha/agents-proxy/internal/agency/worker"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -324,6 +326,21 @@ func main() {
 		slog.Info("reminder ticker disabled on serverless")
 	}
 	defer remSched.Stop()
+
+	// Agency plane worker (hosting-expiry nudges, testimonial follow-ups,
+	// stale-milestone flags, agent-event webhook dispatch). Same gate as
+	// every other background loop: long-lived hosts own it, serverless
+	// leaves it to pg_cron. Disabled entirely without JWT_SECRET.
+	if cfg.AgencyJWTSecret != "" && cfg.BackgroundTickers {
+		agencyNotify := agencynotify.New(slog.Default(), cfg.AgencyWhatsapp)
+		agencyTelegram := agencynotify.NewTelegram(slog.Default(), "", "")
+		agencyWorker := agencyworker.New(slog.Default(), adminPool, agencyNotify, agencyTelegram, cfg.AgencyWhatsapp, agencyworker.BackupConfig{})
+		agencyCtx, agencyCancel := context.WithCancel(context.Background())
+		defer agencyCancel()
+		go agencyWorker.Run(agencyCtx)
+	} else {
+		slog.Info("agency worker disabled (JWT_SECRET unset or BACKGROUND_TICKERS=false)")
+	}
 
 	router := api.NewRouter(api.Deps{
 		Cfg:       cfg,

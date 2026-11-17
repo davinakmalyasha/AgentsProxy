@@ -116,7 +116,7 @@ gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADM
 
 ---
 
-## 1.5 Environment variables (full table)
+## 5. Environment variables
 
 | Env | Default | Notes |
 |---|---|---|
@@ -140,11 +140,11 @@ gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADM
 | `DB_POOL_MAX` | 20 | runtime pool maximum connections |
 | `DB_USE_SIMPLE_PROTOCOL` | false | **set to `true` when connecting via Supavisor 6543** |
 
-## 1.6 Feature toggle (instant or ≤15 min)
+## 6. Feature toggle (instant or ≤15 min)
 
 `PATCH /v1/admin/clients/{id} {"features":["records","menu","booking"]}` — the cache entry is evicted on the way out, so the next request sees the new feature set. If Redis is down, the cached entry lives up to 15 minutes (the cache TTL); use `redis-cli DEL ck:<sha256>` to force the eviction.
 
-## 1.7 Escape-hatch decision rule
+## 7. Escape-hatch decision rule
 
 A request is **in-request** when:
 - it finishes in <300ms, AND
@@ -155,7 +155,7 @@ Otherwise: **Edge Function** (DFD Supabase Edge Functions or a Hostinger serverl
 
 ---
 
-## 5. Client Onboarding (DFD agent flow)
+## 8. Client Onboarding (DFD agent flow)
 
 ```bash
 ADMIN="Authorization: Bearer $ADMIN_API_KEY"
@@ -184,7 +184,7 @@ curl -X PATCH https://<host>/v1/admin/clients/<id> \
 
 ---
 
-## 6. Schema Migrations
+## 9. Schema Migrations
 
 Migrations run automatically on boot via `internal/db/migrate.go`. Each migration is wrapped in a `pg_advisory_xact_lock(734561)` to keep parallel boots from racing on `CREATE EXTENSION pgcrypto`.
 
@@ -194,7 +194,7 @@ To add a migration: drop a new file into `internal/db/migrations/00X_name.sql`; 
 
 ---
 
-## 7. Performance & Capacity
+## 10. Performance & Capacity
 
 - **Latency targets:** p95 `<100ms` on cache hit, p99 `<500ms` on LLM call (provider-dominated).
 - **DB pool:** `MinConns 2, MaxConns 20` per replica. If you see `conn busy` in logs, scale horizontally.
@@ -202,7 +202,7 @@ To add a migration: drop a new file into `internal/db/migrations/00X_name.sql`; 
 
 ---
 
-## 8. Security Audit Checklist
+## 11. Security Audit Checklist
 
 - [x] `subtle.ConstantTimeCompare` on token + admin key (auth/tokens.go)
 - [x] `pgx` parameterized (`$1,$2`) — no `fmt.Sprintf` into SQL anywhere
@@ -215,14 +215,15 @@ To add a migration: drop a new file into `internal/db/migrations/00X_name.sql`; 
 
 ---
 
-## 9. When You Need to Change Things
+## 12. When You Need to Change Things
 
 | You want to… | Touch |
 |---|---|
 | Add a new vertical | `internal/features/builder.go` — append one string to `AllowedVerticals` |
 | Add a new business field | nothing — it's all in `payload` jsonb |
-| Add a new admin endpoint | `internal/api/admin.go` |
-| Change rate limit | `RATE_LIMIT_PER_MINUTE` env |
+| Add a new admin endpoint | `internal/api/admin.go` (proxy) or `internal/agency/admin/` (agency plane) |
+| Add an agency endpoint | handler in `internal/agency/<domain>/` + route in its `RegisterRoutes` (chi) |
+| Change rate limit | `RATE_LIMIT_PER_MINUTE` env (proxy); `ratelimit.NewRateLimiter` in `internal/agency/router.go` (agency writes) |
 | Add a Sentry env var | `internal/config/config.go` + `internal/sentry/sentry.go` |
 | Add a migration | new file in `internal/db/migrations/`, never edit applied ones |
 | Change the LLM provider | `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` env |

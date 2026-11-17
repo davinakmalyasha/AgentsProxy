@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
+	"github.com/davinakmalyasha/agents-proxy/internal/agency"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -58,6 +59,15 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Get("/healthz", (&Healthz{DB: d.Pool, RDB: d.Redis, Build: d.Version}).ServeHTTP)
 
+	// AdminPool for the admin surface below and the report-jobs
+	// worker (cross-tenant claim). Fallback when the caller doubles
+	// them (see Deps.AdminPool). The agency plane below reuses it:
+	// agency tables grant app_runtime, and admin ops need no tenant GUC.
+	adminPool := d.AdminPool
+	if adminPool == nil {
+		adminPool = d.Pool
+	}
+
 	r.Route("/v1", func(r chi.Router) {
 		// Global per-client/IP rate limit (default 180). Chat gets stricter sub-limit below.
 		r.Use(middleware.RateLimit(d.Redis, d.Cfg.RateLimitPerMinute))
@@ -86,13 +96,8 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/history", agentH.ClearHistory)
 		})
 
-		// AdminPool for the admin surface below and the report-jobs
-		// worker (cross-tenant claim). Fallback when the caller doubles
-		// them (see Deps.AdminPool).
-		adminPool := d.AdminPool
-		if adminPool == nil {
-			adminPool = d.Pool
-		}
+		// AdminPool for the /v1/admin surface already computed above
+		// (falls back to the app pool when the caller doubles them).
 
 		// WS2: chat-generated .xlsx downloads — token IS the auth (tenant-scoped, 30-min TTL)
 		reportsH := &Reports{Pool: d.Pool}
@@ -160,6 +165,37 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/tenant-health/reload", TenantReload(thDeps))
 		})
 	})
+
+	// Agency plane (DFD ops): /api/v1/* + legacy /api/agent/* alias + /mcp.
+	// JWT_SECRET enables it; empty disables (503) so proxy-only deploys
+	// keep booting unchanged.
+	agencyDeps := agency.Deps{
+		Pool:               adminPool,
+		Logger:             nil, // agency falls back to slog.Default (JSON, redacting)
+		JWTSecret:          d.Cfg.AgencyJWTSecret,
+		JWTTTL:             d.Cfg.AgencyJWTTTL,
+		SecureCookie:       false,
+		FrontendURL:        d.Cfg.AgencyFrontend,
+		AgencyWhatsapp:     d.Cfg.AgencyWhatsapp,
+		SupabaseURL:        d.Cfg.SupabaseURL,
+		SupabaseServiceKey: d.Cfg.SupabaseStorageKey,
+		SupabaseBucket:     d.Cfg.ReportBucket,
+	}
+	if d.Cfg.AgencyJWTSecret == "" {
+		disabled := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSONError(w, http.StatusServiceUnavailable, "agency plane disabled (JWT_SECRET unset)")
+		})
+		r.Mount("/api/v1", disabled)
+		r.Mount("/api/agent", disabled)
+		r.Mount("/mcp", disabled)
+	} else {
+		r.Mount("/api/v1", agency.NewRouter(agencyDeps))
+		r.Mount("/api/agent", agency.NewAgentRouter(agencyDeps))
+		mcpGuarded := agency.GuardAgent(adminPool, agency.NewMCPHandler(agencyDeps))
+		r.Method("POST", "/mcp", mcpGuarded)
+		r.Method("GET", "/mcp", mcpGuarded)
+		r.Method("DELETE", "/mcp", mcpGuarded)
+	}
 
 	return r
 }
