@@ -30,7 +30,7 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure boo
 
 			claims, err := ParseJWT(secret, cookie.Value)
 			if err != nil {
-				clearCookie(w, cookie)
+				clearSessionCookie(w, secure)
 				response.Unauthorized(w, "Unauthorized: Invalid token")
 				return
 			}
@@ -41,7 +41,7 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure boo
 				`SELECT token_version, deleted_at FROM users WHERE id = $1`, claims.UserID,
 			).Scan(&tokenVersion, &deletedAt)
 			if err != nil || deletedAt != nil || tokenVersion != claims.TokenVersion {
-				clearCookie(w, cookie)
+				clearSessionCookie(w, secure)
 				response.Unauthorized(w, "Unauthorized: Token revoked")
 				return
 			}
@@ -75,16 +75,16 @@ func setSessionCookie(w http.ResponseWriter, token string, ttl time.Duration, se
 
 // ClearCookie removes the session cookie.
 func ClearCookie(w http.ResponseWriter, secure bool) {
-	clearCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, Secure: secure})
+	clearSessionCookie(w, secure)
 }
 
-func clearCookie(w http.ResponseWriter, cookie *http.Cookie) {
+func clearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     cookie.Name,
+		Name:     CookieName,
 		Value:    "",
-		Path:     cookie.Path,
+		Path:     "/",
 		HttpOnly: true,
-		Secure:   cookie.Secure,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
