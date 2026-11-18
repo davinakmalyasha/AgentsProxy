@@ -67,8 +67,16 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
 | JWT cookie (`token`) | agency human | `SUPERADMIN/EDITOR/CLIENT` roles, tokenVersion revocation |
 | Bearer agency key | machine agent | SHA-256 hash, `scopes[]` (`agent`) |
 
+Agency auth is one identity model: email/username + password (SUPERADMIN adds
+a 6-digit Resend email code), Google one-click for CLIENT only, and
+email-verified CLIENT self-signup (`signup_requests` → user on code verify).
+Sessions are 30-day JWTs (`JWT_TTL_HOURS=720`) refreshed while active under
+7 days; `tokenVersion` revokes every session on logout/password change.
+Google never links a staff account. Web orders require a session and bind
+`orders.user_id`; the legacy `users.lead_id` link still grants portal access.
+
 bcrypt passwords, `subtle.ConstantTimeCompare` on hashes, JWT ≥32 chars,
-cookies `HttpOnly` (+`Secure/None` in prod), no token/secret in logs
+cookies `HttpOnly` + `SameSite=Strict` (`Secure` in prod), no token/secret in logs
 (slog + Sentry redactors share one sensitive-key list).
 
 ## 5. Cache / delivery / ops

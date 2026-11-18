@@ -22,48 +22,54 @@ type Store struct {
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 // OwnsOrder reports whether the user may access the order. Staff always can;
-// clients can when their lead matches or the lead WhatsApp equals their email.
+// clients own orders created under their account or their linked lead.
 func (s *Store) OwnsOrder(ctx context.Context, userID int64, role, orderID string) (bool, error) {
 	if role == "SUPERADMIN" || role == "EDITOR" {
 		return true, nil
 	}
 	var (
 		leadID    pgtype.Int8
-		email     string
+		orderUser pgtype.Int8
 		orderLead pgtype.Int8
-		leadWA    string
 	)
-	if err := s.pool.QueryRow(ctx, `SELECT lead_id, email FROM users WHERE id = $1`, userID).Scan(&leadID, &email); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT lead_id FROM users WHERE id = $1`, userID).Scan(&leadID); err != nil {
 		return false, err
 	}
-	err := s.pool.QueryRow(ctx, `SELECT o.lead_id, l.whatsapp FROM orders o
-		JOIN leads l ON l.id = o.lead_id WHERE o.id = $1 AND o.deleted_at IS NULL`,
-		orderID).Scan(&orderLead, &leadWA)
+	err := s.pool.QueryRow(ctx, `SELECT user_id, lead_id FROM orders
+		WHERE id = $1 AND deleted_at IS NULL`, orderID).Scan(&orderUser, &orderLead)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	if leadID.Valid && orderLead.Valid && leadID.Int64 == orderLead.Int64 {
+	if orderUser.Valid && orderUser.Int64 == userID {
 		return true, nil
 	}
-	return leadWA != "" && leadWA == email, nil
+	return leadID.Valid && orderLead.Valid && leadID.Int64 == orderLead.Int64, nil
 }
 
 // ClientOrder is the portal order view.
 type ClientOrder struct {
-	ID          string            `json:"id"`
-	Status      string            `json:"status"`
-	TotalAmount float64           `json:"totalAmount"`
-	BriefData   json.RawMessage   `json:"briefData"`
-	CurrentStep int               `json:"currentStep"`
-	HandoffURL  *string           `json:"handoffUrl"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	UpdatedAt   time.Time         `json:"updatedAt"`
-	PackageName string            `json:"packageName"`
-	Progress    map[string]any    `json:"progress"`
-	Milestones  []ClientMilestone `json:"milestones,omitempty"`
+	ID             string            `json:"id"`
+	Status         string            `json:"status"`
+	TotalAmount    float64           `json:"totalAmount"`
+	BriefData      json.RawMessage   `json:"briefData"`
+	CurrentStep    int               `json:"currentStep"`
+	HandoffURL     *string           `json:"handoffUrl"`
+	DriveFolderURL *string           `json:"driveFolderUrl"`
+	CreatedAt      time.Time         `json:"createdAt"`
+	UpdatedAt      time.Time         `json:"updatedAt"`
+	PackageName    string            `json:"packageName"`
+	Package        *ClientPackage    `json:"Package,omitempty"`
+	Progress       map[string]any    `json:"progress"`
+	Milestones     []ClientMilestone `json:"milestones,omitempty"`
+}
+
+// ClientPackage is the compact package reference the portal renders.
+type ClientPackage struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
 // ClientMilestone is the client-visible milestone.
@@ -82,28 +88,24 @@ type ClientMilestone struct {
 
 // ListMyOrders returns orders visible to the user.
 func (s *Store) ListMyOrders(ctx context.Context, userID int64, role string) ([]ClientOrder, error) {
-	var (
-		leadID pgtype.Int8
-		email  string
-	)
-	if err := s.pool.QueryRow(ctx, `SELECT lead_id, email FROM users WHERE id = $1`, userID).Scan(&leadID, &email); err != nil {
+	var leadID pgtype.Int8
+	if err := s.pool.QueryRow(ctx, `SELECT lead_id FROM users WHERE id = $1`, userID).Scan(&leadID); err != nil {
 		return nil, err
 	}
 
 	where := `o.deleted_at IS NULL`
 	args := []any{}
 	if role != "SUPERADMIN" && role != "EDITOR" {
-		// Match by lead or by lead-WhatsApp == email, mirroring the original.
-		where += ` AND (o.lead_id = $1 OR l.whatsapp = $2)`
+		// Direct account ownership plus the legacy linked-lead path.
+		where += ` AND (o.user_id = $1 OR o.lead_id = $2)`
+		lead := int64(-1)
 		if leadID.Valid {
-			args = append(args, leadID.Int64)
-		} else {
-			args = append(args, -1)
+			lead = leadID.Int64
 		}
-		args = append(args, email)
+		args = append(args, userID, lead)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT o.id, o.status, o.total_amount, o.brief_data, o.current_step,
-			o.handoff_url, o.created_at, o.updated_at, p.name
+			o.handoff_url, o.drive_folder_url, o.created_at, o.updated_at, p.id, p.name
 		FROM orders o JOIN leads l ON l.id = o.lead_id JOIN packages p ON p.id = o.package_id
 		WHERE `+where+` ORDER BY o.created_at DESC LIMIT 100`, args...)
 	if err != nil {
@@ -117,14 +119,20 @@ func (s *Store) ListMyOrders(ctx context.Context, userID int64, role string) ([]
 			amount  pgtype.Numeric
 			brief   []byte
 			handoff pgtype.Text
+			drive   pgtype.Text
+			pkgID   int64
+			pkgName string
 		)
 		if err := rows.Scan(&o.ID, &o.Status, &amount, &brief, &o.CurrentStep,
-			&handoff, &o.CreatedAt, &o.UpdatedAt, &o.PackageName); err != nil {
+			&handoff, &drive, &o.CreatedAt, &o.UpdatedAt, &pkgID, &pkgName); err != nil {
 			return nil, err
 		}
 		o.TotalAmount = numericFloat(amount)
 		o.BriefData = jsonRaw(brief)
 		o.HandoffURL = textPtr(handoff)
+		o.DriveFolderURL = textPtr(drive)
+		o.PackageName = pkgName
+		o.Package = &ClientPackage{ID: pkgID, Name: pkgName}
 		o.Progress = map[string]any{"currentStep": o.CurrentStep, "status": o.Status}
 		out = append(out, o)
 	}

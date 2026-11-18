@@ -112,6 +112,11 @@ type Config struct {
 	// log-only (dev); the OTP step fails closed in production.
 	ResendAPIKey string
 	EmailFrom    string
+	// SignupEnabled gates self-service CLIENT registration. It defaults
+	// to true in development and false in production: production must not
+	// accept signups until EMAIL_FROM is on a Resend-verified domain (the
+	// sandbox sender can only deliver to the Resend account owner).
+	SignupEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -173,6 +178,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.RunMigrations, err = getenvBool("RUN_MIGRATIONS", true); err != nil {
+		return nil, err
+	}
+	if c.SignupEnabled, err = getenvBool("SIGNUP_ENABLED", !strings.EqualFold(c.Env, "production")); err != nil {
 		return nil, err
 	}
 	if c.DBSimpleProtocol, err = getenvBool("DB_USE_SIMPLE_PROTOCOL", false); err != nil {

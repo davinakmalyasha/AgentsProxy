@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
@@ -250,6 +251,158 @@ func (s *Store) UsernameTaken(ctx context.Context, username string) (bool, error
 	return n > 0, err
 }
 
+// SignupRequest is a pending email-verified client signup.
+type SignupRequest struct {
+	ID        int64
+	Username  string
+	Email     string
+	ExpiresAt time.Time
+	Attempts  int
+}
+
+// CreateSignup stores (or refreshes) a pending signup and returns its id.
+// The email must not already belong to a user. A previous pending row for
+// the same email is replaced, invalidating its old code.
+func (s *Store) CreateSignup(ctx context.Context, username, email, passwordHash, codeHash string, ttl time.Duration) (int64, error) {
+	email = NormalizeEmail(email)
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`, email,
+	).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if exists {
+		return 0, errEmailTaken
+	}
+	// Opportunistic hygiene: dropped-off pending signups are worthless.
+	_, _ = s.pool.Exec(ctx, `DELETE FROM signup_requests
+		WHERE created_at < now() - interval '24 hours'`)
+
+	var id int64
+	err := s.pool.QueryRow(ctx, `INSERT INTO signup_requests
+		(username, email, password_hash, code_hash, expires_at)
+		VALUES ($1,$2,$3,$4, now() + ($5::text)::interval)
+		ON CONFLICT (email) DO UPDATE SET
+			username = EXCLUDED.username,
+			password_hash = EXCLUDED.password_hash,
+			code_hash = EXCLUDED.code_hash,
+			attempts = 0,
+			expires_at = EXCLUDED.expires_at,
+			consumed_at = NULL,
+			created_at = now()
+		RETURNING id`,
+		strings.TrimSpace(username), email, passwordHash, codeHash, ttl.String(),
+	).Scan(&id)
+	return id, err
+}
+
+// VerifySignup checks a code and atomically creates the CLIENT. It returns
+// (user, tokenVersion, ok, locked). A username race is resolved by trying
+// deterministic suffixes inside the same transaction.
+func (s *Store) VerifySignup(ctx context.Context, signupID int64, code string) (User, int, bool, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, 0, false, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		username string
+		email    string
+		hash     string
+		attempts int
+		expiry   time.Time
+		consumed pgtype.Timestamptz
+	)
+	err = tx.QueryRow(ctx, `SELECT username, email, code_hash, attempts, expires_at, consumed_at
+		FROM signup_requests WHERE id = $1 FOR UPDATE`, signupID,
+	).Scan(&username, &email, &hash, &attempts, &expiry, &consumed)
+	if err != nil {
+		return User{}, 0, false, false, err
+	}
+	if consumed.Valid || time.Now().After(expiry) {
+		return User{}, 0, false, false, nil
+	}
+	if attempts >= OTPMaxAttempts {
+		return User{}, 0, false, true, nil
+	}
+	if subtle.ConstantTimeCompare([]byte(hash), []byte(HashOTPCode(code))) != 1 {
+		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET attempts = attempts + 1 WHERE id = $1`, signupID); err != nil {
+			return User{}, 0, false, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return User{}, 0, false, false, err
+		}
+		if attempts+1 >= OTPMaxAttempts {
+			return User{}, 0, false, true, nil
+		}
+		return User{}, 0, false, false, nil
+	}
+
+	// The email could have been claimed after registration (admin create,
+	// another signup). Fail cleanly instead of relying on a raw 23505.
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`, email,
+	).Scan(&taken); err != nil {
+		return User{}, 0, false, false, err
+	}
+	if taken {
+		return User{}, 0, false, false, errEmailTaken
+	}
+
+	var (
+		u       User
+		version int
+	)
+	base := strings.TrimSpace(username)
+	if base == "" {
+		base = "client"
+	}
+	for i := 0; i < 50; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s%d", base, i+1)
+		}
+		err = tx.QueryRow(ctx, `INSERT INTO users (username, email, password_hash, role)
+			VALUES ($1,$2,$3,'CLIENT')
+			ON CONFLICT DO NOTHING
+			RETURNING id, username, email, role, token_version`,
+			candidate, email, hash,
+		).Scan(&u.ID, &u.Username, &u.Email, &u.Role, &version)
+		if err == nil {
+			break
+		}
+		if err != pgx.ErrNoRows {
+			return User{}, 0, false, false, err
+		}
+		// Username collision: try the next suffix.
+	}
+	if err != nil {
+		return User{}, 0, false, false, fmt.Errorf("signup: no free username for %q", base)
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE signup_requests SET consumed_at = now(), attempts = attempts + 1
+		WHERE id = $1`, signupID); err != nil {
+		return User{}, 0, false, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, 0, false, false, err
+	}
+	return u, version, true, false, nil
+}
+
+// ResendSignup rotates the code for a pending signup and returns its email.
+func (s *Store) ResendSignup(ctx context.Context, signupID int64, codeHash string, ttl time.Duration) (string, error) {
+	var email string
+	err := s.pool.QueryRow(ctx, `UPDATE signup_requests
+		SET code_hash = $1, attempts = 0, expires_at = now() + ($3::text)::interval
+		WHERE id = $2 AND consumed_at IS NULL
+		RETURNING email`, codeHash, signupID, ttl.String(),
+	).Scan(&email)
+	return email, err
+}
+
 // ChangePassword verifies the current password, sets the new hash, bumps the
 // token version so other sessions die, and returns the new version.
 func (s *Store) ChangePassword(ctx context.Context, userID int64, currentPassword, newHash string) (int, error) {
@@ -276,6 +429,12 @@ func (s *Store) TokenVersion(ctx context.Context, userID int64) (int, error) {
 
 // errWrongPassword distinguishes bad credentials from missing rows.
 var errWrongPassword = errSentinel("wrong password")
+
+// errEmailTaken means an email already belongs to an active user.
+var errEmailTaken = errSentinel("email already registered")
+
+// errGoogleStaff means a verified Google email matches a staff account.
+var errGoogleStaff = errSentinel("google: staff account must use password")
 
 type errSentinel string
 

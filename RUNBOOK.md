@@ -1,6 +1,6 @@
 # RUNBOOK — D:\MyProject\AgentsProxy
 
-> Operations guide for the deployed agents-proxy. Pair with `README.md` (what it is), `ARCHITECTURE.md` (how it's built), `docs/refinementNotes.md` (known gaps + roadmap). This file lives in the repo so any operator has context.
+> Operations guide for the deployed agents-proxy. Pair with `README.md` (what it is) and `ARCHITECTURE.md` (how it's built). This file lives in the repo so any operator has context.
 
 ---
 
@@ -14,6 +14,28 @@ curl -s https://<host>/healthz
 If `db` or `redis` is `false`, see "Service Down" below.
 
 UptimeRobot should ping `GET /healthz` every 5 min and alert on 5xx.
+
+---
+
+## 1a. Agency auth, email, sessions
+
+* **Sessions:** 30 days (`JWT_TTL_HOURS=720`). The cookie is refreshed when
+  under 7 days remain, so active users stay signed in; idle >30 days is a
+  clean redirect to login. Logout/revoke/password change bump `tokenVersion`.
+* **Superadmin:** password + 6-digit email code. `ENV=production` with no
+  Resend config fails closed (`OTP_UNAVAILABLE`) — password alone never logs in.
+* **Client signup:** email + password + 6-digit code. Check
+  `SIGNUP_ENABLED` and `GET /api/v1/auth/config`. The Resend sandbox sender
+  (`onboarding@resend.dev`) can only mail the Resend account owner; verify
+  `dfdagency.com` under Resend → Domains and set
+  `EMAIL_FROM=DFD Agency <hello@dfdagency.com>` before enabling client signup.
+* **Google:** CLIENT only. Staff emails are rejected by design (OTP stays
+  mandatory). The button needs `GOOGLE_CLIENT_ID` (API) and
+  `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (web).
+* **Orders:** `POST /api/v1/orders` requires a session; the order is bound to
+  `orders.user_id` and appears in the portal immediately. Guests use WhatsApp.
+* **Local code without Resend:** run with `ENV=development RESEND_API_KEY=`
+  and read `dev verification code` from the server log.
 
 ---
 

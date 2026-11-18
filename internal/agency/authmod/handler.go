@@ -65,22 +65,216 @@ type Handler struct {
 	env            string
 	googleClientID string
 	notifier       Notifier
+	signupEnabled  bool
 }
 
 // NewHandler builds an auth handler.
-func NewHandler(store *Store, pool *pgxpool.Pool, logger *slog.Logger, jwtSecret string, jwtTTL time.Duration, secure bool, env, googleClientID string, notifier Notifier) *Handler {
-	return &Handler{store: store, pool: pool, logger: logger, jwtSecret: jwtSecret, jwtTTL: jwtTTL, secure: secure, env: env, googleClientID: googleClientID, notifier: notifier}
+func NewHandler(store *Store, pool *pgxpool.Pool, logger *slog.Logger, jwtSecret string, jwtTTL time.Duration, secure bool, env, googleClientID string, notifier Notifier, signupEnabled bool) *Handler {
+	return &Handler{store: store, pool: pool, logger: logger, jwtSecret: jwtSecret, jwtTTL: jwtTTL, secure: secure, env: env, googleClientID: googleClientID, notifier: notifier, signupEnabled: signupEnabled}
 }
 
 // RegisterRoutes mounts auth chi routes (mounted under /api/v1/auth).
 func (h *Handler) RegisterRoutes(r chi.Router, loginLimiter *ratelimit.RateLimiter) {
-	cookieGuard := platformauth.CookieAuth(h.jwtSecret, h.pool, h.jwtTTL)
+	cookieGuard := platformauth.CookieAuth(h.jwtSecret, h.pool, h.jwtTTL, h.secure)
+	r.Get("/config", h.config)
 	r.With(loginLimiter.Limit).Post("/login", h.login)
 	r.With(loginLimiter.Limit).Post("/login/verify", h.loginVerify)
 	r.With(loginLimiter.Limit).Post("/google", h.google)
+	r.With(loginLimiter.Limit).Post("/register", h.register)
+	r.With(loginLimiter.Limit).Post("/register/verify", h.registerVerify)
+	r.With(loginLimiter.Limit).Post("/register/resend", h.registerResend)
 	r.With(cookieGuard).Post("/logout", h.logout)
 	r.With(cookieGuard).Get("/me", h.me)
 	r.With(cookieGuard).Post("/change-password", h.changePassword)
+}
+
+// config is the public auth capabilities probe used by the login UI.
+func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
+	response.OK(w, map[string]any{
+		"googleEnabled": h.googleClientID != "",
+		"signupEnabled": h.signupAvailable(),
+	}, "Auth config retrieved")
+}
+
+// signupAvailable reports whether self-service registration can actually
+// deliver its verification email. Development stays usable without Resend
+// (the code is logged); production fails closed.
+func (h *Handler) signupAvailable() bool {
+	if !h.signupEnabled {
+		return false
+	}
+	if strings.EqualFold(h.env, "production") {
+		return h.notifier != nil && h.notifier.ResendConfigured()
+	}
+	return true
+}
+
+// deliverCode sends a verification code, or logs it in development when no
+// email provider is configured. Production never silently succeeds.
+func (h *Handler) deliverCode(ctx context.Context, to, subject, code, purpose string) error {
+	html := "<p>Your DFD verification code is:</p><h1>" + code + "</h1><p>It expires in 10 minutes. If you didn't request this, ignore this email.</p>"
+	if h.notifier == nil || !h.notifier.ResendConfigured() {
+		if strings.EqualFold(h.env, "production") {
+			return errors.New("email provider not configured")
+		}
+		if h.logger != nil {
+			h.logger.InfoContext(ctx, "dev verification code", "email", to, "purpose", purpose, "code", code)
+		}
+		return nil
+	}
+	return h.notifier.SendEmail(ctx, to, subject, html)
+}
+
+func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
+	if !h.signupAvailable() {
+		response.Fail(w, http.StatusServiceUnavailable, "Self-service signup is not available yet", "SIGNUP_DISABLED")
+		return
+	}
+	var body struct {
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	email := NormalizeEmail(body.Email)
+	if len(name) < 2 {
+		response.ValidationError(w, "Invalid signup", map[string]string{"name": "min 2 chars"})
+		return
+	}
+	if !strings.Contains(email, "@") || len(email) < 5 {
+		response.ValidationError(w, "Invalid signup", map[string]string{"email": "invalid email"})
+		return
+	}
+	if !ValidPassword(body.Password) {
+		response.ValidationError(w, "Invalid signup", map[string]string{
+			"password": "min 8 chars with letters and numbers",
+		})
+		return
+	}
+	username, err := h.freeUsername(r.Context(), name, email)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "signup username failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	passwordHash, err := platformauth.HashPassword(body.Password)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "signup hash failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	code, err := generateOTPCode()
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "signup code failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	signupID, err := h.store.CreateSignup(r.Context(), username, email, passwordHash, HashOTPCode(code), OTPTTL)
+	if err != nil {
+		if errors.Is(err, errEmailTaken) {
+			response.Fail(w, http.StatusConflict, "Email already registered — sign in instead", "EMAIL_TAKEN")
+			return
+		}
+		h.logger.ErrorContext(r.Context(), "signup store failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	if err := h.deliverCode(r.Context(), email, "Your DFD verification code", code, "signup"); err != nil {
+		h.logger.ErrorContext(r.Context(), "signup email failed", "error", err)
+		response.Fail(w, http.StatusBadGateway, "Could not send the verification email — use Google or WhatsApp us", "SIGNUP_EMAIL_FAILED")
+		return
+	}
+	response.Created(w, map[string]any{
+		"signupId":    signupID,
+		"email":       maskEmail(email),
+		"otpRequired": true,
+	}, "Verification code sent")
+}
+
+func (h *Handler) registerVerify(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SignupID int64  `json:"signupId"`
+		Code     string `json:"code"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	code := strings.TrimSpace(body.Code)
+	if body.SignupID == 0 || code == "" {
+		response.BadRequest(w, "signupId and code are required")
+		return
+	}
+	user, version, ok, locked, err := h.store.VerifySignup(r.Context(), body.SignupID, code)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			response.Unauthorized(w, "Invalid or expired code")
+		case errors.Is(err, errEmailTaken):
+			response.Fail(w, http.StatusConflict, "Email already registered — sign in instead", "EMAIL_TAKEN")
+		default:
+			h.logger.ErrorContext(r.Context(), "signup verify failed", "error", err)
+			response.Internal(w)
+		}
+		return
+	}
+	if locked {
+		response.Fail(w, http.StatusTooManyRequests, "Too many attempts, request a new code", "SIGNUP_LOCKED")
+		return
+	}
+	if !ok {
+		response.Unauthorized(w, "Invalid or expired code")
+		return
+	}
+	token, err := platformauth.SignJWT(h.jwtSecret, h.jwtTTL, user.ID, user.Role, version)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "signup sign failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	h.setCookie(w, token)
+	response.Created(w, map[string]any{"user": user}, "Account created")
+}
+
+func (h *Handler) registerResend(w http.ResponseWriter, r *http.Request) {
+	if !h.signupAvailable() {
+		response.Fail(w, http.StatusServiceUnavailable, "Self-service signup is not available yet", "SIGNUP_DISABLED")
+		return
+	}
+	var body struct {
+		SignupID int64 `json:"signupId"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.SignupID == 0 {
+		response.BadRequest(w, "signupId is required")
+		return
+	}
+	code, err := generateOTPCode()
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "signup resend code failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	email, err := h.store.ResendSignup(r.Context(), body.SignupID, HashOTPCode(code), OTPTTL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			response.NotFound(w, "Signup not found or already completed")
+			return
+		}
+		h.logger.ErrorContext(r.Context(), "signup resend failed", "error", err)
+		response.Internal(w)
+		return
+	}
+	if err := h.deliverCode(r.Context(), email, "Your DFD verification code", code, "signup-resend"); err != nil {
+		h.logger.ErrorContext(r.Context(), "signup resend email failed", "error", err)
+		response.Fail(w, http.StatusBadGateway, "Could not send the verification email — use Google or WhatsApp us", "SIGNUP_EMAIL_FAILED")
+		return
+	}
+	response.OK(w, map[string]any{"email": maskEmail(email), "otpRequired": true}, "Verification code sent")
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +322,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 // startOTP issues the second-step email code for superadmins.
 func (h *Handler) startOTP(w http.ResponseWriter, r *http.Request, user User) {
-	unconfigured := h.notifier == nil || !h.notifier.ResendConfigured()
-	if unconfigured && strings.EqualFold(h.env, "production") {
+	if strings.EqualFold(h.env, "production") && (h.notifier == nil || !h.notifier.ResendConfigured()) {
 		// Fail closed in production: password alone must never suffice.
 		if h.logger != nil {
 			h.logger.WarnContext(r.Context(), "otp email unavailable", "user", user.ID)
@@ -148,9 +341,7 @@ func (h *Handler) startOTP(w http.ResponseWriter, r *http.Request, user User) {
 		response.Internal(w)
 		return
 	}
-	subject := "Your DFD sign-in code"
-	html := "<p>Your DFD verification code is:</p><h1>" + code + "</h1><p>It expires in 10 minutes. If you didn't request this, ignore this email.</p>"
-	if err := h.notifier.SendEmail(r.Context(), user.Email, subject, html); err != nil {
+	if err := h.deliverCode(r.Context(), user.Email, "Your DFD sign-in code", code, "login-otp"); err != nil {
 		h.logger.ErrorContext(r.Context(), "otp send failed", "error", err)
 		response.Fail(w, http.StatusBadGateway, "Could not send verification email", "OTP_SEND_FAILED")
 		return
@@ -252,10 +443,20 @@ func (h *Handler) google(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		user, version, err = h.linkOrProvision(r.Context(), claims)
 		if err != nil {
+			if errors.Is(err, errGoogleStaff) {
+				response.Forbidden(w, "Staff accounts must use password + email code")
+				return
+			}
 			h.logger.ErrorContext(r.Context(), "google provision failed", "error", err)
 			response.Internal(w)
 			return
 		}
+	}
+	// Defense in depth: the Google door is for clients, never staff. This
+	// also catches a staff row linked by an older build.
+	if user.Role != "CLIENT" {
+		response.Forbidden(w, "Staff accounts must use password + email code")
+		return
 	}
 	token, err := platformauth.SignJWT(h.jwtSecret, h.jwtTTL, user.ID, user.Role, version)
 	if err != nil {
@@ -271,6 +472,11 @@ func (h *Handler) google(w http.ResponseWriter, r *http.Request) {
 // unknown email provisions a CLIENT.
 func (h *Handler) linkOrProvision(ctx context.Context, claims *GoogleClaims) (User, int, error) {
 	if existing, version, err := h.store.FindByEmail(ctx, claims.Email); err == nil {
+		// Never let Google attach to a staff credential: that would bypass
+		// the superadmin password + email-code requirement.
+		if existing.Role != "CLIENT" {
+			return User{}, 0, errGoogleStaff
+		}
 		if err := h.store.LinkGoogleSub(ctx, existing.ID, claims.Subject); err != nil {
 			return User{}, 0, err
 		}
@@ -278,16 +484,16 @@ func (h *Handler) linkOrProvision(ctx context.Context, claims *GoogleClaims) (Us
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, 0, err
 	}
-	username, err := h.freeUsername(ctx, claims)
+	username, err := h.freeUsername(ctx, claims.Name, claims.Email)
 	if err != nil {
 		return User{}, 0, err
 	}
 	return h.store.CreateClientUser(ctx, username, claims.Email, claims.Subject)
 }
 
-// freeUsername derives a unique username from the Google name or email.
-func (h *Handler) freeUsername(ctx context.Context, claims *GoogleClaims) (string, error) {
-	base := strings.ToLower(strings.TrimSpace(claims.Name))
+// freeUsername derives a unique username from a display name or email.
+func (h *Handler) freeUsername(ctx context.Context, name, email string) (string, error) {
+	base := strings.ToLower(strings.TrimSpace(name))
 	base = strings.Map(func(c rune) rune {
 		switch {
 		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
@@ -299,13 +505,16 @@ func (h *Handler) freeUsername(ctx context.Context, claims *GoogleClaims) (strin
 		}
 	}, base)
 	if base == "" {
-		base = strings.ToLower(strings.TrimSpace(claims.Email))
+		base = strings.ToLower(strings.TrimSpace(email))
 		if at := strings.Index(base, "@"); at > 0 {
 			base = base[:at]
 		}
 	}
 	if base == "" {
 		base = "client"
+	}
+	if len(base) > 30 {
+		base = strings.TrimRight(base[:30], "_-")
 	}
 	candidate := base
 	for i := 2; ; i++ {
@@ -429,18 +638,15 @@ func maskEmail(email string) string {
 }
 
 func (h *Handler) setCookie(w http.ResponseWriter, token string) {
-	sameSite := http.SameSiteStrictMode
-	if h.secure {
-		// Cross-site production frontend needs None + Secure.
-		sameSite = http.SameSiteNoneMode
-	}
+	// The Vercel frontend proxies /api/v1 on its own origin (rewrites), so
+	// the session is first-party and Strict is safe (and CSRF-resistant).
 	http.SetCookie(w, &http.Cookie{
 		Name:     platformauth.CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   h.secure,
-		SameSite: sameSite,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(h.jwtTTL.Seconds()),
 	})
 }
