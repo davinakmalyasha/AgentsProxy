@@ -96,6 +96,16 @@ func (g *gzipRecorder) WriteHeader(status int) {
 		g.ResponseWriter.Header().Del("Vary")
 	}
 	g.ResponseWriter.WriteHeader(status)
+	// A handler may write a small body before calling WriteHeader. Flush
+	// that buffer now; finish() will not run for an explicit header.
+	if len(g.buffered) > 0 {
+		if g.passthrough {
+			_, _ = g.ResponseWriter.Write(g.buffered)
+		} else {
+			_, _ = g.writer().Write(g.buffered)
+		}
+		g.buffered = nil
+	}
 }
 
 func (g *gzipRecorder) Write(b []byte) (int, error) {
