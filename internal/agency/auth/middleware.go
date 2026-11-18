@@ -62,17 +62,13 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure boo
 // setSessionCookie writes the session cookie with the same policy the auth
 // handler uses (None + Secure when the deployment is HTTPS).
 func setSessionCookie(w http.ResponseWriter, token string, ttl time.Duration, secure bool) {
-	sameSite := http.SameSiteStrictMode
-	if secure {
-		sameSite = http.SameSiteNoneMode
-	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: sameSite,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(ttl.Seconds()),
 	})
 }

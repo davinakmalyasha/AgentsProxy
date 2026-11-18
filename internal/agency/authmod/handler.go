@@ -638,18 +638,15 @@ func maskEmail(email string) string {
 }
 
 func (h *Handler) setCookie(w http.ResponseWriter, token string) {
-	sameSite := http.SameSiteStrictMode
-	if h.secure {
-		// Cross-site production frontend needs None + Secure.
-		sameSite = http.SameSiteNoneMode
-	}
+	// The Vercel frontend proxies /api/v1 on its own origin (rewrites), so
+	// the session is first-party and Strict is safe (and CSRF-resistant).
 	http.SetCookie(w, &http.Cookie{
 		Name:     platformauth.CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   h.secure,
-		SameSite: sameSite,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(h.jwtTTL.Seconds()),
 	})
 }

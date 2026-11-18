@@ -76,7 +76,7 @@ Google never links a staff account. Web orders require a session and bind
 `orders.user_id`; the legacy `users.lead_id` link still grants portal access.
 
 bcrypt passwords, `subtle.ConstantTimeCompare` on hashes, JWT ≥32 chars,
-cookies `HttpOnly` (+`Secure/None` in prod), no token/secret in logs
+cookies `HttpOnly` + `SameSite=Strict` (`Secure` in prod), no token/secret in logs
 (slog + Sentry redactors share one sensitive-key list).
 
 ## 5. Cache / delivery / ops

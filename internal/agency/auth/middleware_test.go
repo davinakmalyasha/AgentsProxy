@@ -32,8 +32,8 @@ func TestSetSessionCookiePolicy(t *testing.T) {
 	if !prodCookie.Secure {
 		t.Fatal("production cookie must be Secure")
 	}
-	if prodCookie.SameSite != http.SameSiteNoneMode {
-		t.Fatalf("production SameSite = %v, want None", prodCookie.SameSite)
+	if prodCookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("production SameSite = %v, want Strict", prodCookie.SameSite)
 	}
 	if prodCookie.MaxAge != 2592000 {
 		t.Fatalf("production MaxAge = %d, want 2592000", prodCookie.MaxAge)
