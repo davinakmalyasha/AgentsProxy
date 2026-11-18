@@ -636,7 +636,7 @@ func (h *Handler) orderActivity(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) whatsappLink(w http.ResponseWriter, r *http.Request) {
 	orderID := strings.TrimSpace(r.PathValue("orderId"))
-	link, err := h.store.WhatsappLink(r.Context(), orderID, h.frontendURL)
+	link, err := h.store.WhatsappLink(r.Context(), orderID, h.frontendURL, r.URL.Query().Get("message"))
 	if err != nil {
 		writeErr(w, h.logger, err)
 		return

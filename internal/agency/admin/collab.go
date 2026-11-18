@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -393,20 +394,46 @@ func (s *Store) OrderActivity(ctx context.Context, orderID string) ([]Activity, 
 	return out, rows.Err()
 }
 
-// WhatsappLink builds the client portal link for sharing.
-func (s *Store) WhatsappLink(ctx context.Context, orderID, frontendURL string) (map[string]any, error) {
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id = $1 AND deleted_at IS NULL)`, orderID).Scan(&exists); err != nil {
+// WhatsappLink builds a wa.me URL for the order's client, with the portal
+// link in the prefilled message. An empty/custom message still wins; the
+// portal link is appended so the client can always find their dashboard.
+func (s *Store) WhatsappLink(ctx context.Context, orderID, frontendURL, message string) (map[string]any, error) {
+	var (
+		whatsapp string
+		name     string
+	)
+	err := s.pool.QueryRow(ctx, `SELECT l.whatsapp, l.name
+		FROM orders o JOIN leads l ON l.id = o.lead_id
+		WHERE o.id = $1 AND o.deleted_at IS NULL`, orderID).Scan(&whatsapp, &name)
+	if err != nil {
 		return nil, err
-	}
-	if !exists {
-		return nil, pgx.ErrNoRows
 	}
 	base := strings.TrimSuffix(strings.TrimSpace(frontendURL), "/")
 	if base == "" {
 		base = "https://dfdagency.vercel.app"
 	}
-	return map[string]any{"url": base + "/client/dashboard"}, nil
+	portal := base + "/client/dashboard"
+	text := strings.TrimSpace(message)
+	if text == "" {
+		text = "Hi " + name + ", here is your DFD client portal:"
+	}
+	if !strings.Contains(text, portal) {
+		text += "\n\n" + portal
+	}
+	digits := make([]rune, 0, len(whatsapp))
+	for _, r := range whatsapp {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	target := "https://wa.me/"
+	if len(digits) > 0 {
+		target += string(digits)
+	}
+	return map[string]any{
+		"url":       target + "?text=" + url.QueryEscape(text),
+		"portalUrl": portal,
+	}, nil
 }
 
 // WriteAudit records a back-office action.
