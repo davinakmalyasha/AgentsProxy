@@ -393,7 +393,7 @@ func (s *Store) OrderActivity(ctx context.Context, orderID string) ([]Activity, 
 	return out, rows.Err()
 }
 
-// WhatsappLink builds the client tracking link for sharing.
+// WhatsappLink builds the client portal link for sharing.
 func (s *Store) WhatsappLink(ctx context.Context, orderID, frontendURL string) (map[string]any, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id = $1 AND deleted_at IS NULL)`, orderID).Scan(&exists); err != nil {
@@ -404,9 +404,9 @@ func (s *Store) WhatsappLink(ctx context.Context, orderID, frontendURL string) (
 	}
 	base := strings.TrimSuffix(strings.TrimSpace(frontendURL), "/")
 	if base == "" {
-		base = "http://localhost:3000"
+		base = "https://dfdagency.vercel.app"
 	}
-	return map[string]any{"url": base + "/track/" + orderID}, nil
+	return map[string]any{"url": base + "/client/dashboard"}, nil
 }
 
 // WriteAudit records a back-office action.

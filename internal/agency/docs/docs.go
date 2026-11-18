@@ -27,7 +27,7 @@ type Store struct {
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 // Doc fetches the data for an order's documents.
-func (s *Store) Doc(ctx context.Context, orderID, trackURL string) (pdf.DocData, error) {
+func (s *Store) Doc(ctx context.Context, orderID, frontendURL string) (pdf.DocData, error) {
 	var (
 		d       pdf.DocData
 		amount  pgtype.Numeric
@@ -49,7 +49,11 @@ func (s *Store) Doc(ctx context.Context, orderID, trackURL string) (pdf.DocData,
 	if biz.Valid {
 		d.BusinessName = biz.String
 	}
-	d.TrackURL = trackURL
+	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
+	if base == "" {
+		base = "https://dfdagency.vercel.app"
+	}
+	d.TrackURL = base + "/client/login"
 	return d, nil
 }
 
@@ -63,7 +67,7 @@ const (
 )
 
 // Serve renders the document and streams it as a download.
-func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string, kind Kind, trackURL string) {
+func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string, kind Kind, frontendURL string) {
 	// A document render must never take down the function with an opaque
 	// platform 500. Panics are logged and converted to a normal envelope.
 	defer func() {
@@ -72,7 +76,7 @@ func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string,
 			response.Internal(w)
 		}
 	}()
-	doc, err := store.Doc(r.Context(), orderID, trackURL)
+	doc, err := store.Doc(r.Context(), orderID, frontendURL)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			response.NotFound(w, "Order not found")
