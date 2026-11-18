@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,34 @@ func TestGzip_XlsxPassesThrough(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if !bytes.Equal(body, big) {
 		t.Error("xlsx body altered")
+	}
+}
+
+func TestGzip_BinaryHeaderAfterMiddlewareStripsLength(t *testing.T) {
+	body := bytes.Repeat([]byte{0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x33, 0x0a}, 512) // %PDF-1.3
+	h := Gzip(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="test.pdf"`)
+		// Handler-set length arrives after Gzip stripped it at entry; it
+		// must not truncate a compressed/passthrough wire body.
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	req := httptest.NewRequest("GET", "/api/v1/client/orders/x/invoice", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	res := rec.Result()
+	if got := res.Header.Get("Content-Encoding"); got == "gzip" {
+		t.Fatalf("pdf must pass through, got Content-Encoding %q", got)
+	}
+	if got := res.Header.Get("Content-Length"); got != "" {
+		t.Fatalf("Content-Length must be stripped, got %q", got)
+	}
+	got, _ := io.ReadAll(res.Body)
+	if !bytes.Equal(got, body) {
+		t.Fatal("pdf body altered")
 	}
 }
 

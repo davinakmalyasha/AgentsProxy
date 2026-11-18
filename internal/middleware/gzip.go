@@ -85,6 +85,16 @@ func (g *gzipRecorder) WriteHeader(status int) {
 		return
 	}
 	g.wroteHeader = true
+	// The handler may set Content-Length after Gzip stripped it at entry.
+	// The wire body can be gzipped or pass through, so never trust it.
+	g.ResponseWriter.Header().Del("Content-Length")
+	if !g.compressible() {
+		// Binary formats (.pdf, .xlsx, images) are already compressed:
+		// remove the gzip envelope and stream the bytes untouched.
+		g.passthrough = true
+		g.ResponseWriter.Header().Del("Content-Encoding")
+		g.ResponseWriter.Header().Del("Vary")
+	}
 	g.ResponseWriter.WriteHeader(status)
 }
 
