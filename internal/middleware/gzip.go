@@ -155,9 +155,11 @@ func (g *gzipRecorder) finish() {
 	if g.wroteHeader || g.passthrough {
 		return
 	}
+	g.wroteHeader = true
 	g.ResponseWriter.Header().Del("Content-Encoding")
 	g.ResponseWriter.Header().Del("Vary")
-	g.WriteHeader(http.StatusOK)
+	g.ResponseWriter.Header().Del("Content-Length")
+	g.ResponseWriter.WriteHeader(http.StatusOK)
 	if len(g.buffered) > 0 {
 		_, _ = g.ResponseWriter.Write(g.buffered)
 		g.buffered = nil
