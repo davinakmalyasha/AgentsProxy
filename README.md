@@ -38,8 +38,9 @@ supabase/functions/    deliver-notification, deliver-reminders (serverless drive
 | `/v1/{vertical}/*` | client runtime (`fnb…sports`) | `X-Client-Token` + `RequireFeature` gate |
 | `/v1/admin/*` | operator | `Bearer ADMIN_API_KEY` |
 | `/api/v1/packages|projects|articles|promos|settings` | agency public site | none / IP rate-limit |
-| `/api/v1/leads`, `/api/v1/orders` (POST) | intake | IP rate-limit + idempotency key |
-| `/api/v1/auth/*` | agency humans | JWT cookie |
+| `POST /api/v1/leads` | WhatsApp/custom inquiry | IP rate-limit |
+| `POST /api/v1/orders` | signed-in web checkout | JWT cookie + idempotency key |
+| `GET/POST /api/v1/auth/*` | agency humans | config/register/login/Google; JWT cookie for `/me`, `/logout` |
 | `/api/v1/client/*` | client portal | cookie `CLIENT,SUPERADMIN,EDITOR` |
 | `/api/v1/*` (admin) | back-office | cookie `SUPERADMIN` |
 | `/api/v1/agent/*`, `/api/agent/*`, `/mcp` | machines | bearer key (`agent` scope) |

@@ -32,10 +32,13 @@ func TestRouter_ChiRoutesRegistered(t *testing.T) {
 		"GET /settings",
 		"POST /leads",
 		"POST /orders",
-		"GET /orders/track/{orderId}",
+		"GET /auth/config",
 		"POST /auth/login",
 		"POST /auth/login/verify",
 		"POST /auth/google",
+		"POST /auth/register",
+		"POST /auth/register/verify",
+		"POST /auth/register/resend",
 		"GET /auth/me",
 		"POST /auth/change-password",
 		"GET /users",
@@ -101,6 +104,12 @@ func TestRouter_GuardsBeforeStores(t *testing.T) {
 	}
 	if code := serve("GET", "/auth/me", "", nil); code != http.StatusUnauthorized {
 		t.Errorf("GET /auth/me no cookie = %d, want 401", code)
+	}
+	if code := serve("POST", "/orders", `{}`, nil); code != http.StatusUnauthorized {
+		t.Errorf("POST /orders anonymous = %d, want 401 (login required)", code)
+	}
+	if code := serve("POST", "/auth/register", `{}`, nil); code != http.StatusServiceUnavailable {
+		t.Errorf("POST /auth/register disabled = %d, want 503 (no DB hit)", code)
 	}
 	if code := serve("GET", "/dashboard", "", nil); code != http.StatusUnauthorized {
 		t.Errorf("GET /dashboard no cookie = %d, want 401", code)

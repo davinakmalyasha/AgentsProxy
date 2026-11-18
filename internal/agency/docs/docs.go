@@ -1,6 +1,5 @@
-// Package docs owns order document data and streaming. Surfaces (admin,
-// client portal, magic-link tracker) perform their own authorization and
-// then call Serve.
+// Package docs owns order document data and streaming. Surfaces (admin and
+// client portal) perform their own authorization and then call Serve.
 package docs
 
 import (

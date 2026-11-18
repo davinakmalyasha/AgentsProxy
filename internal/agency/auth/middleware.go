@@ -2,7 +2,6 @@ package auth
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -20,7 +19,7 @@ const CookieName = "token"
 // (so revoked sessions die instantly), and injects the user actor. When the
 // session expires within 7 days the cookie is re-issued, mirroring the
 // original sliding-session behavior.
-func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration) func(http.Handler) http.Handler {
+func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(CookieName)
@@ -50,7 +49,7 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration) func(http.
 			if claims.ExpiresAt != nil && time.Until(claims.ExpiresAt.Time) < 7*24*time.Hour {
 				refreshed, err := SignJWT(secret, ttl, claims.UserID, claims.Role, tokenVersion)
 				if err == nil {
-					setSessionCookie(w, refreshed, ttl, r.TLS != nil)
+					setSessionCookie(w, refreshed, ttl, secure)
 				}
 			}
 
@@ -60,13 +59,11 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration) func(http.
 	}
 }
 
-// setSessionCookie writes the session cookie with the production-aware
-// SameSite policy (None + Secure in production for cross-site frontends).
-func setSessionCookie(w http.ResponseWriter, token string, ttl time.Duration, tls bool) {
+// setSessionCookie writes the session cookie with the same policy the auth
+// handler uses (None + Secure when the deployment is HTTPS).
+func setSessionCookie(w http.ResponseWriter, token string, ttl time.Duration, secure bool) {
 	sameSite := http.SameSiteStrictMode
-	secure := tls
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))); v == "production" {
-		secure = true
+	if secure {
 		sameSite = http.SameSiteNoneMode
 	}
 	http.SetCookie(w, &http.Cookie{

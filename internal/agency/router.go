@@ -53,6 +53,8 @@ type Deps struct {
 	// SendEmail log-only (dev); the OTP step fails closed in production.
 	ResendKey  string
 	ResendFrom string
+	// SignupEnabled gates self-service CLIENT registration.
+	SignupEnabled bool
 
 	SupabaseURL        string
 	SupabaseServiceKey string
@@ -76,17 +78,17 @@ func NewRouter(d Deps) chi.Router {
 	// Public catalog reads.
 	content.NewHandler(content.NewStore(d.Pool), logger).RegisterRoutes(r)
 
-	// Public intake writes (per-IP limited) + magic-link tracking reads.
-	intakeH := intake.NewHandler(intake.NewStore(d.Pool), docsStore, d.Pool, logger, notifier, d.JWTSecret, d.FrontendURL)
-	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(3, time.Hour))
+	cookieAuth := agencyauth.CookieAuth(d.JWTSecret, d.Pool, d.JWTTTL, d.SecureCookie)
+
+	// Intake: public lead capture, authenticated web orders.
+	intakeH := intake.NewHandler(intake.NewStore(d.Pool), d.Pool, logger)
+	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(3, time.Hour), cookieAuth)
 
 	// Human auth.
-	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.Env, d.GoogleClientID, notifier)
+	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.Env, d.GoogleClientID, notifier, d.SignupEnabled)
 	r.Route("/auth", func(r chi.Router) {
 		authH.RegisterRoutes(r, ratelimit.NewRateLimiter(5, 15*time.Minute))
 	})
-
-	cookieAuth := agencyauth.CookieAuth(d.JWTSecret, d.Pool, d.JWTTTL)
 	superGuard := func(next http.Handler) http.Handler {
 		return cookieAuth(agencyauth.RequireRole("SUPERADMIN")(next))
 	}

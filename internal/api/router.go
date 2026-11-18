@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -175,12 +176,13 @@ func NewRouter(d Deps) http.Handler {
 		Env:                d.Cfg.Env,
 		JWTSecret:          d.Cfg.AgencyJWTSecret,
 		JWTTTL:             d.Cfg.AgencyJWTTTL,
-		SecureCookie:       false,
+		SecureCookie:       strings.EqualFold(d.Cfg.Env, "production"),
 		FrontendURL:        d.Cfg.AgencyFrontend,
 		AgencyWhatsapp:     d.Cfg.AgencyWhatsapp,
 		GoogleClientID:     d.Cfg.GoogleClientID,
 		ResendKey:          d.Cfg.ResendAPIKey,
 		ResendFrom:         d.Cfg.EmailFrom,
+		SignupEnabled:      d.Cfg.SignupEnabled,
 		SupabaseURL:        d.Cfg.SupabaseURL,
 		SupabaseServiceKey: d.Cfg.SupabaseStorageKey,
 		SupabaseBucket:     d.Cfg.ReportBucket,

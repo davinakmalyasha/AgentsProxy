@@ -17,31 +17,33 @@ type ManagedUser struct {
 	Email     string    `json:"email"`
 	Role      string    `json:"role"`
 	LeadID    *int64    `json:"leadId"`
+	LeadName  *string   `json:"leadName"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // ListUsers returns users with optional role/search filters.
 func (s *Store) ListUsers(ctx context.Context, role, search string, limit, offset int) ([]ManagedUser, int64, error) {
-	where := `WHERE deleted_at IS NULL`
+	where := `WHERE u.deleted_at IS NULL`
 	args := []any{}
 	if role != "" {
 		args = append(args, role)
-		where += ` AND role = $` + itoa(len(args))
+		where += ` AND u.role = $` + itoa(len(args))
 	}
 	if strings.TrimSpace(search) != "" {
 		args = append(args, "%"+strings.TrimSpace(search)+"%")
-		where += ` AND (username ILIKE $` + itoa(len(args)) + ` OR email ILIKE $` + itoa(len(args)) + `)`
+		where += ` AND (u.username ILIKE $` + itoa(len(args)) + ` OR u.email ILIKE $` + itoa(len(args)) + `)`
 	}
 
 	var total int64
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users `+where, args...).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users u `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	args = append(args, limit, offset)
-	rows, err := s.pool.Query(ctx, `SELECT id, username, email, role, lead_id, created_at, updated_at
-		FROM users `+where+` ORDER BY created_at DESC LIMIT $`+itoa(len(args)-1)+` OFFSET $`+itoa(len(args)), args...)
+	rows, err := s.pool.Query(ctx, `SELECT u.id, u.username, u.email, u.role, u.lead_id, l.name, u.created_at, u.updated_at
+		FROM users u LEFT JOIN leads l ON l.id = u.lead_id `+where+
+		` ORDER BY u.created_at DESC LIMIT $`+itoa(len(args)-1)+` OFFSET $`+itoa(len(args)), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -52,11 +54,13 @@ func (s *Store) ListUsers(ctx context.Context, role, search string, limit, offse
 		var (
 			u    ManagedUser
 			lead pgtype.Int8
+			name pgtype.Text
 		)
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &lead, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &lead, &name, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		u.LeadID = int8Ptr(lead)
+		u.LeadName = textPtr(name)
 		out = append(out, u)
 	}
 	return out, total, rows.Err()
@@ -128,14 +132,17 @@ func (s *Store) GetUser(ctx context.Context, id int64) (*ManagedUser, error) {
 	var (
 		u    ManagedUser
 		lead pgtype.Int8
+		name pgtype.Text
 	)
-	err := s.pool.QueryRow(ctx, `SELECT id, username, email, role, lead_id, created_at, updated_at
-		FROM users WHERE id = $1 AND deleted_at IS NULL`, id,
-	).Scan(&u.ID, &u.Username, &u.Email, &u.Role, &lead, &u.CreatedAt, &u.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT u.id, u.username, u.email, u.role, u.lead_id, l.name, u.created_at, u.updated_at
+		FROM users u LEFT JOIN leads l ON l.id = u.lead_id
+		WHERE u.id = $1 AND u.deleted_at IS NULL`, id,
+	).Scan(&u.ID, &u.Username, &u.Email, &u.Role, &lead, &name, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	u.LeadID = int8Ptr(lead)
+	u.LeadName = textPtr(name)
 	return &u, nil
 }
 

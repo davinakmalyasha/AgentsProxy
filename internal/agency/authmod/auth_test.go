@@ -1,10 +1,16 @@
 package auth
 
 import (
+	"context"
 	"testing"
 
 	platformauth "github.com/davinakmalyasha/agents-proxy/internal/agency/auth"
 )
+
+type stubNotifier struct{ configured bool }
+
+func (s stubNotifier) SendEmail(context.Context, string, string, string) error { return nil }
+func (s stubNotifier) ResendConfigured() bool                                  { return s.configured }
 
 func TestNormalizeEmail(t *testing.T) {
 	if got := NormalizeEmail("  Admin@DFDagency.COM "); got != "admin@dfdagency.com" {
@@ -19,6 +25,28 @@ func TestPasswordPolicy(t *testing.T) {
 	for _, bad := range []string{"short1", "12345678", "password", "abc", ""} {
 		if ValidPassword(bad) {
 			t.Fatalf("expected %q to be rejected", bad)
+		}
+	}
+}
+
+func TestSignupAvailable(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      string
+		enabled  bool
+		notifier stubNotifier
+		want     bool
+	}{
+		{"prod ready", "production", true, stubNotifier{true}, true},
+		{"prod no email", "production", true, stubNotifier{false}, false},
+		{"prod switch off", "production", false, stubNotifier{true}, false},
+		{"dev no email logs", "development", true, stubNotifier{false}, true},
+		{"dev switch off", "development", false, stubNotifier{true}, false},
+	}
+	for _, tc := range cases {
+		h := &Handler{env: tc.env, signupEnabled: tc.enabled, notifier: tc.notifier}
+		if got := h.signupAvailable(); got != tc.want {
+			t.Errorf("%s: signupAvailable() = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

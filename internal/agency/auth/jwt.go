@@ -58,28 +58,3 @@ func ParseJWT(secret, token string) (*Claims, error) {
 	}
 	return claims, nil
 }
-
-// SignJWTWithSubject issues a token bound to an arbitrary subject (for
-// example a magic-link order session). The subject round-trips through
-// Claims.Subject so verifiers can match it without extra state.
-func SignJWTWithSubject(secret string, ttl time.Duration, subject string) (string, error) {
-	if len(secret) < 32 {
-		return "", fmt.Errorf("auth: JWT secret must be at least 32 characters")
-	}
-	now := time.Now()
-	claims := Claims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   subject,
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-			Issuer:    "dfd-agency",
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(secret))
-	if err != nil {
-		return "", fmt.Errorf("auth: sign token: %w", err)
-	}
-	return signed, nil
-}
