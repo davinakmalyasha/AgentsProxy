@@ -1,6 +1,6 @@
 # RUNBOOK — D:\MyProject\AgentsProxy
 
-> Operations guide for the deployed agents-proxy. Pair with `README.md` (what it is), `ARCHITECTURE.md` (how it's built), `docs/refinementNotes.md` (known gaps + roadmap). This file lives in the repo so any operator has context.
+> Operations guide for the deployed agents-proxy. Pair with `README.md` (what it is) and `ARCHITECTURE.md` (how it's built). This file lives in the repo so any operator has context.
 
 ---
 
