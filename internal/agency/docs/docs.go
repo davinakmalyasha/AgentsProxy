@@ -5,6 +5,7 @@ package docs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -26,7 +27,7 @@ type Store struct {
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 // Doc fetches the data for an order's documents.
-func (s *Store) Doc(ctx context.Context, orderID, trackURL string) (pdf.DocData, error) {
+func (s *Store) Doc(ctx context.Context, orderID, frontendURL string) (pdf.DocData, error) {
 	var (
 		d       pdf.DocData
 		amount  pgtype.Numeric
@@ -48,7 +49,11 @@ func (s *Store) Doc(ctx context.Context, orderID, trackURL string) (pdf.DocData,
 	if biz.Valid {
 		d.BusinessName = biz.String
 	}
-	d.TrackURL = trackURL
+	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
+	if base == "" {
+		base = "https://dfdagency.vercel.app"
+	}
+	d.TrackURL = base + "/client/login"
 	return d, nil
 }
 
@@ -62,13 +67,22 @@ const (
 )
 
 // Serve renders the document and streams it as a download.
-func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string, kind Kind, trackURL string) {
-	doc, err := store.Doc(r.Context(), orderID, trackURL)
+func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string, kind Kind, frontendURL string) {
+	// A document render must never take down the function with an opaque
+	// platform 500. Panics are logged and converted to a normal envelope.
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("docs: render panic", "order", orderID, "kind", kind, "error", rec)
+			response.Internal(w)
+		}
+	}()
+	doc, err := store.Doc(r.Context(), orderID, frontendURL)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			response.NotFound(w, "Order not found")
 			return
 		}
+		slog.Error("docs: load failed", "order", orderID, "kind", kind, "error", err)
 		response.Internal(w)
 		return
 	}
@@ -88,12 +102,15 @@ func Serve(w http.ResponseWriter, r *http.Request, store *Store, orderID string,
 		filename = fmt.Sprintf("WELCOME-%s.pdf", strings.ToUpper(first8(orderID)))
 	}
 	if err != nil {
+		slog.Error("docs: render failed", "order", orderID, "kind", kind, "error", err)
 		response.Internal(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	// Do not set Content-Length here: the global gzip middleware owns
+	// transfer encoding. A handler-set length after that middleware would
+	// describe the uncompressed bytes and truncate the wire response.
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

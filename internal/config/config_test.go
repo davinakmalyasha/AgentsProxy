@@ -213,6 +213,16 @@ func TestLoad_PoolSizesStayPositive(t *testing.T) {
 	}
 }
 
+func TestFrontendURLProductionIgnoresLocalhost(t *testing.T) {
+	t.Setenv("FRONTEND_URL", "http://localhost:3000")
+	if got := frontendURL("production", "https://dfdagency.vercel.app"); got != "https://dfdagency.vercel.app" {
+		t.Fatalf("production frontend = %q, want public URL", got)
+	}
+	if got := frontendURL("development", "http://localhost:3000"); got != "http://localhost:3000" {
+		t.Fatalf("development frontend = %q, want localhost", got)
+	}
+}
+
 func TestLoad_ProductionRejectsWildcardCORS(t *testing.T) {
 	t.Setenv("DATABASE_URL", "x")
 	t.Setenv("LLM_API_KEY", "x")

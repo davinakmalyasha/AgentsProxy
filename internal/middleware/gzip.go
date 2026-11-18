@@ -85,7 +85,27 @@ func (g *gzipRecorder) WriteHeader(status int) {
 		return
 	}
 	g.wroteHeader = true
+	// The handler may set Content-Length after Gzip stripped it at entry.
+	// The wire body can be gzipped or pass through, so never trust it.
+	g.ResponseWriter.Header().Del("Content-Length")
+	if !g.compressible() {
+		// Binary formats (.pdf, .xlsx, images) are already compressed:
+		// remove the gzip envelope and stream the bytes untouched.
+		g.passthrough = true
+		g.ResponseWriter.Header().Del("Content-Encoding")
+		g.ResponseWriter.Header().Del("Vary")
+	}
 	g.ResponseWriter.WriteHeader(status)
+	// A handler may write a small body before calling WriteHeader. Flush
+	// that buffer now; finish() will not run for an explicit header.
+	if len(g.buffered) > 0 {
+		if g.passthrough {
+			_, _ = g.ResponseWriter.Write(g.buffered)
+		} else {
+			_, _ = g.writer().Write(g.buffered)
+		}
+		g.buffered = nil
+	}
 }
 
 func (g *gzipRecorder) Write(b []byte) (int, error) {
@@ -135,9 +155,11 @@ func (g *gzipRecorder) finish() {
 	if g.wroteHeader || g.passthrough {
 		return
 	}
+	g.wroteHeader = true
 	g.ResponseWriter.Header().Del("Content-Encoding")
 	g.ResponseWriter.Header().Del("Vary")
-	g.WriteHeader(http.StatusOK)
+	g.ResponseWriter.Header().Del("Content-Length")
+	g.ResponseWriter.WriteHeader(http.StatusOK)
 	if len(g.buffered) > 0 {
 		_, _ = g.ResponseWriter.Write(g.buffered)
 		g.buffered = nil

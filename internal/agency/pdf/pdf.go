@@ -142,7 +142,7 @@ func Welcome(d DocData) ([]byte, error) {
 	lines := []string{
 		"Package: " + d.PackageName,
 		"Order ID: " + d.OrderID,
-		"Track your progress any time:",
+		"Open your client portal any time:",
 		"  " + d.TrackURL,
 		"",
 		"What happens next:",
