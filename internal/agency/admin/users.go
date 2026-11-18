@@ -102,6 +102,9 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, username, email, role 
 	}
 	if role != nil {
 		add("role", *role)
+		// A role change must invalidate existing tokens; the middleware also
+		// reads the live role, but a re-login keeps the JWT payload honest.
+		sets = append(sets, `token_version = token_version + 1`)
 	}
 	if clearLead {
 		add("lead_id", nil)

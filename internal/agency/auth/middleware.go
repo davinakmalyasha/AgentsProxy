@@ -35,11 +35,14 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure boo
 				return
 			}
 
-			var tokenVersion int
-			var deletedAt *time.Time
+			var (
+				tokenVersion int
+				deletedAt    *time.Time
+				dbRole       string
+			)
 			err = pool.QueryRow(r.Context(),
-				`SELECT token_version, deleted_at FROM users WHERE id = $1`, claims.UserID,
-			).Scan(&tokenVersion, &deletedAt)
+				`SELECT token_version, deleted_at, role FROM users WHERE id = $1`, claims.UserID,
+			).Scan(&tokenVersion, &deletedAt, &dbRole)
 			if err != nil || deletedAt != nil || tokenVersion != claims.TokenVersion {
 				clearSessionCookie(w, secure)
 				response.Unauthorized(w, "Unauthorized: Token revoked")
@@ -47,13 +50,15 @@ func CookieAuth(secret string, pool *pgxpool.Pool, ttl time.Duration, secure boo
 			}
 
 			if claims.ExpiresAt != nil && time.Until(claims.ExpiresAt.Time) < 7*24*time.Hour {
-				refreshed, err := SignJWT(secret, ttl, claims.UserID, claims.Role, tokenVersion)
+				refreshed, err := SignJWT(secret, ttl, claims.UserID, dbRole, tokenVersion)
 				if err == nil {
 					setSessionCookie(w, refreshed, ttl, secure)
 				}
 			}
 
-			actor := Actor{Type: "user", UserID: claims.UserID, Role: claims.Role}
+			// Use the live role, not the role frozen in the token, so a
+			// demotion/promotion applies immediately.
+			actor := Actor{Type: "user", UserID: claims.UserID, Role: dbRole}
 			next.ServeHTTP(w, r.WithContext(WithActor(r.Context(), actor)))
 		})
 	}
