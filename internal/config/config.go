@@ -164,7 +164,7 @@ func Load() (*Config, error) {
 		ReportMaxBytes:          getenvPositiveInt("REPORT_MAX_BYTES", 15000000),
 		AgencyJWTSecret:         os.Getenv("JWT_SECRET"),
 		AgencyJWTTTL:            time.Duration(getenvPositiveInt("JWT_TTL_HOURS", 720)) * time.Hour,
-		AgencyFrontend:          getenv("FRONTEND_URL", frontendDefault),
+		AgencyFrontend:          frontendURL(env, frontendDefault),
 		AgencyWhatsapp:          os.Getenv("AGENCY_WHATSAPP"),
 		GoogleClientID:          strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
 		ResendAPIKey:            os.Getenv("RESEND_API_KEY"),
@@ -211,6 +211,16 @@ func Load() (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// frontendURL never lets a leftover localhost value reach a production
+// deployment (invoice/welcome links and portal emails would point nowhere).
+func frontendURL(env, def string) string {
+	v := strings.TrimRight(getenv("FRONTEND_URL", def), "/")
+	if strings.EqualFold(env, "production") && strings.Contains(strings.ToLower(v), "localhost") {
+		return def
+	}
+	return v
 }
 
 func getenv(k, def string) string {
