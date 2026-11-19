@@ -307,16 +307,17 @@ func (s *Store) VerifySignup(ctx context.Context, signupID int64, code string) (
 	defer tx.Rollback(ctx)
 
 	var (
-		username string
-		email    string
-		hash     string
-		attempts int
-		expiry   time.Time
-		consumed pgtype.Timestamptz
+		username     string
+		email        string
+		passwordHash string
+		codeHash     string
+		attempts     int
+		expiry       time.Time
+		consumed     pgtype.Timestamptz
 	)
-	err = tx.QueryRow(ctx, `SELECT username, email, code_hash, attempts, expires_at, consumed_at
+	err = tx.QueryRow(ctx, `SELECT username, email, password_hash, code_hash, attempts, expires_at, consumed_at
 		FROM signup_requests WHERE id = $1 FOR UPDATE`, signupID,
-	).Scan(&username, &email, &hash, &attempts, &expiry, &consumed)
+	).Scan(&username, &email, &passwordHash, &codeHash, &attempts, &expiry, &consumed)
 	if err != nil {
 		return User{}, 0, false, false, err
 	}
@@ -326,7 +327,7 @@ func (s *Store) VerifySignup(ctx context.Context, signupID int64, code string) (
 	if attempts >= OTPMaxAttempts {
 		return User{}, 0, false, true, nil
 	}
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(HashOTPCode(code))) != 1 {
+	if subtle.ConstantTimeCompare([]byte(codeHash), []byte(HashOTPCode(code))) != 1 {
 		if _, err := tx.Exec(ctx, `UPDATE signup_requests SET attempts = attempts + 1 WHERE id = $1`, signupID); err != nil {
 			return User{}, 0, false, false, err
 		}
@@ -368,7 +369,7 @@ func (s *Store) VerifySignup(ctx context.Context, signupID int64, code string) (
 			VALUES ($1,$2,$3,'CLIENT')
 			ON CONFLICT DO NOTHING
 			RETURNING id, username, email, role, token_version`,
-			candidate, email, hash,
+			candidate, email, passwordHash,
 		).Scan(&u.ID, &u.Username, &u.Email, &u.Role, &version)
 		if err == nil {
 			break
