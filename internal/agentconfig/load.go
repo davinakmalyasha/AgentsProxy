@@ -13,12 +13,12 @@ import (
 
 // Load parses every tenant under tenants/<slug>/.
 //
-// Tenants are discovered from tenants/: every subdirectory except
-// _template is a tenant. Tools and backend are compiled Go, not folders
-// the loader reads -- a tenant's code reaches the binary through blank
-// imports in main.go, while this loader reads only the declarative
-// parts (memory, skills, mcp). The two halves meet at boot validation,
-// which checks the loaded config against the live tool registry.
+// Tenants are discovered from tenants/: every visible subdirectory is a
+// tenant. Tools and backend are compiled Go, not folders the loader reads
+// -- a tenant's code reaches the binary through blank imports in main.go,
+// while this loader reads only the declarative parts (memory, skills, mcp).
+// The two halves meet at boot validation, which checks the loaded config
+// against the live tool registry.
 //
 // It does not validate against a tool registry; call Validate with the live
 // registry once the tools are built. Separation matters: config can be
@@ -105,8 +105,8 @@ func DirForSlug(slug string) (string, error) {
 	return "", fmt.Errorf("unknown tenant %q", slug)
 }
 
-// listTenants returns the non-template directories under a folder of the
-// embedded tree (tenants/ at top level, _template skipped).
+// listTenants returns the live directories under a folder of the
+// embedded tree. Directories beginning with "_" are intentionally ignored.
 func listTenants(folder string) (map[string]bool, error) {
 	entries, err := fs.ReadDir(tenantembed.AgentsFS, folder)
 	if err != nil {
@@ -115,7 +115,7 @@ func listTenants(folder string) (map[string]bool, error) {
 	out := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") {
-			continue // _template is a starting point, not a live tenant
+			continue
 		}
 		out[e.Name()] = true
 	}

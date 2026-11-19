@@ -206,6 +206,28 @@ curl -X PATCH https://<host>/v1/admin/clients/<id> \
 
 ---
 
+## 8a. Tenant hygiene (Centrum only)
+
+Production is intentionally single-tenant for the client plane: `centrum`.
+The paused `dfd-agency` row is retained only because its `frontend_origins`
+entry powers CORS for the live DFD Agency site.
+
+Demo/test tenants left behind by local integration runs are removed with:
+
+```bash
+psql "$DATABASE_ADMIN_URL" -f scripts/prune-demo-tenants.sql
+```
+
+The script keeps `centrum` and `dfd-agency`, deletes every other
+`tenant_id` from every table (including orphan rows such as `tool-test`),
+then deletes the extra `clients` rows.
+
+Never run the DB-backed integration suite against the production
+`DATABASE_URL`. Point local tests at a disposable database; CI already
+uses a local Postgres service.
+
+---
+
 ## 9. Schema Migrations
 
 Migrations run automatically on boot via `internal/db/migrate.go`. Each migration is wrapped in a `pg_advisory_xact_lock(734561)` to keep parallel boots from racing on `CREATE EXTENSION pgcrypto`.

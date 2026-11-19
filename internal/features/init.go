@@ -8,7 +8,8 @@ package features
 //  3. blank-import it from cmd/server/main.go
 //
 // To add a custom (per-tenant) feature:
-//  1. copy internal/features/_template/ to tenants/<slug>/backend/<name>/
+//  1. create a package under tenants/<slug>/backend/<name>/ following
+//     the existing centrum-badminton features
 //  2. edit the feature, set VerticalSlugs to the tenant's vertical
 //  3. blank-import it from cmd/server/main.go
 //
