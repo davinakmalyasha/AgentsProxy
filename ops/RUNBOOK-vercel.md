@@ -32,7 +32,7 @@ Set in the dashboard, never in git.
 | `DB_POOL_MIN` | `0` | No warm connections — there is no long-lived process |
 | `DB_POOL_MAX` | `2` | **Per instance.** The default of 20 would let 20 concurrent lambdas open 400 connections into Supabase |
 | `TRUSTED_PROXY_CIDRS` | Vercel egress ranges | Without it `internal/api/clientip.go` ignores `X-Forwarded-For`, every client buckets as one IP, and you rate-limit yourself into `429`s |
-| `ALLOW_ORIGINS` | comma-separated client origins | `*` in prod defeats the CORS tightening that `ENV=production` enables |
+| `ALLOW_ORIGINS` | optional fallback only | CORS is normally DB-backed through `frontend_origins` + `origin_suffix_rules`. Keep this only as an emergency/debug fallback; `*` in prod defeats the `ENV=production` tightening. |
 | `ENV` | `production` | Tightens CORS |
 | `DATABASE_ADMIN_URL` | direct **5432**, superuser | Migrations + admin endpoints. Skipped on cold start when `RUN_MIGRATIONS=false` |
 | `REDIS_URL` | `rediss://…` **in ap-southeast-1 (Singapore)** | Cache, quota, rate limits — every request pays 1–3 sequential Redis round trips, so a cross-region Upstash adds 100–500ms per request. Same-region (`sin1` ↔ ap-southeast-1) keeps them at ~1–2ms. |

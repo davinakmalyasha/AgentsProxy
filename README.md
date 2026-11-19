@@ -10,6 +10,14 @@ Supabase Postgres (shared schema + `tenant_id` + RLS) · **Cache:** Redis 8 ·
 Docs: `README.md` (this file = what it is) · `ARCHITECTURE.md` (how it works) ·
 `docs/GOVERNANCE.md` (branch/DDL/test rules) · `RUNBOOK.md` (ops).
 
+## Live tenants
+
+The client plane intentionally has one live tenant: `centrum` (Centrum
+Badminton, vertical `sports`). The paused `dfd-agency` row in `clients` is
+not a customer tenant; it exists only so its `frontend_origins` entry can
+authorize CORS for the live DFD Agency site. See `RUNBOOK.md` §8a for the
+prune script and tenant hygiene.
+
 ## Layout
 
 ```
