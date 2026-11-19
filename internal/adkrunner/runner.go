@@ -188,6 +188,14 @@ func (r *Runner) UpdateProject(p *agentconfig.Project) {
 	}
 }
 
+// AgentEnabled reports whether a configured project allows the agent. A
+// tenant with no project folder keeps the historical base-prompt behaviour
+// (true); a project with agent.enabled=false is explicitly off.
+func (r *Runner) AgentEnabled(tenantID string) bool {
+	p := r.projectFor(tenantID)
+	return p == nil || p.Agent.Enabled
+}
+
 // TenantSlugs lists tenants with serving configs (for admin health).
 func (r *Runner) TenantSlugs() []string {
 	r.mu.RLock()

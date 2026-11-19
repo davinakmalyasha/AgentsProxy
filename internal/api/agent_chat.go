@@ -108,6 +108,10 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	if !quarantineCheck(w, tenant) {
 		return
 	}
+	if h.ADK != nil && !h.ADK.AgentEnabled(tenant) {
+		writeJSONError(w, http.StatusServiceUnavailable, "agent not enabled for this project")
+		return
+	}
 	vertical := req.Vertical
 	if vertical == "" {
 		vertical = "sports"
@@ -248,6 +252,10 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := u.TenantID
 	if !quarantineCheck(w, tenant) {
+		return
+	}
+	if h.ADK != nil && !h.ADK.AgentEnabled(tenant) {
+		writeJSONError(w, http.StatusServiceUnavailable, "agent not enabled for this project")
 		return
 	}
 	vertical := req.Vertical
