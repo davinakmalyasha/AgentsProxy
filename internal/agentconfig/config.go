@@ -1,20 +1,20 @@
-// Package agentconfig loads and validates the per-tenant agent
-// configuration that lives in tenants/<slug>/:
+// Package agentconfig loads and validates the per-project agent
+// configuration that lives in projects/<slug>/:
 //
-//	tools/    tool implementations (Go, compiled)
-//	skills/   procedures (markdown, always injected)
-//	memory/   prompt, knowledge, identity (markdown + JSON)
-//	backend/  the tenant's app backend (Go, compiled)
+//	project.json   identity, schema, feature and agent settings
+//	agent/         persona, skills, MCP config (declarative data)
+//	backend/       project HTTP features (Go, compiled)
+//	agent/tools/   project-specific agent tools (Go, compiled)
+//	migrations/    project schema migrations (SQL, applied per project)
 //
 // The split this package enforces:
 //
-//	declaration -> data      prompts, skills, knowledge
-//	implementation -> code   the Run functions in tenants/<slug>/tools
-//	                        and the feature handlers in tenants/<slug>/backend
+//	declaration -> data      persona, skills, MCP servers
+//	implementation -> code   project backend handlers and tools
 //
-// A tenant folder can therefore change what its agent knows without a
+// A project folder can therefore change what its agent knows without a
 // rebuild, but it can never introduce new behaviour or a new SQL statement.
-// That asymmetry is deliberate: the tenant guarantee lives in the
+// That asymmetry is deliberate: the project guarantee lives in the
 // implementations (tenantID as the first argument, WHERE tenant_id, and RLS
 // beneath both), so making those pluggable from a file would be a security
 // downgrade.
@@ -26,42 +26,77 @@ package agentconfig
 
 import (
 	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 )
 
-// Project is one tenant's agent configuration.
+// Project is one client project's configuration. A project and a tenant
+// are the same identity: project.json's slug is clients.tenant_id.
 type Project struct {
-	// Slug is the tenant id it serves, from tenants/<dir>/memory/project.json.
+	// Slug is the tenant id it serves, from projects/<dir>/project.json.
 	// Lowercase, no spaces: it is an identifier, not a label.
 	Slug string
 	// Display is the human name, used in logs and the MCP description.
 	Display string
 	// Contact is the owner contact quoted in refusal and quota replies
 	// (client tier). Optional; empty falls back to the platform default.
-	// It lives here rather than in SystemPrompt.md so shared code can
-	// address the tenant without parsing prose.
 	Contact string
-	// Vertical decides which feature set the tenant's tools come from.
+	// Vertical decides which feature set the project's tools come from.
 	Vertical string
-	// SystemPrompt is the tenant-level persona and house rules.
+	// Schema is the Postgres schema that owns this project's business
+	// tables. Legacy Centrum uses "public"; every new project uses
+	// "project_<slug>". The runtime sets search_path from this value.
+	Schema string
+	// SystemPrompt is the project-level persona and house rules, loaded
+	// from agent/agent.md.
 	SystemPrompt string
-	// Information is the long-lived knowledge the agent may state as fact:
-	// price bands, opening hours, policies.
+	// Information is retained for prompt compatibility. New projects put
+	// business facts in the database and reach them through tools, so
+	// this is normally empty.
 	Information []Document
 	// Skills are procedures -- how to close the day, how to handle a
 	// cancellation. Every skill is injected whole, every turn.
 	Skills []Skill
+	// Agent is the project's agent configuration.
+	Agent AgentConfig
 }
 
-// Document is one file under Information/.
+// AgentConfig is the declarative half of a project's agent.
+type AgentConfig struct {
+	// Enabled is explicit. A project can exist without an agent.
+	Enabled bool `json:"enabled"`
+	// Model overrides the platform model for this project (optional).
+	Model string `json:"model"`
+	// Tools is an optional allow-list of tool names. Empty means "all
+	// tools available to the role", preserving the current behaviour.
+	Tools []string `json:"tools"`
+	// MCPFile is the project-relative path to the MCP server config,
+	// normally agent/mcp.json.
+	MCPFile string `json:"mcp"`
+	// MCP lists external MCP servers this project may use. Loaded from
+	// MCPFile; not serialized in project.json.
+	MCP []MCPServer `json:"-"`
+}
+
+// MCPServer is one external MCP endpoint configured for a project.
+type MCPServer struct {
+	Name  string   `json:"name"`
+	URL   string   `json:"url"`
+	Tools []string `json:"tools"`
+}
+
+// Document is one knowledge document. Kept for prompt compatibility; new
+// projects should prefer live data through tools over static memory.
 type Document struct {
 	// Name is the file's base name, used for logging and for the budget.
 	Name string
+	// Body is the document text.
 	Body string
 }
 
-// Skill is one .md file under tenants/<slug>/skills/. Every skill is
-// injected whole, every turn: a tenant's skills file is the procedures it
+// Skill is one .md file under projects/<slug>/agent/skills/. Every skill is
+// injected whole, every turn: a project's skills file is the procedures it
 // wants followed, and a procedure injected only sometimes is followed only
 // sometimes. If the file ever grows noisy enough that always-on hurts, split
 // it -- do not add a matching layer on top.
@@ -71,7 +106,8 @@ type Skill struct {
 	// Title is the first "# " heading, or the file name. It is what the
 	// assembled prompt calls the procedure.
 	Title string
-	Body  string
+	// Body is the skill text.
+	Body string
 }
 
 // Budget is the per-layer size ceiling. These strings go straight into a
@@ -87,16 +123,19 @@ type Budget struct {
 // DefaultBudget is deliberately generous but finite.
 func DefaultBudget() Budget {
 	return Budget{
-		MaxSystemPromptRunes: 8_000,
+		MaxSystemPromptRunes: 16_000,
 		MaxInformationRunes:  32_000,
 		MaxSkillRunes:        6_000,
 		MaxTotalRunes:        64_000,
 	}
 }
 
+var schemaRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+
 // Validate checks the project for the mistakes that would otherwise
 // surface as a broken agent rather than a failed boot: bad slug, missing
-// vertical, missing/empty skills, blown size budgets.
+// vertical, bad schema, empty agent prompt, blown budgets, invalid MCP
+// servers.
 func Validate(p *Project, b Budget) error {
 	var errs []string
 	add := func(format string, args ...any) {
@@ -110,6 +149,14 @@ func Validate(p *Project, b Budget) error {
 	}
 	if p.Vertical == "" {
 		add("vertical is required")
+	}
+	if p.Schema == "" {
+		add("schema is required (use public for the legacy Centrum project)")
+	} else if !schemaRe.MatchString(p.Schema) {
+		add("schema %q must match %s", p.Schema, schemaRe.String())
+	}
+	if p.Schema == "public" && p.Slug != "centrum" {
+		add("only the legacy centrum project may use the public schema")
 	}
 
 	for _, s := range p.Skills {
@@ -130,11 +177,47 @@ func Validate(p *Project, b Budget) error {
 		info += len([]rune(d.Body))
 	}
 	if info > b.MaxInformationRunes {
-		add("Information/ totals %d runes, over the %d budget; "+
+		add("Information totals %d runes, over the %d budget; "+
 			"at this size it wants retrieval, not prompt injection", info, b.MaxInformationRunes)
 	}
 	if n := len([]rune(p.SystemPrompt)); n > b.MaxSystemPromptRunes {
-		add("SystemPrompt.md is %d runes, over the %d budget", n, b.MaxSystemPromptRunes)
+		add("agent/agent.md is %d runes, over the %d budget", n, b.MaxSystemPromptRunes)
+	}
+
+	if p.Agent.Enabled {
+		if strings.TrimSpace(p.SystemPrompt) == "" {
+			add("agent.enabled is true but agent/agent.md is empty")
+		}
+		seenMCP := map[string]bool{}
+		for _, srv := range p.Agent.MCP {
+			if strings.TrimSpace(srv.Name) == "" {
+				add("an MCP server has no name")
+				continue
+			}
+			if seenMCP[srv.Name] {
+				add("duplicate MCP server %q", srv.Name)
+			}
+			seenMCP[srv.Name] = true
+			if srv.URL == "" {
+				add("MCP server %q has no url", srv.Name)
+				continue
+			}
+			u, err := url.Parse(srv.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				add("MCP server %q has invalid url %q", srv.Name, srv.URL)
+			}
+		}
+		seenTool := map[string]bool{}
+		for _, name := range p.Agent.Tools {
+			if strings.TrimSpace(name) == "" {
+				add("agent.tools contains an empty name")
+				continue
+			}
+			if seenTool[name] {
+				add("duplicate agent tool %q", name)
+			}
+			seenTool[name] = true
+		}
 	}
 
 	if len(errs) == 0 {

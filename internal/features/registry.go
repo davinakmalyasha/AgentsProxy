@@ -6,6 +6,7 @@ package features
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +35,11 @@ type Feature struct {
 	// (the feature is just a validation contract over
 	// tenant_records, served by the records adapter).
 	Routes func(chi.Router, BuilderDeps)
+
+	// PublicRead marks a project feature whose GET routes are safe for
+	// the unauthenticated public landing read (facilities, pricing,
+	// availability). It has no effect on the legacy global registry.
+	PublicRead bool
 
 	// ValidatePayload runs on POST/PATCH. Nil = accept anything.
 	ValidatePayload func(json.RawMessage) error
@@ -128,4 +134,99 @@ func hasFeature(name string) bool {
 	defer mu.RUnlock()
 	_, ok := all[strings.ToLower(strings.TrimSpace(name))]
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// Project-scoped features
+// ---------------------------------------------------------------------------
+//
+// Platform features (records, booking, menu, ...) live in the global
+// registry above and are shared by every tenant. Project features are owned
+// by exactly one project and are mounted under /v1/p/<slug>/..., so two
+// projects may both implement a feature named "bookings" without colliding.
+//
+// The legacy Centrum backend still registers into the global registry to keep
+// /v1/sports/... working unchanged. New projects use RegisterProject.
+
+var (
+	projectMu        sync.RWMutex
+	projectFeatures  = map[string]map[string]Feature{}
+	projectVerticals = map[string]string{}
+	projectSlugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+)
+
+// RegisterProject adds a feature owned by one project. The feature name is
+// scoped to the project; duplicate names for the same project panic at boot.
+func RegisterProject(project, vertical string, f Feature) {
+	project = strings.ToLower(strings.TrimSpace(project))
+	name := strings.ToLower(strings.TrimSpace(f.Name))
+	if project == "" {
+		panic("features.RegisterProject: empty project")
+	}
+	if !projectSlugRe.MatchString(project) {
+		panic("features.RegisterProject: invalid project slug " + project)
+	}
+	if name == "" {
+		panic("features.RegisterProject: empty feature name")
+	}
+	projectMu.Lock()
+	defer projectMu.Unlock()
+	if projectFeatures[project] == nil {
+		projectFeatures[project] = map[string]Feature{}
+	}
+	if _, exists := projectFeatures[project][name]; exists {
+		panic("features.RegisterProject: duplicate feature " + project + "/" + name)
+	}
+	f.Name = name
+	f.Kind = strings.ToLower(strings.TrimSpace(f.Kind))
+	if len(f.VerticalSlugs) == 0 {
+		f.VerticalSlugs = nil
+	}
+	projectFeatures[project][name] = f
+	if vertical != "" {
+		projectVerticals[project] = strings.ToLower(strings.TrimSpace(vertical))
+	}
+}
+
+// ProjectFeatures returns a stable, sorted slice of one project's features.
+func ProjectFeatures(project string) []Feature {
+	project = strings.ToLower(strings.TrimSpace(project))
+	projectMu.RLock()
+	defer projectMu.RUnlock()
+	m := projectFeatures[project]
+	out := make([]Feature, 0, len(m))
+	for _, f := range m {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ProjectVertical returns the vertical registered for a project.
+func ProjectVertical(project string) string {
+	project = strings.ToLower(strings.TrimSpace(project))
+	projectMu.RLock()
+	defer projectMu.RUnlock()
+	return projectVerticals[project]
+}
+
+// RegisteredProjects returns every project that registered at least one
+// feature, sorted.
+func RegisteredProjects() []string {
+	projectMu.RLock()
+	defer projectMu.RUnlock()
+	out := make([]string, 0, len(projectFeatures))
+	for p := range projectFeatures {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resetProjectRegistryForTest clears project-scoped registrations. Test-only.
+func resetProjectRegistryForTest() {
+	projectMu.Lock()
+	defer projectMu.Unlock()
+	projectFeatures = map[string]map[string]Feature{}
+	projectVerticals = map[string]string{}
 }

@@ -53,7 +53,7 @@ func LoadProjectsCollect(all []Tool) (good map[string]*agentconfig.Project, bad 
 		bad[dir] = fmt.Errorf("load agent projects: %w", lerr).Error()
 	}
 	if len(projects) == 0 {
-		return nil, bad, fmt.Errorf("load agent projects: no tenants")
+		return nil, bad, fmt.Errorf("load agent projects: no projects")
 	}
 	good = projects
 
@@ -78,12 +78,17 @@ func LoadProjectsCollect(all []Tool) (good map[string]*agentconfig.Project, bad 
 	sort.Strings(slugs)
 
 	for _, slug := range slugs {
+		if !good[slug].Agent.Enabled {
+			// A project may exist without an agent. Do not quarantine it
+			// because it has no tools; its REST features still serve.
+			continue
+		}
 		known := map[string]bool{}
 		for _, t := range byTenant[slug] {
 			known[t.Name] = true
 		}
 		if len(known) == 0 {
-			bad[slug] = fmt.Sprintf("tenant %q has no tools registered; an agent with no tools cannot serve", slug)
+			bad[slug] = fmt.Sprintf("project %q has agent.enabled=true but no tools registered; an agent with no tools cannot serve", slug)
 			delete(good, slug)
 			continue
 		}

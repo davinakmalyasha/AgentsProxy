@@ -18,6 +18,11 @@ not a customer tenant; it exists only so its `frontend_origins` entry can
 authorize CORS for the live DFD Agency site. See `RUNBOOK.md` §8a for the
 prune script and tenant hygiene.
 
+New projects are not shared vertical code: each one gets
+`projects/<slug>/` and its own Postgres schema (`project_<slug>`). Centrum
+is the one legacy project still on `public` and `/v1/sports/...`; new
+frontends use `/v1/p/<slug>/...`.
+
 ## Layout
 
 ```
@@ -28,10 +33,13 @@ internal/features/     client runtime: registry + gate + vertical builder
 internal/agency/       DFD agency backend (chi): content, intake, client,
                        admin, auth, agent, docs, misc, mcpserver
 internal/agency/auth/  JWT cookies (humans) + SHA-256 bearer keys (machines)
-tenants/<slug>/        per-client: backend/* (custom features), tools/,
-                       memory/, skills/ (embedded via tenantembed.go)
+projects/<slug>/       one client project: project.json, migrations/,
+                       backend/ (HTTP features), agent/ (agent.md, skills,
+                       mcp.json, tools) � generated imports in
+                       cmd/server/projects_gen.go
 internal/{config,db,cache,middleware,llm,auth,quota,notify,reminder,...}
-internal/db/migrations/  single numbered chain (proxy 001-067 + agency 068+)
+internal/db/migrations/  platform chain (proxy + agency + project schema support)
+projectembed.go         embeds every project.json, agent config, and migrations
 supabase/functions/    deliver-notification, deliver-reminders (serverless driver)
 ```
 
@@ -43,7 +51,8 @@ supabase/functions/    deliver-notification, deliver-reminders (serverless drive
 | `/v1/chat`, `/v1/agent/*` | client sites, widgets | `X-Client-Token` / public (rate-limited) |
 | `/v1/auth/*` | staff login | email+password → `X-Session-Token` |
 | `/v1/reports/*` | xlsx downloads | token-in-URL, 30-min TTL |
-| `/v1/{vertical}/*` | client runtime (`fnb…sports`) | `X-Client-Token` + `RequireFeature` gate |
+| `/v1/{vertical}/*` | platform + legacy Centrum runtime | `X-Client-Token` + `RequireFeature` gate |
+| `/v1/p/{slug}/*` | project-scoped runtime | `X-Client-Token` + project gate |
 | `/v1/admin/*` | operator | `Bearer ADMIN_API_KEY` |
 | `/api/v1/packages|projects|articles|promos|settings` | agency public site | none / IP rate-limit |
 | `POST /api/v1/leads` | WhatsApp/custom inquiry | IP rate-limit |
@@ -81,9 +90,13 @@ call proxy admin and a client token can't list agency leads — wrong group =
 
 ## Add a feature
 
-Shared (all tenants): copy `internal/features/shared/menu` → `.../<name>`,
-set `Name/Kind/validator`, import in `cmd/server/main.go`.
-Custom (one tenant): add a package under `tenants/<slug>/backend/<name>`
-following the existing `centrum-badminton` features; isolation test required.
-Agency: add handler under `internal/agency/<domain>/`, mount in
-`internal/agency/router.go`. `go test ./...` + curl smoke.
+Platform feature: add a package under `internal/features/shared/<name>`,
+register it in `init()`, and blank-import it in `cmd/server/main.go`.
+
+Project feature: add `projects/<slug>/backend/<name>/` and call
+`features.RegisterProject("<slug>", "<vertical>", ...)`; run
+`go generate ./...` so the generated blank imports stay current. Project
+features mount at `/v1/p/<slug>/...` and own their schema.
+
+Agency: add a handler under `internal/agency/<domain>/` and mount it in
+`internal/agency/router.go`. Run `go test ./...` + curl smoke.

@@ -76,7 +76,16 @@ func TestMigrate_Real(t *testing.T) {
 	defer pool.Close()
 
 	// Wipe state so we can verify migrations run cleanly on a fresh DB.
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS usage CASCADE; DROP TABLE IF EXISTS clients CASCADE; DROP TABLE IF EXISTS schema_migrations CASCADE;`); err != nil {
+	// Dropping only clients/usage leaves the custom tables, functions, and
+	// private schema behind; a later CREATE OR REPLACE then fails on a
+	// return-type change that would never happen on a truly empty database.
+	if _, err := pool.Exec(ctx, `
+		DROP SCHEMA IF EXISTS public CASCADE;
+		CREATE SCHEMA public;
+		GRANT USAGE ON SCHEMA public TO PUBLIC;
+		DROP SCHEMA IF EXISTS private CASCADE;
+		DROP SCHEMA IF EXISTS project_dbtest CASCADE;
+	`); err != nil {
 		t.Fatalf("wipe: %v", err)
 	}
 

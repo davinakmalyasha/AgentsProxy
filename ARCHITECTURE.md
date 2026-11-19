@@ -4,11 +4,13 @@
 
 One deployed Go binary serves two planes over one chi router:
 
-* **Client plane** (`/v1/*`) — per-tenant runtime for client businesses.
+* **Client plane** (`/v1/*`) — per-project runtime for client businesses.
   Every capability is a **feature** (`internal/features/`): core `records`
-  (always on), shared (`menu/booking/review/article/promo`, gated per client),
-  custom (`tenants/<slug>/backend/*`, same shape, isolation test required).
-  Gate = in-memory check `name ∈ client.features ∧ AllowedForVertical`.
+  (always on), platform features (`menu/booking/review/article/promo`, gated
+  per client), and project features (`projects/<slug>/backend/*`, mounted at
+  `/v1/p/<slug>/*`, isolation test required).
+  Gate = in-memory check `name ∈ client.features ∧ AllowedForVertical`; a
+  project gate also pins the tenant to the project named in the URL.
 * **Agency plane** (`/api/v1/*`, `/mcp`) — DFD's own backend: public catalog,
   intake (leads/orders), client portal, back-office admin, machine agent API.
   Single-tenant tables (`users/leads/orders/projects/...`), no RLS needed —
@@ -25,7 +27,7 @@ other's tables. A bug in invoice PDF gen can't break a court booking.
 r.Use(Recovery, SecurityHeaders, RequestID, Logging,
       StripTrailingSlash, CORSResolving, Gzip)
 r.Get("/healthz", ...)
-r.Mount("/v1", proxyRouter)     # chat, agent, auth, reports, verticals, admin
+r.Mount("/v1", proxyRouter)     # chat, agent, auth, reports, verticals, /p/<slug>, admin
 r.Mount("/api/v1", agencyRouter) # internal/agency/router.go (chi)
 r.Mount("/mcp", mcpHandler)
 ```
@@ -40,20 +42,29 @@ groups mount as leaves. One router pattern, zero `NewServeMux` left.
 Rules: identity middleware before rate-limit (limiter buckets on identity);
 `r.PathValue` works under chi (chi sets path values); method + path exact.
 
-## 3. Data: one Postgres, two table families
+## 3. Data: one Postgres, platform + project schemas
 
-* Client: `clients(token_hash,quota,status,vertical,features[])`, `usage`,
-  `tenant_records(kind,payload)`, `sports_*` custom tables. Every child table:
+* Client platform: `clients(token_hash,quota,status,vertical,features[],
+  db_schema)`, `usage`, `sports_sessions`, and the shared identity tables.
+  `clients.db_schema` routes a tenant to its business schema.
+* Project business data: one Postgres schema per project, e.g.
+  `project_centrum`/`project_acme`. Centrum is legacy and still uses
+  `public`; new projects set `"schema": "project_<slug>"` in project.json and
+  put their tables in `projects/<slug>/migrations/`. Every table still carries
   `tenant_id → clients(tenant_id) ON DELETE CASCADE` + `ENABLE+FORCE RLS` +
   policy `tenant_id = current_setting('app.tenant_id')` + `GRANT app_runtime`.
-  Handlers run in `WithTenantTx` (sets the GUC per tx) — defense in depth.
+  Handlers run in `WithTenantTx`, which sets both the GUC and `search_path`
+  from `clients.db_schema` per transaction — defense in depth.
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;
   no per-row tenant boundary (DFD is the only tenant).
 * Rules: every query parameterized (`$1`); `service_role` never touches
-  tenant tables; migrations additive-only, one chain, advisory-locked at boot
-  (`RUN_MIGRATIONS=false` on Vercel — migrate as deploy step).
+  tenant tables; migrations additive-only, checksummed, advisory-locked at
+  boot (`RUN_MIGRATIONS=false` on Vercel — migrate as deploy step).
+  Platform migrations live in `internal/db/migrations/`; project migrations
+  live in `projects/<slug>/migrations/` and are recorded in
+  `public.project_migrations` with a per-project version scope.
 * Double-booking is DB-enforced: `EXCLUDE USING gist
   (tenant_id, facility_id, tsrange(date+start,date+end))`; `23P01` → 409.
 

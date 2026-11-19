@@ -48,7 +48,7 @@ func main() {
 		slog.Error("db ping", "err", err)
 		os.Exit(1)
 	}
-	if err := db.Migrate(ctx, pool); err != nil {
+	if err := db.MigrateAll(ctx, pool); err != nil {
 		slog.Error("migrate", "err", err)
 		os.Exit(1)
 	}

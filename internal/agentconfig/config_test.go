@@ -5,21 +5,21 @@ import (
 	"testing"
 )
 
-// TestTenantsLoadFromTheTenantsTree is the one that would have caught a
-// missing or malformed tenant folder before it reached a running agent.
+// TestProjectsLoadFromTheProjectsTree is the one that would have caught a
+// missing or malformed project folder before it reached a running agent.
 // Parsing happens at boot, so this is cheap insurance that the embedded
 // tree is actually loadable.
-func TestTenantsLoadFromTheTenantsTree(t *testing.T) {
+func TestProjectsLoadFromTheProjectsTree(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(projects) == 0 {
-		t.Fatal("no tenants embedded")
+		t.Fatal("no projects embedded")
 	}
 	p, ok := projects["centrum"]
 	if !ok {
-		t.Fatalf("the centrum tenant is not embedded; got %v", keys(projects))
+		t.Fatalf("the centrum project is not embedded; got %v", keys(projects))
 	}
 	// The directory may be written however it reads best; the slug is the
 	// tenant id and must be a clean identifier, because it is what every
@@ -30,25 +30,29 @@ func TestTenantsLoadFromTheTenantsTree(t *testing.T) {
 	if p.Vertical != "sports" {
 		t.Errorf("vertical = %q, want sports", p.Vertical)
 	}
+	if p.Schema != "public" {
+		t.Errorf("schema = %q, want public", p.Schema)
+	}
+	if !p.Agent.Enabled {
+		t.Error("centrum agent should be enabled")
+	}
 	if strings.TrimSpace(p.SystemPrompt) == "" {
 		t.Error("SystemPrompt.md is empty")
-	}
-	if len(p.Information) == 0 {
-		t.Error("no Information/ documents loaded")
 	}
 	if len(p.Skills) == 0 {
 		t.Error("no skills loaded")
 	}
-	// The prompt must carry the placeholders the assembler fills, or the
-	// date and tool list never reach the model.
+	// The persona must not carry the old template placeholders: the
+	// assembler appends live date/tool context itself, and literal
+	// {{DATE}} / {{TOOLS}} would reach the model as noise.
 	for _, ph := range []string{"{{DATE}}", "{{TOOLS}}"} {
-		if !strings.Contains(p.SystemPrompt, ph) {
-			t.Errorf("SystemPrompt.md is missing the %s placeholder", ph)
+		if strings.Contains(p.SystemPrompt, ph) {
+			t.Errorf("agent.md still contains the %s placeholder", ph)
 		}
 	}
 }
 
-// TestSkillBodiesLoad: every .md under tenants/<slug>/skills/ is one skill,
+// TestSkillBodiesLoad: every .md under projects/<slug>/agent/skills/ is one skill,
 // injected whole. An empty file is a procedure that says nothing.
 func TestSkillBodiesLoad(t *testing.T) {
 	projects, err := Load()
@@ -71,12 +75,12 @@ func TestSkillBodiesLoad(t *testing.T) {
 	}
 }
 
-// TestAllDiscoveredTenantsValidate: with tools and backend compiled in,
+// TestAllDiscoveredProjectsValidate: with tools and backend compiled in,
 // the only thing that can make a tenant half-present is a malformed
 // declarative folder -- and that must fail here, not in production boot.
 // (The old cross-folder agreement check died with the four folders:
-// there is only one tenant tree now, discovered from tenants/.)
-func TestAllDiscoveredTenantsValidate(t *testing.T) {
+// there is only one project tree now, discovered from projects/.)
+func TestAllDiscoveredProjectsValidate(t *testing.T) {
 	projects, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +106,7 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 	good := &Project{
 		Slug:     "demo",
 		Vertical: "sports",
+		Schema:   "project_demo",
 	}
 	if err := Validate(good, b); err != nil {
 		t.Fatalf("a valid project was rejected: %v", err)
@@ -120,7 +125,7 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 		"no vertical":        func(p *Project) { p.Vertical = "" },
 		"a slug with spaces": func(p *Project) { p.Slug = "My Venue" },
 	} {
-		p := &Project{Slug: "demo", Vertical: "sports"}
+		p := &Project{Slug: "demo", Vertical: "sports", Schema: "project_demo"}
 		mutate(p)
 		if err := Validate(p, b); err == nil {
 			t.Errorf("%s: expected validation to fail, got nil", name)
@@ -128,7 +133,7 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 	}
 }
 
-// TestCentrumConfigIsValid runs the real embedded tenant through Validate,
+// TestCentrumConfigIsValid runs the real embedded project through Validate,
 // so a malformed folder fails here rather than in production boot.
 func TestCentrumConfigIsValid(t *testing.T) {
 	projects, err := Load()
@@ -136,7 +141,7 @@ func TestCentrumConfigIsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := projects["centrum"]
-	// Tool declarations live in tenants/<slug>/tools/*.go now, not in the
+	// Tool implementations live in projects/<slug>/agent/tools/*.go now, not in the
 	// folders, so there is no per-tool registry to check here. What this
 	// asserts is everything the folders DO own: identity, budgets, skills
 	// and knowledge.

@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
+	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 )
 
 // toolsThatReadTenantRows must never be reachable from a tier that runs

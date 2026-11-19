@@ -19,13 +19,30 @@ ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 out="$OUT_DIR/agents_proxy-$ts.sql.gz"
 
 echo "[backup] dumping $ADMIN_URL -> $out"
-# App schemas only. The platform layers (auth/storage/vault/...) are
+# App schemas only: public (platform + legacy Centrum), private, and every
+# project_<slug> schema. The platform layers (auth/storage/vault/...) are
 # Supabase-managed and covered by the platform WAL-G backups; including
 # them breaks portable restores (hosted-only extensions, pg_cron config
 # table data, event triggers) and drags platform PII (auth password
 # hashes) into the artifact.
+#
+# Build the schema list dynamically. A literal --schema='project_*' is a
+# no-op today but can make pg_dump noisy/fail when no project schema exists;
+# the query returns exactly the schemas this dump owns.
+mapfile -t schemas < <(psql "$ADMIN_URL" -Atc \
+  "SELECT nspname FROM pg_namespace
+    WHERE nspname IN ('public','private') OR nspname LIKE 'project\\_%' ESCAPE '\\'
+    ORDER BY nspname" | tr -d '\r')
+if [ "${#schemas[@]}" -eq 0 ]; then
+  echo "[backup] no app schemas found" >&2
+  exit 1
+fi
+schema_args=()
+for s in "${schemas[@]}"; do
+  schema_args+=(--schema="$s")
+done
 pg_dump --no-owner --no-privileges --clean --if-exists \
-  --schema=public --schema=private "$ADMIN_URL" | gzip -9 > "$out"
+  "${schema_args[@]}" "$ADMIN_URL" | gzip -9 > "$out"
 ls -lh "$out"
 
 # Retention: prune backups older than KEEP_DAYS.

@@ -104,6 +104,9 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 		return ct, nil
 	}
 	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
+	if p := r.projectFor(tenantID); p != nil && len(p.Agent.Tools) > 0 {
+		ts = ts.Only(p.Agent.Tools)
+	}
 	names := ts.Names()
 	adapted := make([]tool.Tool, 0, len(names))
 	for _, name := range names {

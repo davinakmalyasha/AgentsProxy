@@ -28,7 +28,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
+	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 )
 
 type harness struct {
@@ -101,7 +101,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('alpha','bravo','gamma','x','x1','x2','salon-a','klinik-a')`); err != nil {
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('alpha','bravo','gamma','x','x1','x2','salon-a','klinik-a','orig-probe','orig-probe-bad','auth-t')`); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}

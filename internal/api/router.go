@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agency"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
@@ -139,6 +141,33 @@ func NewRouter(d Deps) http.Handler {
 		for _, v := range features.VerticalsToMount(features.LiveVerticals(context.Background(), d.Pool)) {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
+		}
+
+		// Project-scoped APIs for new projects. Each project owns its
+		// handlers and its schema; /v1/p/<slug>/... cannot reach another
+		// project's router or data. Centrum keeps its legacy /v1/sports/*
+		// surface until its frontend is migrated.
+		projectCfgs, badProjects := agentconfig.LoadCollect()
+		for slug, err := range badProjects {
+			slog.Warn("project config unavailable for project routes", "project", slug, "err", err)
+		}
+		for slug, p := range projectCfgs {
+			if p.Schema == "public" {
+				continue // legacy Centrum keeps /v1/sports/*
+			}
+			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, bDeps, p.Vertical))
+		}
+		for _, project := range features.RegisteredProjects() {
+			project := project
+			if _, mounted := projectCfgs[project]; mounted {
+				continue
+			}
+			vertical := features.ProjectVertical(project)
+			if vertical == "" {
+				slog.Warn("project features registered without a vertical", "project", project)
+				continue
+			}
+			r.Mount("/p/"+project, features.BuildProjectRouter(project, bDeps, vertical))
 		}
 
 		// The admin surface WRITES to clients (POST /clients), and

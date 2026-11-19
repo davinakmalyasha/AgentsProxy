@@ -8,19 +8,19 @@ import (
 	// Named imports (not blank): the registry is process-global and
 	// other tests ResetForTest it, so this test re-registers the real
 	// backends itself, exactly like validators_test.reregister does.
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/customers"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/expenses"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/facilities"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/inventory"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/kantin"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/members"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/payments"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/series"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/users"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/availability"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/bookings"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/courtblocks"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/customers"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/expenses"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/facilities"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/inventory"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/kantin"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/members"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/payments"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/pricing"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/series"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/users"
 )
 
 // contractGated lists the custom features whose writes pass

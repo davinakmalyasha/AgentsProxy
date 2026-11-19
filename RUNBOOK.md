@@ -185,18 +185,20 @@ ADMIN="Authorization: Bearer $ADMIN_API_KEY"
 # 1. Create client (one-time per client)
 curl -s -X POST https://<host>/v1/admin/clients \
   -H "$ADMIN" -H "Content-Type: application/json" \
-  -d '{"name":"warung-sari","tenant_id":"warung-sari","monthly_quota_tokens":500000}'
-# → returns {id, name, tenant_id, token, monthly_quota_tokens}
-#    ↑ the `token` is shown ONCE. Save it now.
+  -d '{"name":"warung-sari","tenant_id":"warung-sari","vertical":"fnb","schema":"project_warung_sari","monthly_quota_tokens":500000}'
+# -> returns {id, name, tenant_id, token, schema, monthly_quota_tokens}
+#    The token is shown ONCE. Save it now.
+#    schema is optional; it defaults to project_<tenant_id with hyphens as underscores>.
+#    Only the legacy centrum row may use "public".
 
-# 2. Inject into the Hostinger static site (next.config.js or env):
+# 2. Inject into the new frontend project:
 #    NEXT_PUBLIC_AGENTS_PROXY_URL=https://<host>
 #    NEXT_PUBLIC_AGENTS_PROXY_TOKEN=<token from step 1>
 #    NEXT_PUBLIC_AGENTS_PROXY_TENANT=warung-sari
 
-# 3. Verify
-curl -s https://<host>/v1/fnb/records -H "X-Client-Token: <token>"
-# → 200, items: []  (empty until first POST)
+# 3. Verify (new projects use the project-scoped prefix)
+curl -s https://<host>/v1/p/warung-sari/records -H "X-Client-Token: <token>"
+# -> 200, items: []  (empty until first POST)
 
 # 4. Suspend / resume
 curl -X PATCH https://<host>/v1/admin/clients/<id> \
@@ -204,9 +206,23 @@ curl -X PATCH https://<host>/v1/admin/clients/<id> \
   -d '{"status":"paused"}'
 ```
 
+The admin call creates the `clients` row and its project schema. If the
+project has `projects/<slug>/migrations/*.sql`, run the migration deploy step:
+
+```bash
+go run ./cmd/migrate   # platform + every project schema
+```
+
+If the project uses the generic records feature, its `0001_init.sql` must
+create `tenant_records` in the project schema. If it has a custom agent, add
+`projects/<slug>/agent/` and run `go generate ./...` before deploying.
+
+A project's business tables live in its own schema; its frontend uses
+`/v1/p/<slug>/...` (Centrum keeps `/v1/sports/...` as the legacy alias).
+
 ---
 
-## 8a. Tenant hygiene (Centrum only)
+## 8a. Tenant hygiene
 
 Production is intentionally single-tenant for the client plane: `centrum`.
 The paused `dfd-agency` row is retained only because its `frontend_origins`
@@ -219,8 +235,11 @@ psql "$DATABASE_ADMIN_URL" -f scripts/prune-demo-tenants.sql
 ```
 
 The script keeps `centrum` and `dfd-agency`, deletes every other
-`tenant_id` from every table (including orphan rows such as `tool-test`),
-then deletes the extra `clients` rows.
+`tenant_id` from every table in `public` and every `project_*` schema
+(including orphan rows such as `tool-test`), then deletes the extra
+`clients` rows and their `project_migrations` entries. It does **not** drop
+project schemas; decommissioning a project is a separate export-then-drop
+step.
 
 Never run the DB-backed integration suite against the production
 `DATABASE_URL`. Point local tests at a disposable database; CI already
@@ -230,9 +249,22 @@ uses a local Postgres service.
 
 ## 9. Schema Migrations
 
-Migrations run automatically on boot via `internal/db/migrate.go`. Each migration is wrapped in a `pg_advisory_xact_lock(734561)` to keep parallel boots from racing on `CREATE EXTENSION pgcrypto`.
+`go run ./cmd/migrate` applies:
+1. platform migrations in `internal/db/migrations/` (public schema), then
+2. each project's `projects/<slug>/migrations/*.sql` (its own schema).
 
-To add a migration: drop a new file into `internal/db/migrations/00X_name.sql`; sort order is lexical. **Never edit an applied migration** — add a new one that does the delta.
+Both ledgers store a SHA-256 checksum. An applied file that changed after
+application fails the migration with a clear error; add a new migration
+instead. Platform rows are in `public.schema_migrations`; project rows are in
+`public.project_migrations` (scoped by `project_slug`).
+
+The runner takes `pg_advisory_xact_lock(734561)` for platform migrations and
+`734562` per project. On Vercel, `RUN_MIGRATIONS=false`; run the command as a
+deploy step before the new binary serves.
+
+To add a platform migration: drop `internal/db/migrations/0XX_name.sql`.
+To add a project migration: drop `projects/<slug>/migrations/000X_name.sql`
+and set that project's `schema` in `project.json`. Sort order is lexical.
 
 **Phase 4 note:** migrations `007`–`010` (sports vertical) create custom tables with RLS. Migration `008` runs `CREATE EXTENSION btree_gist` (needs superuser) — migrations run on the admin pool, so this is fine. The booking exclusion constraint (`tsrange`, NOT `tstzrange` — see ARCHITECTURE §11.3) prevents double-bookings at the DB level; a concurrent double-book surfaces as HTTP `409 slot already booked`.
 

@@ -43,6 +43,9 @@ type ClientModel struct {
 	TokenHash          string   `json:"token_hash"`
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
+	// DBSchema is the project schema that owns this tenant's business
+	// tables. Legacy Centrum is "public"; new projects use project_<slug>.
+	DBSchema string `json:"db_schema"`
 }
 
 // GetByToken returns the client for the given raw token, going
@@ -116,10 +119,10 @@ func (c *Client) writeCache(ctx context.Context, hash string, m *ClientModel) er
 func (c *Client) fromDB(ctx context.Context, hash string) (*ClientModel, error) {
 	var m ClientModel
 	err := c.DB.QueryRow(ctx,
-		`SELECT id::text, tenant_id, status, monthly_quota_tokens, name, token_hash, vertical, features
+		`SELECT id::text, tenant_id, status, monthly_quota_tokens, name, token_hash, vertical, features, db_schema
 		   FROM clients WHERE token_hash = $1`,
 		hash,
-	).Scan(&m.ID, &m.TenantID, &m.Status, &m.MonthlyQuotaTokens, &m.Name, &m.TokenHash, &m.Vertical, &m.Features)
+	).Scan(&m.ID, &m.TenantID, &m.Status, &m.MonthlyQuotaTokens, &m.Name, &m.TokenHash, &m.Vertical, &m.Features, &m.DBSchema)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

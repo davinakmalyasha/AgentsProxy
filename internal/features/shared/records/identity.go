@@ -208,6 +208,11 @@ func isPublicRead(r *http.Request) bool {
 		return false
 	}
 	segs := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// Project-scoped routes are /v1/p/{slug}/{collection}/...; strip the
+	// project prefix so the same public-read allowlist applies.
+	if len(segs) >= 5 && segs[0] == "v1" && segs[1] == "p" {
+		segs = append([]string{"v1"}, segs[3:]...)
+	}
 	// /v1/{vertical}/{collection}/...
 	if len(segs) < 3 || segs[0] != "v1" {
 		return false
@@ -234,6 +239,14 @@ func isPublicRead(r *http.Request) bool {
 // exist.
 func tenantFromQuery(w http.ResponseWriter, r *http.Request) (string, bool) {
 	t := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
+	if t == "" {
+		// Project-scoped routes carry the project in the path:
+		// /v1/p/<slug>/facilities. Use it for public landing reads.
+		segs := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(segs) >= 3 && segs[0] == "v1" && segs[1] == "p" {
+			t = strings.TrimSpace(segs[2])
+		}
+	}
 	if t == "" {
 		writeJSONError(w, http.StatusBadRequest, "tenant_id required")
 		return "", false

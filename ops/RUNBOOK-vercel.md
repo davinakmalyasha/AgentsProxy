@@ -46,7 +46,8 @@ Set in the dashboard, never in git.
 ```bash
 npx vercel link      # once
 npx vercel env add BACKGROUND_TICKERS production      # "false"
-npx vercel env add RUN_MIGRATIONS production          # "false" (migrations run as a deploy step: make migrate)
+npx vercel env add RUN_MIGRATIONS production          # "false" (migrations run as a deploy step: go run ./cmd/migrate)
+npx vercel env add RUN_MIGRATIONS preview             # "false" (never let a preview apply migrations)
 npx vercel deploy --prod
 ```
 
@@ -60,10 +61,11 @@ It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
   process: Sentry init, config, two PG pools, the migration check, Redis.
   If `Fluid Active CPU` ever becomes the constraint, the lever
   is that boot work, not the request path.
-- **The migration check runs on every cold start.**
-  `pg_advisory_xact_lock(734561)` in `internal/db/migrate.go` makes that
-  safe under concurrency — the losers see the migration already applied —
-  but it is a real round trip each time.
+- **Migrations are a deploy step, never a side effect of a request.** Run
+  `go run ./cmd/migrate` with the production admin DSN after the code is
+  built and before the new deployment serves. It applies platform
+  migrations, then each `projects/<slug>/migrations/` inside its schema, and
+  verifies every ledger checksum.
 
 Neither is a correctness problem. Both are why `BACKGROUND_TICKERS=false` and
 Supabase-side delivery are required rather than optional.
@@ -91,7 +93,7 @@ Supabase-side delivery are required rather than optional.
   **empty tables**. The password lives only in the GitHub secret
   `BACKUP_DATABASE_URL` (pooler session mode, `sslmode=require`). Rotate
   like any privileged credential.
-- Dump scope is `public`+`private` only. Platform schemas
+- Dump scope is `public`+`private` plus every `project_*` schema. Platform schemas
   (auth/storage/vault) are Supabase-managed and covered by the platform's
   daily WAL-G backups; including them breaks portable restores and drags
   platform PII (auth password hashes) into the artifact. Platform PITR is

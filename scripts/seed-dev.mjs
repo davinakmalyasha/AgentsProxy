@@ -30,6 +30,8 @@ const TENANT = process.env.TENANT_ID || "centrum";
 const NAME = process.env.TENANT_NAME || TENANT;
 const VERTICAL = process.env.TENANT_VERTICAL || "sports";
 const QUOTA = Number(process.env.TENANT_QUOTA || 500000);
+// New projects get their own schema; omit this for the legacy centrum row.
+const SCHEMA = process.env.TENANT_SCHEMA || "";
 
 async function main() {
   const r = await fetch(`${PROXY}/v1/admin/clients`, {
@@ -43,6 +45,7 @@ async function main() {
       tenant_id: TENANT,
       vertical: VERTICAL,
       monthly_quota_tokens: QUOTA,
+      ...(SCHEMA ? { schema: SCHEMA } : {}),
     }),
   });
   const text = await r.text();

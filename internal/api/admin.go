@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
@@ -28,12 +30,18 @@ type Admin struct {
 	Cache *cache.Client
 }
 
+var projectSchemaRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+
 type createClientReq struct {
 	Name               string   `json:"name"`
 	TenantID           string   `json:"tenant_id"`
 	MonthlyQuotaTokens int      `json:"monthly_quota_tokens"`
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
+	// Schema is the project's business schema. Empty defaults to
+	// project_<tenant_id> for new projects. Only the legacy centrum row may
+	// use "public".
+	Schema string `json:"schema"`
 	// Origins optionally registers frontend origins in the same call
 	// (migration 058): one round trip for new-project onboarding.
 	// Validated BEFORE the client insert so a bad origin fails fast
@@ -49,6 +57,7 @@ type createClientResp struct {
 	MonthlyQuotaTokens int      `json:"monthly_quota_tokens"`
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
+	Schema             string   `json:"schema"`
 }
 
 type patchClientReq struct {
@@ -66,6 +75,7 @@ type clientListRow struct {
 	Features           []string `json:"features"`
 	Status             string   `json:"status"`
 	MonthlyQuotaTokens int      `json:"monthly_quota_tokens"`
+	Schema             string   `json:"schema"`
 	CreatedAt          string   `json:"created_at"`
 }
 
@@ -129,6 +139,31 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A project owns its business tables in its own schema. "public" is
+	// reserved for the legacy centrum row; new projects cannot ask for it.
+	// If the tenant has a project folder, its project.json is authoritative,
+	// so provisioning cannot silently put the row in a different schema.
+	if dir, err := agentconfig.DirForSlug(req.TenantID); err == nil {
+		p, err := agentconfig.LoadSingle(dir)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+			return
+		}
+		if p.Schema != "" {
+			if req.Schema != "" && req.Schema != p.Schema {
+				writeJSONError(w, http.StatusBadRequest, "schema does not match project.json")
+				return
+			}
+			req.Schema = p.Schema
+		}
+	}
+	if req.Schema == "" {
+		req.Schema = "project_" + strings.ReplaceAll(req.TenantID, "-", "_")
+	}
+	if req.Schema == "public" || !projectSchemaRe.MatchString(req.Schema) {
+		writeJSONError(w, http.StatusBadRequest, "invalid schema")
+		return
+	}
 	// Validate origins before creating anything: a bad origin must
 	// fail the whole provisioning call, not half of it.
 	validOrigins := make([]string, 0, len(req.Origins))
@@ -147,9 +182,9 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = a.Pool.QueryRow(r.Context(),
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1, $2, $3, $4, 'active', $5, $6) RETURNING id::text`,
-		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7) RETURNING id::text`,
+		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema,
 	).Scan(&id)
 	if err != nil {
 		if pgerr.IsUniqueViolation(err) {
@@ -159,6 +194,24 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Create the project schema now so search_path never points at a
+	// non-existent schema. Project migrations add the tables later.
+	if req.Schema != "public" {
+		ident := pgx.Identifier{req.Schema}.Sanitize()
+		if _, err := a.Pool.Exec(r.Context(), `CREATE SCHEMA IF NOT EXISTS `+ident); err != nil {
+			_, _ = a.Pool.Exec(r.Context(), `DELETE FROM clients WHERE id = $1::uuid`, id)
+			slog.Error("admin schema provisioning failed", "tenant", req.TenantID, "schema", req.Schema, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "schema provisioning failed")
+			return
+		}
+		if _, err := a.Pool.Exec(r.Context(), `GRANT USAGE ON SCHEMA `+ident+` TO app_runtime`); err != nil {
+			_, _ = a.Pool.Exec(r.Context(), `DELETE FROM clients WHERE id = $1::uuid`, id)
+			_, _ = a.Pool.Exec(r.Context(), `DROP SCHEMA IF EXISTS `+ident+` CASCADE`)
+			slog.Error("admin schema grant failed", "tenant", req.TenantID, "schema", req.Schema, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "schema provisioning failed")
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, createClientResp{
 		ID:                 id,
 		Name:               req.Name,
@@ -167,6 +220,7 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		MonthlyQuotaTokens: req.MonthlyQuotaTokens,
 		Vertical:           req.Vertical,
 		Features:           req.Features,
+		Schema:             req.Schema,
 	})
 	// Register validated origins (created_by marks the provisioning path).
 	// Best-effort after the client exists: the tenant is usable without
@@ -204,7 +258,7 @@ func (a *Admin) List(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	rows, err := a.Pool.Query(r.Context(),
-		`SELECT id::text, name, tenant_id, vertical, features, status, monthly_quota_tokens, created_at
+		`SELECT id::text, name, tenant_id, vertical, features, status, monthly_quota_tokens, db_schema, created_at
 		   FROM clients ORDER BY created_at DESC LIMIT $1`,
 		limit,
 	)
@@ -217,7 +271,7 @@ func (a *Admin) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c clientListRow
 		var createdAt time.Time
-		if err := rows.Scan(&c.ID, &c.Name, &c.TenantID, &c.Vertical, &c.Features, &c.Status, &c.MonthlyQuotaTokens, &createdAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.TenantID, &c.Vertical, &c.Features, &c.Status, &c.MonthlyQuotaTokens, &c.Schema, &createdAt); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "internal")
 			return
 		}

@@ -3,6 +3,7 @@ package features
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
@@ -83,6 +84,73 @@ func RequireFeature(name string) func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireProject rejects a request whose resolved tenant is not the project
+// that owns this router. This is the hard boundary for /v1/p/<slug>/...:
+// authentication happens first, then the request can only reach the schema
+// and handlers of the project named in the URL.
+func RequireProject(project string) func(http.Handler) http.Handler {
+	want := strings.ToLower(strings.TrimSpace(project))
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := clientctx.From(r.Context())
+			if id == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"project identity required"}`))
+				return
+			}
+			if got := strings.ToLower(id.TenantID()); got != want {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"project mismatch"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireProjectFeature is the project-scoped equivalent of RequireFeature.
+// The feature lives in the project registry, not the global one, so the
+// global AllowedForVertical check does not apply. The project router already
+// pinned the tenant and vertical before this gate runs.
+func RequireProjectFeature(project, name string, publicRead bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := clientctx.From(r.Context())
+			if id == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
+				return
+			}
+			if id.Role == clientctx.RoleOwner || id.Role == clientctx.RoleStaff {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if id.Role == "public" && publicRead && r.Method == http.MethodGet {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if id.Client == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
+				return
+			}
+			for _, f := range id.Client.Features {
+				if f == name {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
 		})
 	}
 }
