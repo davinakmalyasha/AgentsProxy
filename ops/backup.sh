@@ -26,9 +26,8 @@ echo "[backup] dumping $ADMIN_URL -> $out"
 # table data, event triggers) and drags platform PII (auth password
 # hashes) into the artifact.
 #
-# Build the schema list dynamically. A literal --schema='project_*' is a
-# no-op today but can make pg_dump noisy/fail when no project schema exists;
-# the query returns exactly the schemas this dump owns.
+# Build the schema list dynamically: the query returns exactly the schemas
+# this dump owns, so an empty project set cannot make pg_dump fail.
 mapfile -t schemas < <(psql "$ADMIN_URL" -Atc \
   "SELECT nspname FROM pg_namespace
     WHERE nspname IN ('public','private') OR nspname LIKE 'project\\_%' ESCAPE '\\'
