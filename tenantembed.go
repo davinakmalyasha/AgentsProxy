@@ -20,9 +20,8 @@ import "embed"
 // The tenant backend/ and tools/ trees are compiled Go — embedding their
 // .go sources too shipped ~440KB twice (once compiled, once as text).
 //
-// The _template tenant is embedded too and skipped by the loader;
-// embedding it keeps `go build` honest about its syntax without treating
-// it as a live tenant.
+// The embedded tree contains the live tenant folders only; the loader
+// still ignores directories beginning with "_".
 //
 //go:embed all:tenants/*/memory all:tenants/*/skills
 var AgentsFS embed.FS

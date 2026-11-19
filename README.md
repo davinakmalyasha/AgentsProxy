@@ -75,7 +75,7 @@ call proxy admin and a client token can't list agency leads — wrong group =
 
 Shared (all tenants): copy `internal/features/shared/menu` → `.../<name>`,
 set `Name/Kind/validator`, import in `cmd/server/main.go`.
-Custom (one tenant): copy `internal/features/_template` →
-`tenants/<slug>/backend/<name>`, isolation test required.
+Custom (one tenant): add a package under `tenants/<slug>/backend/<name>`
+following the existing `centrum-badminton` features; isolation test required.
 Agency: add handler under `internal/agency/<domain>/`, mount in
 `internal/agency/router.go`. `go test ./...` + curl smoke.
