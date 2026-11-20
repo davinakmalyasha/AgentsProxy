@@ -22,10 +22,10 @@ import (
 // Seeding and cleanup run on the admin pool (delivery_caller holds no
 // table grants by design).
 func TestReminderDrivers_AsDeliveryCaller(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn
@@ -253,10 +253,10 @@ func toCallerDSN(dsn string) string {
 // table grants by design); cleanup owns a separate pool (see the note
 // in TestReminderDrivers_AsDeliveryCaller).
 func TestReminderPushRPCs_AsDeliveryCaller(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn

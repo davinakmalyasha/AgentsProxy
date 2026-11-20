@@ -59,13 +59,31 @@ Errors: proxy shape `{"error":"..."}` on `/v1/*`; agency envelope
 ## Quick start (Laragon daily dev)
 
 ```bash
-copy .env.example .env   # set DATABASE_URL, REDIS_URL, LLM_API_KEY, ADMIN_API_KEY, JWT_SECRET
+# 1. Start Laragon PostgreSQL + Redis (localhost only).
+# 2. Create the local databases once:
+createdb -h 127.0.0.1 -U postgres agents_proxy
+createdb -h 127.0.0.1 -U postgres agents_proxy_test
+
+# 3. Local-only environment. Never put production credentials here:
+copy .env.example .env
+copy .env.test.example .env.test
+
 go mod tidy
-go run ./cmd/server      # migrations auto-run, :8080
+make migrate                                # platform + project migrations (admin DSN)
+make run                                    # :8080; RUN_MIGRATIONS=true is local-only
 node --env-file=.env scripts/seed-dev.mjs   # tenant "centrum", vertical "sports"
 curl -s http://localhost:8080/healthz
-go vet ./... && go test ./... -cover
+make test                                   # TEST_* from .env.test; never DATABASE_URL
 ```
+
+`ENV=development` refuses any database host other than localhost. Staging is
+the only environment allowed to reach a remote database, and only with
+`ALLOW_REMOTE_DB=true`. Vercel Preview carries no production secrets; a
+backend preview fails closed until the staging project exists.
+
+DB-backed tests read `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`, and
+`TEST_REDIS_URL` only. The old habit of exporting `DATABASE_URL` before
+`go test` is now a CI failure (see `scripts/test-local.sh`).
 
 ## How one backend serves many frontends
 

@@ -58,12 +58,12 @@ func scrubReminders(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 }
 
 func TestScheduler_SendsDue(t *testing.T) {
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -137,12 +137,12 @@ func TestScheduler_SendsDue(t *testing.T) {
 // neither sent nor dead-lettered. The claim is released back to pending
 // without burning attempts, so it waits instead of retrying.
 func TestScheduler_QuarantinedTenantHeld(t *testing.T) {
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -220,12 +220,12 @@ func (f *slowSender) Send(_ context.Context, _, _ string, _ string) error {
 }
 
 func TestScheduler_DeliversConcurrently(t *testing.T) {
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -297,12 +297,12 @@ func TestScheduler_DeliversConcurrently(t *testing.T) {
 // is asserted directly: fire two Ticks concurrently and require that
 // the senders together saw each row exactly once.
 func TestScheduler_TwoDriversDeliverEachRowOnce(t *testing.T) {
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

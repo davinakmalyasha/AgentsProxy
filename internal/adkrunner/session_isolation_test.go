@@ -28,11 +28,11 @@ const (
 
 func isolationStore(t *testing.T) session.Service {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping session isolation test")
+		t.Skip("TEST_DATABASE_URL not set — skipping session isolation test")
 	}
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if adminDSN == "" {
 		adminDSN = dsn
 	}

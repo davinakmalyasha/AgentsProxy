@@ -1,14 +1,15 @@
 // Command migrate applies the embedded SQL migrations and exits.
 //
 // It is the deploy-step runner for environments where the server boots
-// with RUN_MIGRATIONS=false (Vercel cold starts must not replay the
-// ledger inside an advisory lock). Long-running hosts keep boot
-// migrations and never need this.
+// with RUN_MIGRATIONS=false. Vercel preview and production refuse boot-time
+// migrations; production runs this command through the manual db-migrate
+// workflow, gated by the GitHub `production` Environment. Long-running
+// hosts (VPS/Railway/compose) may keep boot migrations instead.
 //
 // Usage:
 //
 //	DATABASE_URL=... DATABASE_ADMIN_URL=... go run ./cmd/migrate
-//	# or: make migrate
+//	# or: make migrate (loads the local .env; localhost only)
 package main
 
 import (

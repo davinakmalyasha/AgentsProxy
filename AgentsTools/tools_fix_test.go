@@ -22,10 +22,10 @@ import (
 // (for tool.Run — RLS-scoped), and an admin pool (RLS-exempt seeding).
 func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	rurl := os.Getenv("REDIS_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	rurl := os.Getenv("TEST_REDIS_URL")
 	if dsn == "" || rurl == "" {
-		t.Skip("DATABASE_URL / REDIS_URL not set")
+		t.Skip("TEST_DATABASE_URL / TEST_REDIS_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -41,7 +41,7 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 	t.Cleanup(func() { rdb.Close() })
 	tenant := "tool-test"
 	// Admin pool for RLS-exempt seeding/cleanup.
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if adminDSN == "" {
 		adminDSN = dsn
 	}

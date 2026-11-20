@@ -166,6 +166,18 @@ func main() {
 		slog.Info("migrations skipped (RUN_MIGRATIONS=false; run as a deploy step)")
 	}
 
+	// Production must not run tenant traffic as a role that can bypass
+	// RLS. This runs after migrations (so a virgin self-hosted database
+	// has app_runtime) but before Redis, the router, or any request.
+	if cfg.Env == "production" {
+		role, err := db.VerifyRuntimeRole(bootCtx, pool)
+		if err != nil {
+			slog.Error("runtime role check", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("runtime role verified", "role", role)
+	}
+
 	rdb, err := redisx.NewClient(bootCtx, cfg.RedisURL)
 	if err != nil {
 		slog.Error("redis connect", "err", err)

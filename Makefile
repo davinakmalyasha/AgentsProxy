@@ -2,7 +2,7 @@
 .PHONY: run build test vet tidy fmt docker redis-cli healthz
 
 run:
-	go run ./cmd/server
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; go run ./cmd/server
 
 build:
 	go build -ldflags="-s -w -X main.Version=$$(git rev-parse --short HEAD 2>NUL || echo dev)" -o bin/server ./cmd/server
@@ -11,14 +11,12 @@ build:
 # DATABASE_URL) without booting the server. The deploy step for
 # serverless, where RUN_MIGRATIONS=false keeps them off the cold path.
 migrate:
-	go run ./cmd/migrate
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; go run ./cmd/migrate
 
 test:
-	# -p 1: integration tests share one Postgres; parallel package
-	# execution races DELETE/INSERT on the same tables across packages
-	# ("tuple concurrently updated" SQLSTATE XX000). Serial is correct
-	# for a shared-DB suite (see ARCHITECTURE §11.5).
-	go test -p 1 ./... -cover
+	# DB-backed tests read TEST_DATABASE_* from .env.test (see
+	# .env.test.example). They never read the runtime DATABASE_URL.
+	bash scripts/test-local.sh
 
 vet:
 	go vet ./...

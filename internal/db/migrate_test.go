@@ -22,8 +22,9 @@ var localDBHosts = map[string]bool{
 // requireLocalDB skips the test unless the DSN points at a local
 // throwaway database.
 //
-// This exists because DATABASE_ADMIN_URL in .env points at the hosted
-// Supabase project. The wipe below runs
+// This exists because a developer machine used to carry the production
+// DATABASE_ADMIN_URL in .env. Tests now read TEST_DATABASE_* only, but the
+// host check stays as the last line of defence. The wipe below runs
 // `DROP TABLE clients CASCADE`, and CASCADE destroys every foreign key
 // that references clients while leaving the referencing tables and their
 // rows in place — which silently strips the tenancy guarantee from
@@ -46,12 +47,12 @@ func requireLocalDB(t *testing.T, dsn string) {
 func TestMigrate_Real(t *testing.T) {
 	// Migrations need CREATE EXTENSION / ALTER TABLE — use the admin
 	// DSN if set, else fall back to the runtime DSN.
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	// The destructive wipe races with every other test that uses
 	// the same database. Skip by default; opt in by setting

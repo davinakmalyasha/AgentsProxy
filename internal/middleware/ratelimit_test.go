@@ -7,7 +7,7 @@
 // on every route, including /v1/chat and the agent tools whose cost cap
 // fails open on a Redis error.
 //
-// These tests need a real Redis. They skip when REDIS_URL is unset so
+// These tests need a real Redis. They skip when TEST_REDIS_URL is unset so
 // `go test ./...` still works without one.
 package middleware
 
@@ -25,9 +25,9 @@ import (
 
 func testRedis(t *testing.T) *redis.Client {
 	t.Helper()
-	addr := os.Getenv("REDIS_URL")
+	addr := os.Getenv("TEST_REDIS_URL")
 	if addr == "" {
-		t.Skip("REDIS_URL not set - skipping integration test")
+		t.Skip("TEST_REDIS_URL not set - skipping integration test")
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	ctx := context.Background()
