@@ -24,6 +24,16 @@ Each client frontend is its own project. Vercel Hobby quotas are
 
 Set in the dashboard, never in git.
 
+> **Never run `vercel env rm NAME preview` for a variable that is shared
+> with Production.** Vercel stores one entry per key with a target list;
+> removing the Preview target through the CLI can remove the entire entry,
+> including Production. Use the dashboard's per-environment editor, or
+> duplicate the value into a separate Preview entry first. This exact
+> mistake caused a production boot failure on 2026-11-20 (`ENV` and the
+> database/Redis/LLM values disappeared from Production). The previous
+> deployment kept serving because Vercel pins a deployment's environment at
+> build time.
+
 | Var | Vercel value | Why |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `false` | Both the reminder ticker and the notify drain loop assume a long-lived process. Vercel destroys it between requests, so they would never fire and Supabase owns delivery instead. **Getting this wrong means reminders silently never fire.** |
