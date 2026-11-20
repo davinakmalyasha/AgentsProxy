@@ -103,8 +103,21 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: fresh-database migrations
+        # Proves the whole embedded chain (platform + every project schema)
+        # runs clean on an empty database, not only on the long-lived one.
+        run: go run ./cmd/migrate
+
       - name: go build
         run: go build -v ./...
+
+      - name: generated project imports are current
+        run: |
+          go run ./cmd/genprojects
+          if [[ -n $(git status --porcelain cmd/server/projects_gen.go) ]]; then
+            echo "::error::cmd/server/projects_gen.go is stale. Run 'go run ./cmd/genprojects' and commit."
+            exit 1
+          fi
 
       - name: tests never read runtime DB env
         # A test suite that reads DATABASE_URL inherits whatever the shell

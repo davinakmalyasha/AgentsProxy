@@ -104,6 +104,9 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 		return ct, nil
 	}
 	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
+	if p := r.projectFor(tenantID); p != nil && len(p.Agent.Tools) > 0 {
+		ts = ts.Only(p.Agent.Tools)
+	}
 	names := ts.Names()
 	adapted := make([]tool.Tool, 0, len(names))
 	for _, name := range names {
@@ -183,6 +186,14 @@ func (r *Runner) UpdateProject(p *agentconfig.Project) {
 			delete(r.prompts, k)
 		}
 	}
+}
+
+// AgentEnabled reports whether a configured project allows the agent. A
+// tenant with no project folder keeps the historical base-prompt behaviour
+// (true); a project with agent.enabled=false is explicitly off.
+func (r *Runner) AgentEnabled(tenantID string) bool {
+	p := r.projectFor(tenantID)
+	return p == nil || p.Agent.Enabled
 }
 
 // TenantSlugs lists tenants with serving configs (for admin health).

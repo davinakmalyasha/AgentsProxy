@@ -14,7 +14,7 @@ import (
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
+	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 )
 
 // toolTestPool connects to the real test DB (env-gated like the rest

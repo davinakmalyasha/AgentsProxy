@@ -29,14 +29,14 @@ import (
 // Layers, in the order they are appended:
 //
 //	1. role base        the platform rules, same for every tenant
-//	2. tenant prompt    tenants/<slug>/memory/SystemPrompt.md
-//	3. knowledge        memory/Information/*.md -- what is TRUE about this venue
-//	4. skills           tenants/<slug>/skills/*.md -- HOW to do things
-//	5. runtime          today's date, the tenant's name, the tools available
+//	2. project prompt   projects/<slug>/agent/agent.md
+//	3. reference        optional static knowledge; new projects prefer live data
+//	4. skills           projects/<slug>/agent/skills/*.md -- HOW to do things
+//	5. runtime          today's date, the project's name, the tools available
 //
 // Layered rather than concatenated because each layer has a different owner
 // and a different rate of change: platform rules ship with the binary,
-// tenant content ships with the tenant folder, runtime context is per
+// project content ships with the project folder, runtime context is per
 // request. RAG later slots in as layer 3b -- retrieved chunks, appended
 // just before the runtime context -- without any change above it.
 
@@ -141,7 +141,7 @@ func writeLayer(b *strings.Builder, title, body string) {
 
 // roleBase is the platform's non-negotiable behaviour, identical for every
 // tenant. Anything a project can be trusted to state for itself belongs in
-// its SystemPrompt.md instead; anything that must hold regardless belongs
+// its agent.md instead; anything that must hold regardless belongs
 // here.
 func roleBase(vertical string) string {
 	return fmt.Sprintf(`You are the AI assistant for a %s business, talking to the owner over a chat app.

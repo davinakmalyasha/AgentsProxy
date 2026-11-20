@@ -24,6 +24,16 @@ Each client frontend is its own project. Vercel Hobby quotas are
 
 Set in the dashboard, never in git.
 
+> **Never run `vercel env rm NAME preview` for a variable that is shared
+> with Production.** Vercel stores one entry per key with a target list;
+> removing the Preview target through the CLI can remove the entire entry,
+> including Production. Use the dashboard's per-environment editor, or
+> duplicate the value into a separate Preview entry first. This exact
+> mistake caused a production boot failure on 2026-11-20 (`ENV` and the
+> database/Redis/LLM values disappeared from Production). The previous
+> deployment kept serving because Vercel pins a deployment's environment at
+> build time.
+
 | Var | Vercel value | Why |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `false` | Both the reminder ticker and the notify drain loop assume a long-lived process. Vercel destroys it between requests, so they would never fire and Supabase owns delivery instead. **Getting this wrong means reminders silently never fire.** |
@@ -77,8 +87,10 @@ It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
   If `Fluid Active CPU` ever becomes the constraint, the lever
   is that boot work, not the request path.
 - **No migration check on cold start.** `RUN_MIGRATIONS=false` means boot
-  skips the ledger entirely; production migrations run through the manual
-  `db-migrate` workflow. A preview never reaches a database at all.
+  skips the ledger entirely. Production migrations run through the manual
+  `db-migrate` workflow, which applies platform migrations and each
+  `projects/<slug>/migrations/` inside its schema, and verifies every ledger
+  checksum. A preview never reaches a database at all.
 
 Neither is a correctness problem. Both are why `BACKGROUND_TICKERS=false` and
 Supabase-side delivery are required rather than optional.
@@ -106,7 +118,7 @@ Supabase-side delivery are required rather than optional.
   **empty tables**. The password lives only in the GitHub secret
   `BACKUP_DATABASE_URL` (pooler session mode, `sslmode=require`). Rotate
   like any privileged credential.
-- Dump scope is `public`+`private` only. Platform schemas
+- Dump scope is `public`+`private` plus every `project_*` schema. Platform schemas
   (auth/storage/vault) are Supabase-managed and covered by the platform's
   daily WAL-G backups; including them breaks portable restores and drags
   platform PII (auth password hashes) into the artifact. Platform PITR is

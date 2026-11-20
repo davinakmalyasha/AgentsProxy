@@ -1,0 +1,13 @@
+{
+  "slug": "centrum",
+  "display": "Centrum Badminton Arena",
+  "vertical": "sports",
+  "contact": "0815-9408-136 (Owner)",
+  "schema": "public",
+  "agent": {
+    "enabled": true,
+    "persona": "agent/agent.md",
+    "skills": "agent/skills",
+    "mcp": "agent/mcp.json"
+  }
+}

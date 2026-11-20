@@ -22,7 +22,6 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
 	// Phase 3 shared features: each registers itself in init().
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/article"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/booking"
@@ -39,21 +38,10 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/availability"
-	"github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/bookings"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/courtblocks"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/customers"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/expenses"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/facilities"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/inventory"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/kantin"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/members"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/payments"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/pricing"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/series"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/backend/users"
+	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/bookings"
 )
 
+//go:generate go run ../../cmd/genprojects
 func main() {
 	// Healthcheck probe for container orchestration (docker-compose
 	// healthcheck, k8s): exits 0 when /healthz answers 200, 1
@@ -157,7 +145,7 @@ func main() {
 	// serializes parallel boots. Vercel sets RUN_MIGRATIONS=false;
 	// long-running hosts keep the default true.
 	if cfg.RunMigrations {
-		if err := db.Migrate(bootCtx, adminPool); err != nil {
+		if err := db.MigrateAll(bootCtx, adminPool); err != nil {
 			slog.Error("migrate", "err", err)
 			os.Exit(1)
 		}

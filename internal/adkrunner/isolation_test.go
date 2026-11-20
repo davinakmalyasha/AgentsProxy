@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
+	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 )
 
 // Role isolation, enforced structurally: each tier's llmagent is built
@@ -187,7 +187,12 @@ func TestRegistryTenantsAreStamped(t *testing.T) {
 	}
 	for _, tl := range agentstools.AllTools(nil) {
 		if tl.Tenant == "" {
-			t.Errorf("tool %q is unstamped; production tools must carry a tenant", tl.Name)
+			// Platform tools are global by design: they serve every project
+			// and carry no tenant code. Project tools must be stamped.
+			if tl.Name == "tenant_info" {
+				continue
+			}
+			t.Errorf("tool %q is unstamped; project tools must carry a tenant", tl.Name)
 		}
 		if tl.Tenant != "centrum" {
 			t.Errorf("tool %q stamped %q, want centrum", tl.Name, tl.Tenant)

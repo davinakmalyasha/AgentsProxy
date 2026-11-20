@@ -85,6 +85,9 @@ func Register(tenant, name string, fn Constructor) {
 func Tenants() []string {
 	seen := map[string]bool{}
 	for k := range registry {
+		if k.tenant == "" {
+			continue
+		}
 		seen[k.tenant] = true
 	}
 	out := make([]string, 0, len(seen))
@@ -179,6 +182,26 @@ func (ts *ToolSet) ForTenant(tenant string) *ToolSet {
 	return out
 }
 
+// Only narrows a set to the named tools. An empty list returns the set
+// unchanged; names that are not present are ignored (the project's config
+// may name a tool that this role never receives).
+func (ts *ToolSet) Only(names []string) *ToolSet {
+	if len(names) == 0 {
+		return ts
+	}
+	allow := make(map[string]bool, len(names))
+	for _, n := range names {
+		allow[n] = true
+	}
+	out := &ToolSet{tools: map[string]Tool{}, Pool: ts.Pool}
+	for name, t := range ts.tools {
+		if allow[name] {
+			out.tools[name] = t
+		}
+	}
+	return out
+}
+
 func AllowedToolsFor(role string) map[string]bool {
 	switch role {
 	case "anon":
@@ -196,6 +219,7 @@ func AllowedToolsFor(role string) map[string]bool {
 		return map[string]bool{
 			"get_pricing":      true,
 			"get_availability": true,
+			"tenant_info":      true,
 		}
 	case "client":
 		// Authenticated API/agent integration (X-Client-Token). RLS
@@ -204,6 +228,7 @@ func AllowedToolsFor(role string) map[string]bool {
 		// for a public endpoint that lets the caller pick the tenant.
 		return map[string]bool{
 			"check_stock":      true,
+			"tenant_info":      true,
 			"query_attendance": true,
 			"list_bookings":    true,
 			"get_pricing":      true,
@@ -212,6 +237,7 @@ func AllowedToolsFor(role string) map[string]bool {
 	case "pegawai":
 		return map[string]bool{
 			"book_slot":           true,
+			"tenant_info":         true,
 			"cancel_booking":      true,
 			"list_bookings":       true,
 			"query_income":        true,

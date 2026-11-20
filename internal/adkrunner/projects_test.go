@@ -5,13 +5,13 @@ import (
 	"testing"
 
 	"github.com/davinakmalyasha/agents-proxy/AgentsTools"
-	_ "github.com/davinakmalyasha/agents-proxy/tenants/centrum-badminton/tools"
+	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 )
 
 // TestCentrumProjectValidatesAgainstTheRegistry is the boot check, run in a
 // test so a malformed tenant folder fails CI rather than a deploy.
 //
-// Tool declarations live in tenants/<slug>/tools/*.go next to their
+// Tool implementations live in projects/<slug>/agent/tools/*.go next to their
 // implementations, so there is no per-tool registry to check here. What this
 // asserts is the boot path itself: projects load, validate, and carry the
 // tenant's identity.
@@ -49,10 +49,10 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	for _, want := range []string{
 		"Centrum Badminton Arena", // from project.json
 		"project instructions",
-		"reference: venue",
-		"reference: money-and-pricing",
+		"Opening hours and courts", // from agent/agent.md
+		"Money, pricing and how the numbers are counted",
 		"Today's date is", // runtime layer
-		"628159408136",    // the number moved from Go into the project file
+		"628159408136",    // the number lives in agent/agent.md
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("assembled prompt is missing %q", want)
@@ -60,7 +60,7 @@ func TestPromptLayersUseProjectContent(t *testing.T) {
 	}
 }
 
-// TestSkillsAreAlwaysInjectedWhole: every skill in tenants/<slug>/skills/ is
+// TestSkillsAreAlwaysInjectedWhole: every skill in projects/<slug>/agent/skills/ is
 // injected whole, every turn. A tenant's skills file is the procedures it
 // wants followed; injecting a procedure only sometimes means it is followed
 // only sometimes.

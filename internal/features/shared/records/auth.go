@@ -112,9 +112,19 @@ func withTenantTxOnce(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 			panic(p)
 		}
 	}()
-	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+	// The schema lookup is part of the same statement as the GUC set, so a
+	// tenant transaction costs one round trip. `clients` is resolved before
+	// search_path changes; subsequent statements see only the project schema
+	// (or public for legacy Centrum). Excluding public for project schemas is
+	// deliberate: an unqualified table that is missing from the project
+	// schema must fail, not silently fall back to a shared platform table.
+	if _, err := tx.Exec(ctx, `
+		SELECT set_config('app.tenant_id', $1, true),
+		       set_config('search_path', CASE WHEN s = 'public' THEN 'public' ELSE s END, true)
+		  FROM (SELECT COALESCE((SELECT db_schema FROM clients WHERE tenant_id = $1), 'public') AS s) q`,
+		tenantID); err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("set tenant_id: %w", err)
+		return fmt.Errorf("set tenant context: %w", err)
 	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback(ctx)

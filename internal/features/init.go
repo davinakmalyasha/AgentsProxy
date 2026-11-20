@@ -1,20 +1,19 @@
 package features
 
-// DONE: PRD 6.5 (init helpers) / STANDARDS A
-
-// To add a new shared feature:
+// To add a platform (cross-vertical) feature:
 //  1. drop a package under internal/features/shared/<name>/
 //  2. in that package's init() call features.Register(...)
 //  3. blank-import it from cmd/server/main.go
 //
-// To add a custom (per-tenant) feature:
-//  1. create a package under tenants/<slug>/backend/<name>/ following
-//     the existing centrum-badminton features
-//  2. edit the feature, set VerticalSlugs to the tenant's vertical
-//  3. blank-import it from cmd/server/main.go
+// To add a project-specific feature:
+//  1. create a package under projects/<slug>/backend/<name>/
+//  2. call features.RegisterProject("<slug>", "<vertical>", ...)
+//  3. run `go generate ./...` to add the generated blank import
 //
-// Registration happens in each package's own init(); there is no
-// central Init to call (and no central place to forget).
+// A project feature is scoped to one project and mounted under
+// /v1/p/<slug>/...; two projects may own a feature with the same name.
+// The legacy Centrum backend still uses Register() and /v1/sports/... so
+// its frontend keeps working unchanged.
 
-// ResetForTest clears the registry. Test-only.
+// ResetForTest clears the global registry. Test-only.
 func ResetForTest() { MustInit() }

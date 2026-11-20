@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -440,5 +441,47 @@ func TestRecords_AdapterCreateRecordsUsage(t *testing.T) {
 	}
 	if kind != "business" {
 		t.Errorf("usage kind=%q want business", kind)
+	}
+}
+
+// TestWithTenantTx_ProjectSchema proves the project-schema routing: the
+// transaction's search_path resolves an unqualified table from the
+// tenant's schema, not from public. This is the foundation for "one project,
+// one folder, one schema" for new projects.
+func TestWithTenantTx_ProjectSchema(t *testing.T) {
+	h := setupRecords(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const tenant = "tenant-project-schema"
+	const schema = "project_rec_test"
+	if _, err := h.admin.Exec(ctx, `
+		DROP SCHEMA IF EXISTS `+schema+` CASCADE;
+		CREATE SCHEMA `+schema+`;
+		CREATE TABLE `+schema+`.widgets (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			tenant_id text NOT NULL,
+			name text NOT NULL
+		);
+		GRANT USAGE ON SCHEMA `+schema+` TO app_runtime;
+		GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA `+schema+` TO app_runtime;
+		DELETE FROM clients WHERE tenant_id = '`+tenant+`';
+		INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		VALUES ('project-schema', '`+tenant+`', 'hash-project-schema', 1000, 'active', 'fnb', ARRAY['records'], '`+schema+`');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = h.admin.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE; DELETE FROM clients WHERE tenant_id = '`+tenant+`'`)
+	})
+
+	if err := WithTenantTx(ctx, h.pool, tenant, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO widgets (tenant_id, name) VALUES ($1, 'from-project-schema')`, tenant); err != nil {
+			return err
+		}
+		var n int
+		return tx.QueryRow(ctx, `SELECT count(*) FROM widgets WHERE tenant_id = $1`, tenant).Scan(&n)
+	}); err != nil {
+		t.Fatalf("WithTenantTx on project schema: %v", err)
 	}
 }

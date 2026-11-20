@@ -22,27 +22,34 @@ INSERT INTO keep_tenants (tenant_id) VALUES
 \echo 'tenants before:'
 SELECT tenant_id, name, status FROM clients ORDER BY tenant_id;
 
--- Every table with a tenant_id gets pruned, including tables without a
--- foreign key back to clients. This is what removes orphan tool-test rows.
+-- Every table with a tenant_id gets pruned, across public (platform + legacy
+-- Centrum) and every project_<slug> schema. This is what removes orphan
+-- tool-test rows. Project schemas are not dropped here: removing a schema is
+-- a decommission step that must happen after an export, not as part of a
+-- generic hygiene sweep.
 DO $$
 DECLARE
   r record;
 BEGIN
   FOR r IN
-    SELECT table_name
+    SELECT table_schema, table_name
     FROM information_schema.columns
-    WHERE table_schema = 'public'
+    WHERE (table_schema = 'public'
+           OR table_schema LIKE 'project\_%' ESCAPE '\')
       AND column_name = 'tenant_id'
       AND table_name <> 'clients'
-    ORDER BY table_name
+    ORDER BY table_schema, table_name
   LOOP
     EXECUTE format(
-      'DELETE FROM public.%I WHERE tenant_id NOT IN (SELECT tenant_id FROM keep_tenants)',
-      r.table_name
+      'DELETE FROM %I.%I WHERE tenant_id NOT IN (SELECT tenant_id FROM keep_tenants)',
+      r.table_schema, r.table_name
     );
-    RAISE NOTICE 'pruned %', r.table_name;
+    RAISE NOTICE 'pruned %.%', r.table_schema, r.table_name;
   END LOOP;
 END $$;
+
+DELETE FROM public.project_migrations
+WHERE project_slug NOT IN (SELECT tenant_id FROM keep_tenants);
 
 DELETE FROM clients
 WHERE tenant_id NOT IN (SELECT tenant_id FROM keep_tenants);
