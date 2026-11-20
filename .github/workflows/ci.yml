@@ -52,6 +52,10 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
       DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
+      # Tests read TEST_* only; DATABASE_* belongs to the server/migrate step.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
+      TEST_REDIS_URL: localhost:6379
       REDIS_URL: localhost:6379
       # Tests skip if these aren't set; provide a dummy so the integration
       # tests actually run.
@@ -112,6 +116,18 @@ jobs:
           go run ./cmd/genprojects
           if [[ -n $(git status --porcelain cmd/server/projects_gen.go) ]]; then
             echo "::error::cmd/server/projects_gen.go is stale. Run 'go run ./cmd/genprojects' and commit."
+            exit 1
+          fi
+
+      - name: tests never read runtime DB env
+        # A test suite that reads DATABASE_URL inherits whatever the shell
+        # happens to export — including a production DSN. Tests must use
+        # TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL / TEST_REDIS_URL.
+        run: |
+          hits=$(grep -rn 'os.Getenv("DATABASE_URL")\|os.Getenv("DATABASE_ADMIN_URL")\|os.Getenv("REDIS_URL")' --include='*_test.go' . || true)
+          if [[ -n $hits ]]; then
+            echo "::error::tests must read TEST_* env only:"
+            echo "$hits"
             exit 1
           fi
 

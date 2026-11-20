@@ -10,10 +10,10 @@ import (
 // TestNormalizePhone pins migration 065 at both layers: the pure
 // function, and the storage-boundary triggers (customers + bookings).
 func TestNormalizePhone(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn

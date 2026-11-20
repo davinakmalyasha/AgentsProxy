@@ -52,9 +52,9 @@ func liveDSN(t *testing.T) string {
 	if os.Getenv("ADK_LIVE_CONFORMANCE") != "1" {
 		t.Skip("opt-in only: writes session rows to the dev database")
 	}
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
 		t.Skip("no DSN in environment")

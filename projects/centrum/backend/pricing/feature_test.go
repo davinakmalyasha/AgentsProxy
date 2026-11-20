@@ -36,12 +36,12 @@ type harness struct {
 
 func setup(t *testing.T) *harness {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	rurl := os.Getenv("REDIS_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	rurl := os.Getenv("TEST_REDIS_URL")
 	if dsn == "" || rurl == "" {
-		t.Skip("DATABASE_URL / REDIS_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL / TEST_REDIS_URL not set — skipping integration test")
 	}
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
@@ -221,7 +221,7 @@ func TestPricing_PriceForDayAndEvening(t *testing.T) {
 	defer cancel()
 	seedRule(t, ctx, h.adminPool, "pr-a", "2026-01-01")
 
-	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("DATABASE_URL")))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("TEST_DATABASE_URL")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestPricing_TombstoneDelete(t *testing.T) {
 	// Price resolution no longer sees the tombstoned rule: with no other
 	// rule covering the date, the booking-time lookup reports ErrNoRule
 	// instead of pricing from a deleted row.
-	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("DATABASE_URL")))
+	pool, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("TEST_DATABASE_URL")))
 	if err != nil {
 		t.Fatal(err)
 	}

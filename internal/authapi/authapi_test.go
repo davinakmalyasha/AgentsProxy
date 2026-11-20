@@ -20,10 +20,10 @@ import (
 
 func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" || adminDSN == "" {
-		t.Skip("DATABASE_URL / DATABASE_ADMIN_URL not set")
+		t.Skip("TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

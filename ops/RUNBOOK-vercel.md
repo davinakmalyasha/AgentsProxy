@@ -24,17 +24,29 @@ Each client frontend is its own project. Vercel Hobby quotas are
 
 Set in the dashboard, never in git.
 
+> **Never run `vercel env rm NAME preview` for a variable that is shared
+> with Production.** Vercel stores one entry per key with a target list;
+> removing the Preview target through the CLI can remove the entire entry,
+> including Production. Use the dashboard's per-environment editor, or
+> duplicate the value into a separate Preview entry first. This exact
+> mistake caused a production boot failure on 2026-11-20 (`ENV` and the
+> database/Redis/LLM values disappeared from Production). The previous
+> deployment kept serving because Vercel pins a deployment's environment at
+> build time.
+
 | Var | Vercel value | Why |
 |---|---|---|
 | `BACKGROUND_TICKERS` | `false` | Both the reminder ticker and the notify drain loop assume a long-lived process. Vercel destroys it between requests, so they would never fire and Supabase owns delivery instead. **Getting this wrong means reminders silently never fire.** |
-| `DATABASE_URL` | Supavisor **6543** TX pooler | Transaction mode. Add `?pgbouncer=true` |
+| `ENV` | `production` | Strict enum; production tightens CORS and rejects a wildcard origin. |
+| `RUN_MIGRATIONS` | `false` | **Must be false on Vercel.** Preview and production refuse to boot with it true. Production DDL runs through the manual `db-migrate` workflow. |
+| `DATABASE_URL` | Supavisor **6543** TX pooler | Transaction mode. Add `?pgbouncer=true`. Must connect as `app_runtime`; a superuser or BYPASSRLS role fails the boot check. |
 | `DB_USE_SIMPLE_PROTOCOL` | `true` | 6543 is pgbouncer; no extended-query prepared statements. Required. |
 | `DB_POOL_MIN` | `0` | No warm connections — there is no long-lived process |
 | `DB_POOL_MAX` | `2` | **Per instance.** The default of 20 would let 20 concurrent lambdas open 400 connections into Supabase |
 | `TRUSTED_PROXY_CIDRS` | Vercel egress ranges | Without it `internal/api/clientip.go` ignores `X-Forwarded-For`, every client buckets as one IP, and you rate-limit yourself into `429`s |
 | `ALLOW_ORIGINS` | optional fallback only | CORS is normally DB-backed through `frontend_origins` + `origin_suffix_rules`. Keep this only as an emergency/debug fallback; `*` in prod defeats the `ENV=production` tightening. |
-| `ENV` | `production` | Tightens CORS |
-| `DATABASE_ADMIN_URL` | direct **5432**, superuser | Migrations + admin endpoints. Skipped on cold start when `RUN_MIGRATIONS=false` |
+| `ALLOW_REMOTE_DB` | unset | Staging only. Production is remote by definition; Preview carries no database at all. |
+| `DATABASE_ADMIN_URL` | direct **5432**, superuser | Admin endpoints (and `cmd/migrate`). Required when `ENV=production`. |
 | `REDIS_URL` | `rediss://…` **in ap-southeast-1 (Singapore)** | Cache, quota, rate limits — every request pays 1–3 sequential Redis round trips, so a cross-region Upstash adds 100–500ms per request. Same-region (`sin1` ↔ ap-southeast-1) keeps them at ~1–2ms. |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | as `.env` | |
 | `ADMIN_API_KEY` | 64 hex chars | |
@@ -46,10 +58,23 @@ Set in the dashboard, never in git.
 ```bash
 npx vercel link      # once
 npx vercel env add BACKGROUND_TICKERS production      # "false"
-npx vercel env add RUN_MIGRATIONS production          # "false" (migrations run as a deploy step: go run ./cmd/migrate)
-npx vercel env add RUN_MIGRATIONS preview             # "false" (never let a preview apply migrations)
+npx vercel env add RUN_MIGRATIONS production          # "false"
+npx vercel env add RUN_MIGRATIONS preview             # "false"
+npx vercel env add RUN_MIGRATIONS development         # "false"
 npx vercel deploy --prod
 ```
+
+Production DDL is a separate, auditable step:
+
+```bash
+gh workflow run db-migrate.yml -f ref=main
+```
+
+The workflow is gated by the GitHub `production` Environment (add required
+reviewers). It applies platform migrations and every `projects/<slug>/`
+migration, then prints both ledgers. Never run `cmd/migrate` from a laptop
+against production; the local `.env` has no remote credentials and
+`ENV=development` refuses them.
 
 Fluid Compute defaults to a 300s cap on every plan (Hobby maximum).
 It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
@@ -58,14 +83,14 @@ It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
 ## What you will feel
 
 - **1–3s cold start per request.** Each inbound request boots a fresh
-  process: Sentry init, config, two PG pools, the migration check, Redis.
+  process: Sentry init, config, two PG pools, Redis.
   If `Fluid Active CPU` ever becomes the constraint, the lever
   is that boot work, not the request path.
-- **Migrations are a deploy step, never a side effect of a request.** Run
-  `go run ./cmd/migrate` with the production admin DSN after the code is
-  built and before the new deployment serves. It applies platform
-  migrations, then each `projects/<slug>/migrations/` inside its schema, and
-  verifies every ledger checksum.
+- **No migration check on cold start.** `RUN_MIGRATIONS=false` means boot
+  skips the ledger entirely. Production migrations run through the manual
+  `db-migrate` workflow, which applies platform migrations and each
+  `projects/<slug>/migrations/` inside its schema, and verifies every ledger
+  checksum. A preview never reaches a database at all.
 
 Neither is a correctness problem. Both are why `BACKGROUND_TICKERS=false` and
 Supabase-side delivery are required rather than optional.

@@ -96,9 +96,10 @@ railway logs -f | jq 'select(.request_id=="<id>")'
 ### 3.3 Postgres Down
 
 - `GET /healthz` returns 500 with `db:false`.
-- Diagnose from a shell with `DATABASE_URL`:
+- Diagnose from a shell with an ad-hoc admin DSN (from the password manager,
+  never stored in `.env`):
   ```bash
-  psql "$DATABASE_URL" -c 'SELECT 1'
+  psql "$DATABASE_ADMIN_URL" -c 'SELECT 1'
   ```
 - Fix: see Supabase status page (prod) or `laragon start` (dev).
 
@@ -135,6 +136,8 @@ For data incidents: restore from `ops/backup.sh` output:
 ```bash
 gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADMIN_URL"
 ```
+Supply `DATABASE_ADMIN_URL` ad hoc from the password manager. It must not
+live in a local `.env`; the app refuses a remote database in development.
 
 ---
 
@@ -143,9 +146,11 @@ gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADM
 | Env | Default | Notes |
 |---|---|---|
 | `PORT` | 8080 | |
-| `ENV` | development | `development` / `production` |
-| `DATABASE_URL` | required | runtime pool — connect as `app_runtime` in production (Supabase Supavisor 6543) |
-| `DATABASE_ADMIN_URL` | empty | migrations + admin endpoints — connect as superuser (Supabase 5432 direct) |
+| `ENV` | development | strict enum: `development` / `staging` / `production`; anything else fails boot |
+| `DATABASE_URL` | required | runtime pool — **must be `app_runtime` (NOBYPASSRLS) in production**; boot rejects superuser/BYPASSRLS |
+| `DATABASE_ADMIN_URL` | empty | migrations + admin endpoints — superuser (Supabase 5432 direct); required when `ENV=production` |
+| `ALLOW_REMOTE_DB` | false | staging-only opt-in for a remote database; development always rejects remote |
+| `RUN_MIGRATIONS` | true in development, false otherwise | Vercel preview/production may never set true |
 | `REDIS_URL` | localhost:6379 | production: `rediss://...` for TLS |
 | `LLM_BASE_URL` | https://api.deepseek.com | |
 | `LLM_API_KEY` | required | |
@@ -161,6 +166,41 @@ gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADM
 | `DB_POOL_MIN` | 2 | runtime pool minimum connections |
 | `DB_POOL_MAX` | 20 | runtime pool maximum connections |
 | `DB_USE_SIMPLE_PROTOCOL` | false | **set to `true` when connecting via Supavisor 6543** |
+| `TEST_DATABASE_URL` | empty | tests only; local throwaway DB as `app_runtime` |
+| `TEST_DATABASE_ADMIN_URL` | empty | tests only; local throwaway DB as `postgres` |
+| `TEST_REDIS_URL` | empty | tests only; local Redis |
+
+### 5a. Environment safety (enforced before any DB connection)
+
+* `ENV=development` + any non-loopback database host → boot fails. A
+  production DSN on a laptop cannot be used, even with
+  `ALLOW_REMOTE_DB=true`.
+* `ENV=staging` + remote host requires `ALLOW_REMOTE_DB=true`.
+* `VERCEL_ENV=production` requires `ENV=production`; `VERCEL_ENV=preview`
+  rejects `ENV=production`.
+* `RUN_MIGRATIONS=true` on Vercel preview/production → boot fails.
+* `ENV=production` + a runtime role with `rolsuper` or `rolbypassrls` →
+  boot fails. The log line is `runtime role verified role=app_runtime`.
+* Vercel Preview must have **no** production variables. A backend preview
+  fails with `DATABASE_URL is required`; that is the intended fail-closed
+  state until the staging project exists.
+
+### 5b. Secret rotation
+
+Generate URL-safe values (`openssl rand -hex 24`), store them in the password
+manager first, then rotate in this order. Never paste a secret into chat or a
+shell history.
+
+| Role | Used by | Rotate | Update | Verify |
+|---|---|---|---|---|
+| `app_runtime` | Vercel Production `DATABASE_URL` | `ALTER ROLE` in Supabase SQL editor | Vercel Production env, then redeploy | `/healthz` + one tenant read |
+| `postgres` | Vercel Production `DATABASE_ADMIN_URL` | Supabase dashboard → **Reset database password** (not raw SQL; pg_net/internal services) | Vercel Production env, then redeploy | `go run ./cmd/migrate` (no-op) + admin read |
+| `backup_reader` | GitHub `BACKUP_DATABASE_URL` | `ALTER ROLE` | GitHub secret | run the backup workflow |
+| `delivery_caller` | Edge Function `DELIVERY_DATABASE_URL` | `ALTER ROLE` | Supabase Edge Function secret | next reminder tick / function log |
+
+Existing pooled sessions survive a password change; new connections fail
+until the consumer has the new value. Do `postgres` last, in a low-traffic
+window.
 
 ## 6. Feature toggle (instant or ≤15 min)
 
@@ -241,9 +281,9 @@ The script keeps `centrum` and `dfd-agency`, deletes every other
 project schemas; decommissioning a project is a separate export-then-drop
 step.
 
-Never run the DB-backed integration suite against the production
-`DATABASE_URL`. Point local tests at a disposable database; CI already
-uses a local Postgres service.
+Never run the DB-backed integration suite against production. Tests read
+`TEST_DATABASE_*` only and `make test` refuses a remote host; CI uses a
+local Postgres service.
 
 ---
 
@@ -252,6 +292,11 @@ uses a local Postgres service.
 `go run ./cmd/migrate` applies:
 1. platform migrations in `internal/db/migrations/` (public schema), then
 2. each project's `projects/<slug>/migrations/*.sql` (its own schema).
+
+On Vercel `RUN_MIGRATIONS=false` (and is forced false): cold starts must not
+replay the ledger, and a preview must never run DDL. Production migrations run
+through the manual `db-migrate` GitHub workflow, gated by the `production`
+Environment; it runs the same command against the admin DSN.
 
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration

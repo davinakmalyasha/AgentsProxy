@@ -23,10 +23,10 @@ import (
 // asserted. Closing the fresh-DB RLS gap needs test-role rework
 // (the `app` test role has no policies); tracked in DEFERRED.
 func TestDefiners_AsAppRuntime(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn

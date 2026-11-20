@@ -15,12 +15,12 @@ import (
 
 func setup(t *testing.T) (context.Context, *db.Pool, *redis.Client) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	rurl := os.Getenv("REDIS_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	rurl := os.Getenv("TEST_REDIS_URL")
 	if dsn == "" || rurl == "" {
-		t.Skip("DATABASE_URL / REDIS_URL not set")
+		t.Skip("TEST_DATABASE_URL / TEST_REDIS_URL not set")
 	}
-	migDSN := os.Getenv("DATABASE_ADMIN_URL")
+	migDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if migDSN == "" {
 		migDSN = dsn
 	}

@@ -35,12 +35,12 @@ type harness struct {
 
 func setup(t *testing.T) *harness {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	rurl := os.Getenv("REDIS_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	rurl := os.Getenv("TEST_REDIS_URL")
 	if dsn == "" || rurl == "" {
-		t.Skip("DATABASE_URL / REDIS_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL / TEST_REDIS_URL not set — skipping integration test")
 	}
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
@@ -58,7 +58,7 @@ func setup(t *testing.T) *harness {
 	// hosted database. Run this package against a local Postgres/Laragon
 	// (where `app` is an ordinary role) to actually exercise it.
 	if isManagedPoolerDSN(dsn) {
-		t.Skip("DATABASE_URL points at a managed pooler, which cannot authenticate a second test role — " +
+		t.Skip("TEST_DATABASE_URL points at a managed pooler, which cannot authenticate a second test role — " +
 			"run this package against a local Postgres to exercise it")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

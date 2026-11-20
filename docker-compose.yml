@@ -38,8 +38,10 @@ services:
     environment:
       PORT: "8080"
       ENV: production
-      DATABASE_URL: postgres://app:app@postgres:5432/agents_proxy?sslmode=disable
+      DATABASE_URL: postgres://app_runtime@postgres:5432/agents_proxy?sslmode=disable
       DATABASE_ADMIN_URL: postgres://postgres:postgres@postgres:5432/agents_proxy?sslmode=disable
+      # Long-running host: boot migrations are intentional here.
+      RUN_MIGRATIONS: "true"
       REDIS_URL: redis://redis:6379/0
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
@@ -47,7 +49,7 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY}
       MAX_TOKENS_PER_REQUEST: "2048"
       RATE_LIMIT_PER_MINUTE: "60"
-      ALLOW_ORIGINS: ${ALLOW_ORIGINS:-*}
+      ALLOW_ORIGINS: ${ALLOW_ORIGINS:-http://localhost:3000}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENV: ${SENTRY_ENV:-production}
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}

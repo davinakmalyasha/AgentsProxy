@@ -15,7 +15,7 @@ func TestLoad_MissingRequired(t *testing.T) {
 }
 
 func TestLoad_Defaults(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://u@h/d")
+	t.Setenv("DATABASE_URL", "postgres://u@localhost/d")
 	t.Setenv("LLM_API_KEY", "sk-test")
 	t.Setenv("ADMIN_API_KEY", "admin-secret")
 	t.Setenv("PORT", "")
@@ -56,7 +56,7 @@ func TestLoad_ParseOrigins(t *testing.T) {
 }
 
 func TestString_RedactsSecrets(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 	t.Setenv("LLM_API_KEY", "sk-test")
 	t.Setenv("ADMIN_API_KEY", "supersecret12345")
 	t.Setenv("SENTRY_DSN", "https://abc123@sentry.io/456")
@@ -66,7 +66,7 @@ func TestString_RedactsSecrets(t *testing.T) {
 	if strings.Contains(s, "supersecret12345") {
 		t.Errorf("admin key leaked: %s", s)
 	}
-	if strings.Contains(s, "pass@host") {
+	if strings.Contains(s, "pass@localhost") {
 		t.Errorf("db password leaked: %s", s)
 	}
 	if strings.Contains(s, "abc123") {
@@ -224,7 +224,8 @@ func TestFrontendURLProductionIgnoresLocalhost(t *testing.T) {
 }
 
 func TestLoad_ProductionRejectsWildcardCORS(t *testing.T) {
-	t.Setenv("DATABASE_URL", "x")
+	t.Setenv("DATABASE_URL", "postgres://u@localhost/d")
+	t.Setenv("DATABASE_ADMIN_URL", "postgres://u@localhost/d")
 	t.Setenv("LLM_API_KEY", "x")
 	t.Setenv("ADMIN_API_KEY", "x")
 	t.Setenv("ENV", "production")
@@ -260,5 +261,176 @@ func TestLoad_TrustedProxiesParsed(t *testing.T) {
 	}
 	if len(c.TrustedProxyCIDRs) != 2 {
 		t.Errorf("TrustedProxyCIDRs = %v", c.TrustedProxyCIDRs)
+	}
+}
+
+// baseEnv is the neutral local-development configuration the guard tests
+// start from. Every test overrides only the knob it is about.
+func baseEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("ENV", "development")
+	t.Setenv("VERCEL_ENV", "")
+	t.Setenv("DATABASE_URL", "postgres://u@localhost:5432/db")
+	t.Setenv("DATABASE_ADMIN_URL", "")
+	t.Setenv("LLM_API_KEY", "x")
+	t.Setenv("ADMIN_API_KEY", "x")
+	t.Setenv("RUN_MIGRATIONS", "")
+	t.Setenv("ALLOW_REMOTE_DB", "")
+	t.Setenv("ALLOW_ORIGINS", "*")
+}
+
+func TestLoad_RejectsInvalidENV(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("ENV", "prod")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ENV must be") {
+		t.Fatalf("expected ENV enum error, got %v", err)
+	}
+}
+
+func TestLoad_RejectsRemoteDatabaseInDevelopment(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://u@db.example.com:5432/db")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "remote host") {
+		t.Fatalf("expected remote DB error, got %v", err)
+	}
+}
+
+func TestLoad_RejectsRemoteAdminDatabaseInDevelopment(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("DATABASE_ADMIN_URL", "postgres://u@db.example.com:5432/db")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "remote host") {
+		t.Fatalf("expected remote admin DB error, got %v", err)
+	}
+}
+
+func TestLoad_DevelopmentCannotOptIntoRemoteDB(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://u@db.example.com:5432/db")
+	t.Setenv("ALLOW_REMOTE_DB", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "remote host") {
+		t.Fatalf("ALLOW_REMOTE_DB must not unlock development, got %v", err)
+	}
+}
+
+func TestLoad_StagingRemoteNeedsExplicitOptIn(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("ENV", "staging")
+	t.Setenv("DATABASE_URL", "postgres://u@db.example.com:5432/db")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ALLOW_REMOTE_DB") {
+		t.Fatalf("staging without opt-in must fail, got %v", err)
+	}
+
+	t.Setenv("ALLOW_REMOTE_DB", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("staging with opt-in should load: %v", err)
+	}
+	if c.Env != "staging" || !c.AllowRemoteDB {
+		t.Fatalf("env=%q allowRemoteDB=%t", c.Env, c.AllowRemoteDB)
+	}
+}
+
+func TestLoad_ProductionRequiresAdminURL(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("ENV", "production")
+	t.Setenv("ALLOW_ORIGINS", "https://dfdagency.vercel.app")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_ADMIN_URL") {
+		t.Fatalf("expected admin URL requirement, got %v", err)
+	}
+
+	t.Setenv("DATABASE_ADMIN_URL", "postgres://u@localhost:5432/db")
+	if _, err := Load(); err != nil {
+		t.Fatalf("production with admin URL should load: %v", err)
+	}
+}
+
+func TestLoad_RunMigrationsDefaults(t *testing.T) {
+	t.Run("development", func(t *testing.T) {
+		baseEnv(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.RunMigrations {
+			t.Fatal("development should default RUN_MIGRATIONS=true")
+		}
+	})
+	t.Run("staging", func(t *testing.T) {
+		baseEnv(t)
+		t.Setenv("ENV", "staging")
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RunMigrations {
+			t.Fatal("staging should default RUN_MIGRATIONS=false")
+		}
+	})
+	t.Run("production", func(t *testing.T) {
+		baseEnv(t)
+		t.Setenv("ENV", "production")
+		t.Setenv("DATABASE_ADMIN_URL", "postgres://u@localhost:5432/db")
+		t.Setenv("ALLOW_ORIGINS", "https://dfdagency.vercel.app")
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RunMigrations {
+			t.Fatal("production should default RUN_MIGRATIONS=false")
+		}
+	})
+}
+
+func TestLoad_RejectsBootMigrationsOnVercel(t *testing.T) {
+	for _, vercelEnv := range []string{"preview", "production"} {
+		t.Run(vercelEnv, func(t *testing.T) {
+			baseEnv(t)
+			t.Setenv("VERCEL_ENV", vercelEnv)
+			if vercelEnv == "production" {
+				t.Setenv("ENV", "production")
+				t.Setenv("DATABASE_ADMIN_URL", "postgres://u@localhost:5432/db")
+				t.Setenv("ALLOW_ORIGINS", "https://dfdagency.vercel.app")
+			} else {
+				t.Setenv("ENV", "staging")
+			}
+			t.Setenv("RUN_MIGRATIONS", "true")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RUN_MIGRATIONS must be false on Vercel") {
+				t.Fatalf("expected Vercel migration error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoad_VercelPreviewMustNotBeProduction(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("VERCEL_ENV", "preview")
+	t.Setenv("ENV", "production")
+	t.Setenv("DATABASE_ADMIN_URL", "postgres://u@localhost:5432/db")
+	t.Setenv("ALLOW_ORIGINS", "https://dfdagency.vercel.app")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "VERCEL_ENV=preview") {
+		t.Fatalf("expected preview/production mismatch, got %v", err)
+	}
+}
+
+func TestLoad_VercelProductionMustBeProduction(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("VERCEL_ENV", "production")
+	t.Setenv("ENV", "development")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires ENV=production") {
+		t.Fatalf("expected Vercel production mismatch, got %v", err)
+	}
+}
+
+func TestLoad_StagingPreviewLoadsWithoutMigrations(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("VERCEL_ENV", "preview")
+	t.Setenv("ENV", "staging")
+	t.Setenv("RUN_MIGRATIONS", "false")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("staging preview should load: %v", err)
+	}
+	if c.RunMigrations {
+		t.Fatal("staging preview must not run migrations")
 	}
 }

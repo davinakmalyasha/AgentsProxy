@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -91,12 +93,16 @@ type Config struct {
 	// Leaving it true on serverless is not a correctness bug, but it
 	// spends Active CPU on loops that can never fire.
 	BackgroundTickers bool
-	// RunMigrations applies embedded migrations at boot. Disable on
-	// serverless (Vercel sets RUN_MIGRATIONS=false) where every cold
-	// start would otherwise replay the whole ledger inside an advisory
-	// lock; run migrations as a deploy step instead (make migrate /
-	// Docker entrypoint / CI).
+	// RunMigrations applies embedded migrations at boot. It defaults to
+	// true only for ENV=development; staging and production default to
+	// false and run `cmd/migrate` as a deploy step. Vercel preview and
+	// production may never set it true.
 	RunMigrations bool
+	// AllowRemoteDB is the explicit staging-only opt-in for a database
+	// that is not on localhost. Development refuses remote databases
+	// outright so a leftover production DSN can never be used by a
+	// laptop boot.
+	AllowRemoteDB bool
 	// Agency plane (DFD ops: catalog, intake, portal, admin, agent API).
 	// JWT_SECRET enables /api/v1/* + /api/agent/* + /mcp; empty disables
 	// the plane (those routes answer 503) so existing proxy-only deploys
@@ -120,9 +126,15 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	env := getenv("ENV", "development")
+	env := normalizeEnv(getenv("ENV", "development"))
+	if err := validateEnv(env); err != nil {
+		return nil, err
+	}
+	if err := validateDeployTarget(env); err != nil {
+		return nil, err
+	}
 	frontendDefault := "https://dfdagency.vercel.app"
-	if !strings.EqualFold(env, "production") {
+	if env != "production" {
 		frontendDefault = "http://localhost:3000"
 	}
 	c := &Config{
@@ -182,7 +194,18 @@ func Load() (*Config, error) {
 	if c.BackgroundTickers, err = getenvBool("BACKGROUND_TICKERS", true); err != nil {
 		return nil, err
 	}
-	if c.RunMigrations, err = getenvBool("RUN_MIGRATIONS", true); err != nil {
+	// Boot migrations are a local-development convenience, not a
+	// production behaviour. Staging and production default to false and
+	// run `cmd/migrate` as a deploy step. Vercel preview/production may
+	// never opt back in: a preview deployment must not apply DDL.
+	defaultRunMigrations := c.Env == "development"
+	if c.RunMigrations, err = getenvBool("RUN_MIGRATIONS", defaultRunMigrations); err != nil {
+		return nil, err
+	}
+	if err := validateVercelMigrations(c); err != nil {
+		return nil, err
+	}
+	if c.AllowRemoteDB, err = getenvBool("ALLOW_REMOTE_DB", false); err != nil {
 		return nil, err
 	}
 	if c.SignupEnabled, err = getenvBool("SIGNUP_ENABLED", !strings.EqualFold(c.Env, "production")); err != nil {
@@ -200,6 +223,9 @@ func Load() (*Config, error) {
 	if c.AdminAPIKey == "" {
 		return nil, errors.New("ADMIN_API_KEY is required")
 	}
+	if err := validateDatabaseTargets(c); err != nil {
+		return nil, err
+	}
 	// ENV=production tightens CORS: a wildcard origin in production is
 	// a quota-burn hole (any site can call the public endpoints), so it
 	// fails boot instead of serving. Documented in .env.example.
@@ -211,6 +237,109 @@ func Load() (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// normalizeEnv makes ENV forgiving about case and stray whitespace while
+// still rejecting unknown values. "prod" is not production; it is a typo.
+func normalizeEnv(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func validateEnv(env string) error {
+	switch env {
+	case "development", "staging", "production":
+		return nil
+	default:
+		return fmt.Errorf("ENV must be development, staging, or production; got %q", env)
+	}
+}
+
+// validateDeployTarget keeps Vercel's own target and ENV from drifting
+// apart. A preview build that claims to be production used to receive the
+// production database and a boot-time migration default; that combination
+// is exactly what this rejects before any connection is opened.
+func validateDeployTarget(env string) error {
+	switch normalizeEnv(os.Getenv("VERCEL_ENV")) {
+	case "":
+		return nil
+	case "production":
+		if env != "production" {
+			return fmt.Errorf("VERCEL_ENV=production requires ENV=production, got %q", env)
+		}
+	case "preview":
+		if env == "production" {
+			return errors.New("VERCEL_ENV=preview must not use ENV=production; remove production environment variables from Preview")
+		}
+	}
+	return nil
+}
+
+// validateVercelMigrations makes boot-time DDL impossible on Vercel. A
+// preview must never migrate a database, and production migrations are a
+// separate approved deploy step (db-migrate workflow).
+func validateVercelMigrations(c *Config) error {
+	if !c.RunMigrations {
+		return nil
+	}
+	switch normalizeEnv(os.Getenv("VERCEL_ENV")) {
+	case "production", "preview":
+		return fmt.Errorf("RUN_MIGRATIONS must be false on Vercel (%s); run the db-migrate workflow instead", normalizeEnv(os.Getenv("VERCEL_ENV")))
+	}
+	return nil
+}
+
+// validateDatabaseTargets enforces the environment boundary on database
+// hosts. Development is local-only, full stop. Staging may reach its own
+// remote database, but only with an explicit ALLOW_REMOTE_DB=true. A
+// production DSN on a laptop is the exact failure this catches.
+func validateDatabaseTargets(c *Config) error {
+	if c.Env == "production" {
+		if strings.TrimSpace(c.DatabaseAdminURL) == "" {
+			return errors.New("DATABASE_ADMIN_URL is required when ENV=production")
+		}
+		return nil
+	}
+	for _, target := range []struct {
+		name string
+		dsn  string
+	}{
+		{"DATABASE_URL", c.DatabaseURL},
+		{"DATABASE_ADMIN_URL", c.DatabaseAdminURL},
+	} {
+		if target.dsn == "" {
+			continue
+		}
+		host, ok := dsnHost(target.dsn)
+		if !ok {
+			// Let pgx report a malformed DSN at connect time; the
+			// guard is about reachable remote hosts, not URL lint.
+			continue
+		}
+		if isLoopbackHost(host) {
+			continue
+		}
+		if c.Env == "staging" && c.AllowRemoteDB {
+			continue
+		}
+		return fmt.Errorf("%s points at remote host %q while ENV=%s; local development must use localhost, and only staging may opt in with ALLOW_REMOTE_DB=true", target.name, host, c.Env)
+	}
+	return nil
+}
+
+func dsnHost(dsn string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(dsn))
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	return strings.ToLower(u.Hostname()), true
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // frontendURL never lets a leftover localhost value reach a production
@@ -325,12 +454,12 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t agency=%t frontend=%s}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t ALLOW_REMOTE_DB=%t agency=%t frontend=%s}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), redactDSN(c.RedisURL), c.LLMBaseURL, c.LLMModel,
 		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
 		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
-		c.AgencyJWTSecret != "", c.AgencyFrontend,
+		c.AllowRemoteDB, c.AgencyJWTSecret != "", c.AgencyFrontend,
 	)
 }
 
