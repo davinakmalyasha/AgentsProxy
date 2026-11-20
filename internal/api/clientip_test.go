@@ -30,6 +30,17 @@ func TestClientIPTrustedHonorsHeaders(t *testing.T) {
 	}
 }
 
+func TestClientIPVercelTrustsOverwrittenHeaders(t *testing.T) {
+	// Vercel overwrites X-Forwarded-For at its edge; the function's TCP
+	// peer is Vercel, not the browser. Trust the overwritten header so
+	// rate-limit buckets are per visitor, not per Vercel proxy.
+	t.Setenv("VERCEL", "1")
+	r := reqWith("76.76.21.21:443", "", "203.0.113.7")
+	if got := clientIP(r); got != "203.0.113.7" {
+		t.Fatalf("got %q, want the overwritten client IP", got)
+	}
+}
+
 func TestClientIPSpoofIgnored(t *testing.T) {
 	// Untrusted direct peer: headers must NOT win.
 	r := reqWith("203.0.113.99:443", "1.2.3.4", "5.6.7.8")
