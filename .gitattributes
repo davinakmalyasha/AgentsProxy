@@ -1,0 +1,5 @@
+# SQL migrations are checksummed; a CRLF checkout must not change the hash.
+*.sql text eol=lf
+
+# Shell scripts run on Linux CI and Git Bash; CRLF breaks shebangs.
+*.sh text eol=lf

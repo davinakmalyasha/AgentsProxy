@@ -8,9 +8,9 @@ import (
 )
 
 func TestPool_Real(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -25,14 +25,14 @@ func TestPool_Real(t *testing.T) {
 }
 
 // migrateDSN returns the DSN to use for migrations. If
-// DATABASE_ADMIN_URL is set (production-style split), use that;
-// otherwise fall back to DATABASE_URL. Tests that need to call
+// TEST_DATABASE_ADMIN_URL is set (production-style split), use that;
+// otherwise fall back to TEST_DATABASE_URL. Tests that need to call
 // Migrate() require CREATE EXTENSION/ALTER TABLE privileges.
 func migrateDSN() string {
-	if v := os.Getenv("DATABASE_ADMIN_URL"); v != "" {
+	if v := os.Getenv("TEST_DATABASE_ADMIN_URL"); v != "" {
 		return v
 	}
-	return os.Getenv("DATABASE_URL")
+	return os.Getenv("TEST_DATABASE_URL")
 }
 
 func TestPool_BadDSN(t *testing.T) {

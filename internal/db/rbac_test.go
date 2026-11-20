@@ -19,10 +19,10 @@ import (
 // This is the security boundary that stops a runaway script or a
 // compromised service from self-provisioning a fat quota.
 func TestAppRuntime_CannotMutateClients(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn
@@ -75,10 +75,10 @@ func TestAppRuntime_CannotMutateClients(t *testing.T) {
 // TestAppRuntime_CanMutateTenantRecords: the runtime role can DML
 // the business table (with RLS via the GUC).
 func TestAppRuntime_CanMutateTenantRecords(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn
@@ -160,7 +160,7 @@ func toRuntimeDSN(dsn string) string {
 	if at < 0 {
 		return dsn
 	}
-	// If DATABASE_URL is already the runtime role (standard Supabase
+	// If TEST_DATABASE_URL is already the runtime role (standard Supabase
 	// setup: user `app_runtime` or `app_runtime.<ref>`), return it
 	// unchanged. The pooler routes on the full `user.ref` form and the
 	// password must be preserved — the old rewrite stripped both,

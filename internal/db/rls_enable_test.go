@@ -16,10 +16,10 @@ import (
 // Also proves the enable did not lock the runtime out: app_runtime must
 // still read clients and append usage through the policies.
 func TestClientsUsageRLSEnabled(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn

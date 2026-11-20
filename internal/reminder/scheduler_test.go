@@ -22,12 +22,12 @@ import (
 // WithTenantTx, so RLS is still in the path.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
+		dsn = os.Getenv("TEST_DATABASE_URL")
 	}
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping integration test")
+		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

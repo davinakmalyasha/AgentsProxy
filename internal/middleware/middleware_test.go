@@ -138,9 +138,9 @@ func TestCORS_AllowList(t *testing.T) {
 }
 
 func TestRateLimit_Real(t *testing.T) {
-	rurl := os.Getenv("REDIS_URL")
+	rurl := os.Getenv("TEST_REDIS_URL")
 	if rurl == "" {
-		t.Skip("REDIS_URL not set")
+		t.Skip("TEST_REDIS_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

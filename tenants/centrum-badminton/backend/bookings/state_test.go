@@ -1,6 +1,6 @@
 // DB-free tests for the booking state machine.
 //
-// These run without DATABASE_URL/REDIS_URL on purpose. The integration
+// These run without TEST_DATABASE_URL/TEST_REDIS_URL on purpose. The integration
 // tests in feature_test.go are where the SQL is proven, but they skip
 // whenever a managed pooler is in play (the harness has to CREATE ROLE
 // app, which the hosted pooler refuses), so the rules below were the

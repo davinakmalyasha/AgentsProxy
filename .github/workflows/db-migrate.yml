@@ -1,0 +1,73 @@
+# db-migrate.yml — the only place production DDL runs.
+#
+# Production boots with RUN_MIGRATIONS=false. This workflow applies the
+# embedded platform chain and every projects/<slug>/migrations/ inside its
+# own schema, then prints the ledger. It is manual and gated by the
+# `production` GitHub Environment; add required reviewers there.
+#
+# Secret: PROD_DATABASE_ADMIN_URL — the DIRECT 5432 postgres DSN. It is used
+# for both DATABASE_URL and DATABASE_ADMIN_URL because cmd/migrate only needs
+# the admin connection, and config.Load requires both names to be present.
+name: db-migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref whose embedded migrations to apply (e.g. feat/projects-architecture)"
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-migrate-production
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Apply platform + project migrations
+        env:
+          ENV: production
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          # Production config validation rejects a wildcard origin. The
+          # value is unused by cmd/migrate but must be valid.
+          ALLOW_ORIGINS: https://dfdagency.vercel.app
+          # cmd/migrate never constructs an LLM or admin client; config
+          # only requires the names to be non-empty.
+          LLM_API_KEY: migrate-unused
+          ADMIN_API_KEY: migrate-unused
+        run: |
+          set -euo pipefail
+          test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }
+          go run ./cmd/migrate
+
+      - name: Show ledger
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+        run: |
+          set -euo pipefail
+          echo "platform ledger (latest 5):"
+          psql "$DATABASE_ADMIN_URL" -Atc \
+            "select version from public.schema_migrations order by version desc limit 5"
+          echo "project ledger (latest 10):"
+          psql "$DATABASE_ADMIN_URL" -Atc \
+            "select project_slug || ' ' || version from public.project_migrations order by applied_at desc limit 10"

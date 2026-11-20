@@ -15,10 +15,10 @@ import (
 // (role absent) and fails if the role ever loses BYPASSRLS, the
 // pg_read_all_data grant, or RLS changes shape.
 func TestBackupReader_SeesAllRows(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	adminDSN := os.Getenv("DATABASE_ADMIN_URL")
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
+		t.Skip("TEST_DATABASE_URL not set")
 	}
 	if adminDSN == "" {
 		adminDSN = dsn
