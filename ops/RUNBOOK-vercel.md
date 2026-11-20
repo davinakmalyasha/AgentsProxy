@@ -43,7 +43,7 @@ Set in the dashboard, never in git.
 | `DB_USE_SIMPLE_PROTOCOL` | `true` | 6543 is pgbouncer; no extended-query prepared statements. Required. |
 | `DB_POOL_MIN` | `0` | No warm connections — there is no long-lived process |
 | `DB_POOL_MAX` | `2` | **Per instance.** The default of 20 would let 20 concurrent lambdas open 400 connections into Supabase |
-| `TRUSTED_PROXY_CIDRS` | Vercel egress ranges | Without it `internal/api/clientip.go` ignores `X-Forwarded-For`, every client buckets as one IP, and you rate-limit yourself into `429`s |
+| `TRUSTED_PROXY_CIDRS` | unset | Vercel overwrites `X-Forwarded-For`; `internal/api/clientip.go` trusts it when `VERCEL=1`, so per-visitor rate-limit buckets work without a CIDR list. Set this only for a self-managed proxy in front of a non-Vercel deploy. |
 | `ALLOW_ORIGINS` | optional fallback only | CORS is normally DB-backed through `frontend_origins` + `origin_suffix_rules`. Keep this only as an emergency/debug fallback; `*` in prod defeats the `ENV=production` tightening. |
 | `ALLOW_REMOTE_DB` | unset | Staging only. Production is remote by definition; Preview carries no database at all. |
 | `DATABASE_ADMIN_URL` | direct **5432**, superuser | Admin endpoints (and `cmd/migrate`). Required when `ENV=production`. |
