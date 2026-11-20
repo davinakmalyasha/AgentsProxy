@@ -1,8 +1,9 @@
 # Keep the Vercel build container lean and make it structurally
 # impossible for secrets or local junk to land in the upload.
 #
-# tenants/ is REQUIRED (memory/skills .md embed into the binary via
-# tenantembed.go), so it is re-included after the blanket *.md rule.
+# tenants/ was REQUIRED before the project move; projects/ is REQUIRED now
+# (agent.md, skills and migration files embed into the binary via
+# projectembed.go), so re-include its markdown after the blanket *.md rule.
 bin/
 data/
 /docs/
@@ -14,6 +15,7 @@ data/
 /ops/
 /scripts/
 *.md
+!projects/**/*.md
 !tenants/**/*.md
 *.png
 *.log
