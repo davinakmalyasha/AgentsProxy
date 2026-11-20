@@ -69,12 +69,16 @@ func currentTrusted() []netip.Prefix {
 }
 
 // trustedPeer reports whether the TCP peer may set forwarding headers.
+func onVercel() bool {
+	return strings.TrimSpace(os.Getenv("VERCEL")) == "1"
+}
+
 func trustedPeer(remoteAddr string) bool {
 	// Vercel overwrites X-Forwarded-For and does not forward an
 	// upstream-supplied value, so its proxy is the trust boundary even
 	// though its egress addresses are dynamic. VERCEL=1 is injected by
 	// the platform; a direct, non-Vercel deployment never sees it.
-	if strings.TrimSpace(os.Getenv("VERCEL")) == "1" {
+	if onVercel() {
 		return true
 	}
 	host, _, err := net.SplitHostPort(remoteAddr)
@@ -107,6 +111,15 @@ func cleanIP(s string) string {
 // falls back to "unknown" so Redis keys stay well-formed.
 func clientIP(r *http.Request) string {
 	if trustedPeer(r.RemoteAddr) {
+		// Vercel documents X-Forwarded-For as overwritten and identical to
+		// X-Real-IP. Prefer it so a client-supplied X-Real-IP cannot win.
+		if onVercel() {
+			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+				if ip := cleanIP(strings.Split(xff, ",")[0]); ip != "" {
+					return ip
+				}
+			}
+		}
 		if ip := cleanIP(r.Header.Get("X-Real-IP")); ip != "" {
 			return ip
 		}
