@@ -115,7 +115,9 @@ jobs:
           mig=$(psql "$DSN" -tAc "select count(*) from schema_migrations where version like '%.sql'")
           echo "migrations recorded in dump: $mig"
           test "$mig" -ge 50
-          for t in clients tenant_records agent_reminders usage project_centrum.sports_bookings push_subscriptions; do
+          for t in clients tenant_records agent_reminders usage push_subscriptions; do
             n=$(psql "$DSN" -tAc "select count(*) from \"$t\"")
             echo "$t: $n rows"
           done
+          n=$(psql "$DSN" -tAc "select count(*) from project_centrum.sports_bookings")
+          echo "project_centrum.sports_bookings: $n rows"
