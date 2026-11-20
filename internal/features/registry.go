@@ -203,6 +203,39 @@ func ProjectFeatures(project string) []Feature {
 }
 
 // ProjectVertical returns the vertical registered for a project.
+// IsKnownProjectFeature reports whether name is registered for project.
+// "records" is implicit for every project, matching the global registry.
+func IsKnownProjectFeature(project, name string) bool {
+	project = strings.ToLower(strings.TrimSpace(project))
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "records" {
+		return true
+	}
+	projectMu.RLock()
+	defer projectMu.RUnlock()
+	_, ok := projectFeatures[project][name]
+	return ok
+}
+
+// ProjectFeatureAllowed reports whether a project-owned feature exists and
+// is allowed for the given vertical. It is the project-scoped equivalent of
+// IsKnownFeature + AllowedForVertical, used by admin provisioning so a
+// project's own feature can be written into clients.features.
+func ProjectFeatureAllowed(project, name, vertical string) bool {
+	project = strings.ToLower(strings.TrimSpace(project))
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "records" {
+		return true
+	}
+	projectMu.RLock()
+	defer projectMu.RUnlock()
+	f, ok := projectFeatures[project][name]
+	if !ok {
+		return false
+	}
+	return projectFeatureAllowed(f, vertical)
+}
+
 func ProjectVertical(project string) string {
 	project = strings.ToLower(strings.TrimSpace(project))
 	projectMu.RLock()
