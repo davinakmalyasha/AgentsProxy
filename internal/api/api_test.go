@@ -21,6 +21,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/article"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/booking"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/menu"
@@ -614,6 +615,47 @@ func TestAdmin_Create_HappyAndPatch(t *testing.T) {
 	resp3.Body.Close()
 	if resp3.StatusCode != 403 {
 		t.Errorf("paused chat status=%d want 403", resp3.StatusCode)
+	}
+}
+
+// TestAdmin_Create_ProjectFeature proves a project-owned feature can be
+// written into clients.features even though it is not in the global
+// registry. Without this, a new project's custom routes were unreachable
+// by client tokens after provisioning.
+func TestAdmin_Create_ProjectFeature(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	const tenant = "proj-admin-test"
+	features.RegisterProject(tenant, "sports", features.Feature{Name: "quote"})
+	cleanup := func() {
+		ctx := context.Background()
+		_, _ = h.pool.Exec(ctx, `DROP SCHEMA IF EXISTS project_proj_admin_test CASCADE`)
+		_, _ = h.pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	body := `{"name":"proj-admin","tenant_id":"` + tenant + `","vertical":"sports","monthly_quota_tokens":5000}`
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.adminKey)
+	resp := mustReq(t, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(raw))
+	}
+	m := readJSON(t, resp)
+	got, _ := m["features"].([]any)
+	found := false
+	for _, v := range got {
+		if s, _ := v.(string); s == "quote" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("features=%v, want project feature quote", got)
 	}
 }
 

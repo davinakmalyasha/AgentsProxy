@@ -116,17 +116,25 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unknown vertical: "+req.Vertical)
 		return
 	}
-	// Default features = DefaultSetFor(vertical).
+	// Default features = DefaultSetFor(vertical), plus the project's own
+	// registered features. A new project's custom features are part of its
+	// identity, not an opt-in the operator has to remember.
 	if len(req.Features) == 0 {
 		req.Features = features.DefaultSetFor(req.Vertical)
+		for _, f := range features.ProjectFeatures(req.TenantID) {
+			if features.ProjectFeatureAllowed(req.TenantID, f.Name, req.Vertical) &&
+				!containsString(req.Features, f.Name) {
+				req.Features = append(req.Features, f.Name)
+			}
+		}
 	} else {
 		// Validate every requested feature is known + allowed for the vertical.
 		for _, f := range req.Features {
-			if !features.IsKnownFeature(f) {
+			if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(req.TenantID, f) {
 				writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
 				return
 			}
-			if !features.AllowedForVertical(f, req.Vertical) {
+			if !featureAllowedForClient(req.TenantID, req.Vertical, f) {
 				writeJSONError(w, http.StatusBadRequest, "feature "+f+" not allowed for vertical "+req.Vertical)
 				return
 			}
@@ -355,13 +363,15 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 		curVert = *req.Vertical
 	}
 	if req.Features != nil {
-		// Validate names + per-vertical allow-list.
+		// Validate names + per-vertical allow-list. A project-owned feature
+		// is valid for its own tenant even though it is not in the global
+		// registry.
 		for _, f := range *req.Features {
-			if !features.IsKnownFeature(f) {
+			if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(tenantID, f) {
 				writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
 				return
 			}
-			if !features.AllowedForVertical(f, curVert) {
+			if !featureAllowedForClient(tenantID, curVert, f) {
 				writeJSONError(w, http.StatusBadRequest, "feature "+f+" not allowed for vertical "+curVert)
 				return
 			}
@@ -390,6 +400,26 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 		"status":   "updated",
 		"vertical": curVert,
 	})
+}
+
+// featureAllowedForClient accepts either a global feature (validated against
+// the vertical allow-list) or a feature registered for this project. The
+// latter is what lets a new project put its own feature name into
+// clients.features without adding it to every vertical's global registry.
+func featureAllowedForClient(tenantID, vertical, name string) bool {
+	if features.IsKnownFeature(name) {
+		return features.AllowedForVertical(name, vertical)
+	}
+	return features.ProjectFeatureAllowed(tenantID, name, vertical)
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Admin) Usage(w http.ResponseWriter, r *http.Request) {
