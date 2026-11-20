@@ -17,6 +17,9 @@ func TestChat_Happy(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("auth=%q", r.Header.Get("Authorization"))
 		}
+		if r.Header.Get("x-opencode-session") == "" {
+			t.Error("missing x-opencode-session header")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"id":      "test",

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
@@ -53,6 +55,10 @@ type Client struct {
 	// chatURL is BaseURL + chatCompletionsPath, precomputed: the hot path
 	// concatenated it per request.
 	chatURL string
+	// SessionID is sent as x-opencode-session. OpenCode Go rejects
+	// requests without it; other OpenAI-compatible providers ignore the
+	// unknown header. Stable for the life of this client.
+	SessionID string
 }
 
 func New(baseURL, apiKey, model string, maxTokens int) *Client {
@@ -64,6 +70,7 @@ func New(baseURL, apiKey, model string, maxTokens int) *Client {
 		MaxTokens:    maxTokens,
 		HTTP:         httpx.NewClient(60 * time.Second),
 		chatURL:      baseURL + chatCompletionsPath,
+		SessionID:    uuid.NewString(),
 	}
 }
 
@@ -217,6 +224,9 @@ func (c *Client) post(ctx context.Context, payload chatRequest) ([]byte, int, er
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", c.SessionID)
+	}
 
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 )
@@ -69,6 +70,13 @@ func currentTrusted() []netip.Prefix {
 
 // trustedPeer reports whether the TCP peer may set forwarding headers.
 func trustedPeer(remoteAddr string) bool {
+	// Vercel overwrites X-Forwarded-For and does not forward an
+	// upstream-supplied value, so its proxy is the trust boundary even
+	// though its egress addresses are dynamic. VERCEL=1 is injected by
+	// the platform; a direct, non-Vercel deployment never sees it.
+	if strings.TrimSpace(os.Getenv("VERCEL")) == "1" {
+		return true
+	}
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr

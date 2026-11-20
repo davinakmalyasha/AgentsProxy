@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/openai/openai-go/v3/option"
 	adkagent "google.golang.org/adk/v2/agent"
@@ -223,6 +224,10 @@ func New(cfg Config) (*Runner, error) {
 	}
 	opts := []option.RequestOption{
 		option.WithJSONSet("reasoning_effort", "low"),
+		// OpenCode Go rejects every request without this header. A stable
+		// process ID satisfies the gateway and keeps prompt-cache affinity
+		// for the life of the deployment; other providers ignore it.
+		option.WithHeader("x-opencode-session", uuid.NewString()),
 	}
 	if llm.IsReasoningModel(cfg.Model) {
 		opts = append(opts, option.WithJSONSet("thinking", map[string]string{"type": "disabled"}))
