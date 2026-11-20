@@ -136,7 +136,11 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
-	if _, err := tx.Exec(r.Context(), "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+	if _, err := tx.Exec(r.Context(), `
+		SELECT set_config('app.tenant_id', $1, true),
+		       set_config('search_path',
+		                  COALESCE((SELECT db_schema FROM public.clients WHERE tenant_id = $1), 'public'),
+		                  true)`, tenantID); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}

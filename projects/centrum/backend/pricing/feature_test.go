@@ -53,12 +53,12 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_pricing_rules WHERE tenant_id IN ('pr-a','pr-b');
+			`DELETE FROM project_centrum.sports_pricing_rules WHERE tenant_id IN ('pr-a','pr-b');
 			 DELETE FROM clients WHERE tenant_id IN ('pr-a','pr-b');`); err != nil {
 			return err
 		}
@@ -112,8 +112,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	_, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	)
 	return err
@@ -162,7 +162,7 @@ func readAll(t *testing.T, resp *http.Response) string {
 func seedRule(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string, validFrom string) {
 	t.Helper()
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+		`INSERT INTO project_centrum.sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
 		 VALUES ($1,$2::date,'07:00','23:00','07:00','17:00',20000,40000)`,
 		tenant, validFrom); err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestPricing_TombstoneDelete(t *testing.T) {
 	var delBy string
 	var delAt time.Time
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM sports_pricing_rules WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+		`SELECT deleted_by, deleted_at FROM project_centrum.sports_pricing_rules WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {

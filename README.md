@@ -20,8 +20,8 @@ prune script and tenant hygiene.
 
 New projects are not shared vertical code: each one gets
 `projects/<slug>/` and its own Postgres schema (`project_<slug>`). Centrum
-is the one legacy project still on `public` and `/v1/sports/...`; new
-frontends use `/v1/p/<slug>/...`.
+now owns `project_centrum`; its frontend still calls `/v1/sports/...` until
+the route cutover, while new frontends use `/v1/p/<slug>/...`.
 
 ## Layout
 

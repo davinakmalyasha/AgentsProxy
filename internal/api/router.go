@@ -152,8 +152,13 @@ func NewRouter(d Deps) http.Handler {
 			slog.Warn("project config unavailable for project routes", "project", slug, "err", err)
 		}
 		for slug, p := range projectCfgs {
-			if p.Schema == "public" {
-				continue // legacy Centrum keeps /v1/sports/*
+			if slug == "centrum" {
+				// Centrum owns project_centrum after the legacy schema
+				// move, but its frontend still calls /v1/sports/*. Do not
+				// mount a half-populated /v1/p/centrum until the route
+				// migration lands; the legacy vertical router remains the
+				// single public surface.
+				continue
 			}
 			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, bDeps, p.Vertical))
 		}

@@ -30,8 +30,8 @@ func TestProjectsLoadFromTheProjectsTree(t *testing.T) {
 	if p.Vertical != "sports" {
 		t.Errorf("vertical = %q, want sports", p.Vertical)
 	}
-	if p.Schema != "public" {
-		t.Errorf("schema = %q, want public", p.Schema)
+	if p.Schema != "project_centrum" {
+		t.Errorf("schema = %q, want project_centrum", p.Schema)
 	}
 	if !p.Agent.Enabled {
 		t.Error("centrum agent should be enabled")

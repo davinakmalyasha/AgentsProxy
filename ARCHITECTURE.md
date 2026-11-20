@@ -45,16 +45,19 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
 ## 3. Data: one Postgres, platform + project schemas
 
 * Client platform: `clients(token_hash,quota,status,vertical,features[],
-  db_schema)`, `usage`, `sports_sessions`, and the shared identity tables.
-  `clients.db_schema` routes a tenant to its business schema.
+  db_schema)`, `usage`, and the shared identity tables. `clients.db_schema`
+  routes a tenant to its business schema.
 * Project business data: one Postgres schema per project, e.g.
-  `project_centrum`/`project_acme`. Centrum is legacy and still uses
-  `public`; new projects set `"schema": "project_<slug>"` in project.json and
-  put their tables in `projects/<slug>/migrations/`. Every table still carries
-  `tenant_id → clients(tenant_id) ON DELETE CASCADE` + `ENABLE+FORCE RLS` +
-  policy `tenant_id = current_setting('app.tenant_id')` + `GRANT app_runtime`.
-  Handlers run in `WithTenantTx`, which sets both the GUC and `search_path`
-  from `clients.db_schema` per transaction — defense in depth.
+  `project_centrum`/`project_acme`. Centrum's tables were moved out of
+  `public` by `projects/centrum/migrations/0001_move_to_project_schema.sql`;
+  every project, including Centrum, now sets `"schema": "project_<slug>"` in
+  project.json and puts its tables in `projects/<slug>/migrations/`. Every
+  table still carries `tenant_id → clients(tenant_id) ON DELETE CASCADE` +
+  `ENABLE+FORCE RLS` + policy `tenant_id = current_setting('app.tenant_id')`
+  + `GRANT app_runtime`. Handlers run in `WithTenantTx`, which sets both the
+  GUC and `search_path` from `clients.db_schema` per transaction — defense in
+  depth. Centrum keeps its legacy `/v1/sports/...` route until its frontend
+  cutover; the data boundary is already project-scoped.
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;

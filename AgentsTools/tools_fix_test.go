@@ -53,13 +53,13 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 	// Apply migrations here rather than relying on another package having done
 	// it: Go runs this package first (capital A sorts before cmd/ and internal/),
 	// so on a fresh CI database the sports_* tables do not exist yet.
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{
-		`DELETE FROM sports_bookings WHERE tenant_id=$1`,
-		`DELETE FROM sports_customers WHERE tenant_id=$1`,
-		`DELETE FROM sports_facilities WHERE tenant_id=$1`,
+		`DELETE FROM project_centrum.sports_bookings WHERE tenant_id=$1`,
+		`DELETE FROM project_centrum.sports_customers WHERE tenant_id=$1`,
+		`DELETE FROM project_centrum.sports_facilities WHERE tenant_id=$1`,
 		`DELETE FROM clients WHERE tenant_id=$1`,
 	} {
 		if _, err := adminPool.Exec(ctx, stmt, tenant); err != nil {
@@ -67,20 +67,20 @@ func toolTestPool(t *testing.T) (context.Context, *pgxpool.Pool, *pgxpool.Pool) 
 		}
 	}
 	_, err = adminPool.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical)
-		 VALUES ($1,$1,'hash-tool-test',1000,'active','sports')`, tenant)
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, db_schema)
+		 VALUES ($1,$1,'hash-tool-test',1000,'active','sports','project_centrum')`, tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Seed one facility so booking rows have a valid facility_id.
 	_, err = adminPool.Exec(ctx,
-		`INSERT INTO sports_facilities (tenant_id, name, type) VALUES ($1,'Test Court','badminton')`, tenant)
+		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type) VALUES ($1,'Test Court','badminton')`, tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		adminPool.Exec(ctx, `DELETE FROM sports_bookings WHERE tenant_id=$1`, tenant)
-		adminPool.Exec(ctx, `DELETE FROM sports_facilities WHERE tenant_id=$1`, tenant)
+		adminPool.Exec(ctx, `DELETE FROM project_centrum.sports_bookings WHERE tenant_id=$1`, tenant)
+		adminPool.Exec(ctx, `DELETE FROM project_centrum.sports_facilities WHERE tenant_id=$1`, tenant)
 		adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id=$1`, tenant)
 	})
 	return ctx, pool, adminPool
@@ -109,9 +109,9 @@ func TestQueryIncome_UsesOverrideAndCompleted(t *testing.T) {
 	insert := func(name, status string, price int, override *int, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
-			`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price, override_price)
+			`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price, override_price)
 			 SELECT $1, id, $2::date, $3::time, $3::time + interval '1 hour', $4, $5, $6, $7
-			   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1`,
+			   FROM project_centrum.sports_facilities WHERE tenant_id=$1 LIMIT 1`,
 			tenant, today, start, name, status, price, override)
 		if err != nil {
 			t.Fatal(err)
@@ -140,9 +140,9 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 		t.Helper()
 		var id string
 		err := admin.QueryRow(ctx,
-			`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+			`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
 			 SELECT $1, id, $2::date, $3::time, $3::time + interval '1 hour', 'Dummy', $4, 100
-			   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1
+			   FROM project_centrum.sports_facilities WHERE tenant_id=$1 LIMIT 1
 			 RETURNING id::text`,
 			tenant, today, start, status).Scan(&id)
 		if err != nil {
@@ -159,7 +159,7 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 		t.Errorf("completed cancel=%q want 'cannot cancel'", out)
 	}
 	var status string
-	err = admin.QueryRow(ctx, `SELECT status FROM sports_bookings WHERE id=$1`, doneID).Scan(&status)
+	err = admin.QueryRow(ctx, `SELECT status FROM project_centrum.sports_bookings WHERE id=$1`, doneID).Scan(&status)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestCancelBooking_GuardsCompletedAndMissing(t *testing.T) {
 	if !strings.Contains(out, "cancelled") {
 		t.Errorf("valid cancel=%q want cancelled", out)
 	}
-	err = admin.QueryRow(ctx, `SELECT status FROM sports_bookings WHERE id=$1`, liveID).Scan(&status)
+	err = admin.QueryRow(ctx, `SELECT status FROM project_centrum.sports_bookings WHERE id=$1`, liveID).Scan(&status)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,16 +192,16 @@ func TestCancelBooking_PaidRequiresOfflineNote(t *testing.T) {
 	today := time.Now().In(agentstools.WibLoc()).Format("2006-01-02")
 	var id string
 	err := admin.QueryRow(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
 		 SELECT $1, id, $2::date, '11:00'::time, '12:00'::time, 'Paid Guy', 'confirmed', 100
-		   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1
+		   FROM project_centrum.sports_facilities WHERE tenant_id=$1 LIMIT 1
 		 RETURNING id::text`,
 		tenant, today).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method) VALUES ($1,$2::uuid,100,'cash')`,
+		`INSERT INTO project_centrum.sports_payments (tenant_id, booking_id, amount, method) VALUES ($1,$2::uuid,100,'cash')`,
 		tenant, id); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestCancelBooking_PaidRequiresOfflineNote(t *testing.T) {
 		t.Fatalf("paid cancel without note=%q want note requirement", out)
 	}
 	var status string
-	if err := admin.QueryRow(ctx, `SELECT status FROM sports_bookings WHERE id=$1`, id).Scan(&status); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT status FROM project_centrum.sports_bookings WHERE id=$1`, id).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
 	if status != "confirmed" {
@@ -227,7 +227,7 @@ func TestCancelBooking_PaidRequiresOfflineNote(t *testing.T) {
 		t.Fatalf("paid cancel with note=%q want note recorded", out)
 	}
 	var notes string
-	if err := admin.QueryRow(ctx, `SELECT status, notes FROM sports_bookings WHERE id=$1`, id).Scan(&status, &notes); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT status, notes FROM project_centrum.sports_bookings WHERE id=$1`, id).Scan(&status, &notes); err != nil {
 		t.Fatal(err)
 	}
 	if status != "cancelled" || !strings.Contains(notes, "cash refunded offline") {
@@ -242,9 +242,9 @@ func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 	insert := func(name, phone, status, start string) {
 		t.Helper()
 		_, err := admin.Exec(ctx,
-			`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status)
+			`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, status)
 			 SELECT $1, id, $2::date, $3::time, $3::time + interval '1 hour', $4, $5, $6
-			   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1`,
+			   FROM project_centrum.sports_facilities WHERE tenant_id=$1 LIMIT 1`,
 			tenant, today, start, name, phone, status)
 		if err != nil {
 			t.Fatal(err)
@@ -260,7 +260,7 @@ func TestTopCustomers_JoinsByPhoneAndCountsOnce(t *testing.T) {
 
 	// The customers table row is what names the phone in the join.
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_customers (tenant_id, name, phone) VALUES ($1,'Rina','0812-1111-1111')`,
+		`INSERT INTO project_centrum.sports_customers (tenant_id, name, phone) VALUES ($1,'Rina','0812-1111-1111')`,
 		tenant); err != nil {
 		t.Fatal(err)
 	}
@@ -316,12 +316,12 @@ func TestRecordStaffPayment_Runs(t *testing.T) {
 func TestTopupMember_Runs(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	if _, err := admin.Exec(ctx, `DELETE FROM sports_members WHERE tenant_id=$1`, tenant); err != nil {
+	if _, err := admin.Exec(ctx, `DELETE FROM project_centrum.sports_members WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	var id string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_members (tenant_id, name, balance) VALUES ($1,'M',0) RETURNING id::text`,
+		`INSERT INTO project_centrum.sports_members (tenant_id, name, balance) VALUES ($1,'M',0) RETURNING id::text`,
 		tenant).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
@@ -338,12 +338,12 @@ func TestTopupMember_Runs(t *testing.T) {
 func TestAdjustStock_Runs(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	if _, err := admin.Exec(ctx, `DELETE FROM sports_inventory WHERE tenant_id=$1`, tenant); err != nil {
+	if _, err := admin.Exec(ctx, `DELETE FROM project_centrum.sports_inventory WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	var id string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_inventory (tenant_id, name, quantity) VALUES ($1,'Shuttle',10) RETURNING id::text`,
+		`INSERT INTO project_centrum.sports_inventory (tenant_id, name, quantity) VALUES ($1,'Shuttle',10) RETURNING id::text`,
 		tenant).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
@@ -381,23 +381,23 @@ func TestSetReminder_RequiresRecipient(t *testing.T) {
 func TestKantinSummary_RespectsDate(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	if _, err := admin.Exec(ctx, `DELETE FROM sports_kantin_sale_items WHERE tenant_id=$1`, tenant); err != nil {
+	if _, err := admin.Exec(ctx, `DELETE FROM project_centrum.sports_kantin_sale_items WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.Exec(ctx, `DELETE FROM sports_kantin_sales WHERE tenant_id=$1`, tenant); err != nil {
+	if _, err := admin.Exec(ctx, `DELETE FROM project_centrum.sports_kantin_sales WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	seedSale := func(day string, total int) {
 		t.Helper()
 		var saleID string
 		if err := admin.QueryRow(ctx,
-			`INSERT INTO sports_kantin_sales (tenant_id, total, created_at)
+			`INSERT INTO project_centrum.sports_kantin_sales (tenant_id, total, created_at)
 			 VALUES ($1,$2,($3::date + time '12:00') AT TIME ZONE 'Asia/Jakarta') RETURNING id::text`,
 			tenant, total, day).Scan(&saleID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := admin.Exec(ctx,
-			`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
+			`INSERT INTO project_centrum.sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
 			 VALUES ($1,$2,'Teh',2,10000,4000)`, tenant, saleID); err != nil {
 			t.Fatal(err)
 		}
@@ -432,36 +432,36 @@ func TestQueryRangeSummary_SingleRPC(t *testing.T) {
 
 	var bookingID string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
 		 SELECT $1, id, $2::date, '19:00'::time, '20:00'::time, 'Range', 'confirmed', 100000
-		   FROM sports_facilities WHERE tenant_id=$1 LIMIT 1 RETURNING id::text`,
+		   FROM project_centrum.sports_facilities WHERE tenant_id=$1 LIMIT 1 RETURNING id::text`,
 		tenant, today).Scan(&bookingID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, paid_at)
+		`INSERT INTO project_centrum.sports_payments (tenant_id, booking_id, amount, method, paid_at)
 		 VALUES ($1, $2, 100000, 'cash', `+noonWIB(3)+`)`, tenant, bookingID, today); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_payments (tenant_id, booking_id, amount, method, paid_at, deleted_at)
+		`INSERT INTO project_centrum.sports_payments (tenant_id, booking_id, amount, method, paid_at, deleted_at)
 		 VALUES ($1, $2, 777000, 'cash', `+noonWIB(3)+`, now())`, tenant, bookingID, today); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_expenses (tenant_id, amount, spent_at) VALUES ($1, 30000, $2::date)`,
+		`INSERT INTO project_centrum.sports_expenses (tenant_id, amount, spent_at) VALUES ($1, 30000, $2::date)`,
 		tenant, today); err != nil {
 		t.Fatal(err)
 	}
 	var saleID string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_kantin_sales (tenant_id, total, created_at)
+		`INSERT INTO project_centrum.sports_kantin_sales (tenant_id, total, created_at)
 		 VALUES ($1, 25000, `+noonWIB(2)+`) RETURNING id::text`,
 		tenant, today).Scan(&saleID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
+		`INSERT INTO project_centrum.sports_kantin_sale_items (tenant_id, sale_id, product_name, qty, unit_price, unit_cost)
 		 VALUES ($1,$2,'Teh',1,25000,10000)`, tenant, saleID); err != nil {
 		t.Fatal(err)
 	}

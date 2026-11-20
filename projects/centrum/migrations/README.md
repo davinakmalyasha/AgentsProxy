@@ -1,16 +1,14 @@
 # Centrum migrations
 
-Centrum is the legacy project: its business tables live in the `public`
-schema and were created by the historical platform migration chain in
-`internal/db/migrations/`.
+Centrum now owns its business tables in `project_centrum`. The historical
+platform chain created them in `public`; `0001_move_to_project_schema.sql`
+is the one-time move that relocates them and rewrites the definer functions
+that referenced `public.sports_*`.
 
-This folder is intentionally empty of `.sql` files. New projects put their
-schema and tables here, for example:
+Centrum still serves its legacy `/v1/sports/*` API until the frontend cutover.
+The project folder and schema are already the real boundary.
 
-```text
-projects/acme/migrations/0001_init.sql
-```
-
-The runner reads `projects/<slug>/migrations/*.sql`, creates the project's
-schema from `project.json`, sets `search_path`, and records each version in
-`public.project_migrations`.
+New migrations for Centrum go here. Because `project.json` sets
+`"auto_grant": false`, a new table must grant `app_runtime` explicitly:
+Centrum's original grants are deliberate, especially `sports_sessions`,
+which stays SELECT-only for the runtime role.

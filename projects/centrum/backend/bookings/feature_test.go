@@ -57,7 +57,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	// Clean this test's tenants under an advisory lock so the four
@@ -65,9 +65,9 @@ func setup(t *testing.T) *harness {
 	// tables (SQLSTATE XX000 "tuple concurrently updated").
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
-			 DELETE FROM sports_facilities WHERE tenant_id IN ('bk-a','bk-b');
-			 DELETE FROM sports_pricing_rules WHERE tenant_id IN ('bk-a','bk-b');
+			`DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
+			 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('bk-a','bk-b');
+			 DELETE FROM project_centrum.sports_pricing_rules WHERE tenant_id IN ('bk-a','bk-b');
 			 DELETE FROM clients WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
 			return err
 		}
@@ -77,7 +77,7 @@ func setup(t *testing.T) *harness {
 		// covering the date). Seeded here so no test depends on another
 		// test's leftovers.
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+			`INSERT INTO project_centrum.sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
 			 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
 			        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`); err != nil {
 			return err
@@ -93,8 +93,8 @@ func setup(t *testing.T) *harness {
 	}
 	t.Cleanup(pool.Close)
 	if _, err := adminPool.Exec(ctx,
-		`DELETE FROM sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
-		 DELETE FROM sports_facilities WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
+		`DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
+		 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -129,8 +129,8 @@ func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, ten
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
@@ -142,8 +142,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
@@ -153,13 +153,13 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 func seedFacility(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) string {
 	t.Helper()
 	var id string
-	// Locked: seeding a facility INSERTS into sports_facilities while
+	// Locked: seeding a facility INSERTS into project_centrum.sports_facilities while
 	// other sports packages DELETE from it during setup — Postgres can
 	// raise "tuple concurrently updated" (SQLSTATE XX000) at the page
 	// level even for different tenants.
 	err := testutil.LockAndRun(ctx, admin, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour, open_time, close_time)
+			`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour, open_time, close_time)
 			 VALUES ($1,'Court 3','badminton',50000,'06:00','22:00') RETURNING id::text`,
 			tenant,
 		).Scan(&id)
@@ -281,7 +281,7 @@ func TestBookings_CRUD(t *testing.T) {
 }
 
 // TestBookings_CancelKeepsTheRow pins that DELETE is a SOFT cancel. A
-// hard delete would cascade into sports_payments and destroy the ledger
+// hard delete would cascade into project_centrum.sports_payments and destroy the ledger
 // entry the reports read, so the row must survive.
 func TestBookings_CancelKeepsTheRow(t *testing.T) {
 	h := setup(t)
@@ -337,7 +337,7 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	// block check rather than stopping at ErrNoRule. Seeded in setup; the
 	// conflict guard keeps this self-sufficient when run standalone.
 	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+		`INSERT INTO project_centrum.sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
 		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
 		        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)
 		 ON CONFLICT (tenant_id, valid_from) DO NOTHING`); err != nil {
@@ -353,12 +353,12 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	// Block 19:00-21:00 on one date, and 10:00-12:00 across ALL courts on
 	// another (facility_id NULL).
 	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		`INSERT INTO project_centrum.sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
 		 VALUES ('bk-a',$1,'2026-09-07','19:00','21:00','maintenance')`, fac); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		`INSERT INTO project_centrum.sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
 		 VALUES ('bk-a',NULL,'2026-09-08','10:00','12:00','private event')`); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	// The database trigger, which is what protects the paths that bypass
 	// this handler -- the agent's book_slot INSERTs directly.
 	_, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
 		 VALUES ('bk-a',$1,'2026-09-07','19:30','20:30','RawInsert','confirmed',50000)`, fac)
 	if err == nil {
 		t.Error("a direct INSERT into a blocked slot should have been refused by the trigger")
@@ -407,7 +407,7 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	// And a direct INSERT into a free slot still works, so the trigger is
 	// not simply refusing everything.
 	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
 		 VALUES ('bk-a',$1,'2026-09-07','15:00','16:00','RawFree','confirmed',50000)`, fac); err != nil {
 		t.Errorf("direct INSERT into a free slot was refused: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestBookings_DoubleBooking(t *testing.T) {
 	// And the DB has exactly one booking for that slot.
 	var n int
 	h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_bookings WHERE tenant_id='bk-a' AND facility_id=$1::uuid AND date='2026-09-06'`,
+		`SELECT count(*) FROM project_centrum.sports_bookings WHERE tenant_id='bk-a' AND facility_id=$1::uuid AND date='2026-09-06'`,
 		fac).Scan(&n)
 	if n != 1 {
 		t.Errorf("DB has %d bookings for slot, want 1", n)
@@ -579,7 +579,7 @@ func TestBookings_CreateIdempotency(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sports_bookings WHERE tenant_id='bk-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM project_centrum.sports_bookings WHERE tenant_id='bk-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -609,7 +609,7 @@ func TestBookings_CancelWithNote(t *testing.T) {
 	readAll(t, respD)
 	var notes string
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT notes FROM sports_bookings WHERE id=$1::uuid`, id).Scan(&notes); err != nil {
+		`SELECT notes FROM project_centrum.sports_bookings WHERE id=$1::uuid`, id).Scan(&notes); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(notes, "uang kembali tunai") {
@@ -624,7 +624,7 @@ func TestBookings_CancelWithNote(t *testing.T) {
 	}
 	id2, _ := readJSON(t, resp2)["id"].(string)
 	if _, err := h.adminPool.Exec(ctx,
-		`UPDATE sports_bookings SET status='checked_in' WHERE id=$1::uuid`, id2); err != nil {
+		`UPDATE project_centrum.sports_bookings SET status='checked_in' WHERE id=$1::uuid`, id2); err != nil {
 		t.Fatal(err)
 	}
 	respC := doReq(t, h.router, "DELETE", "/bookings/"+id2, "tok-bk-a", "")

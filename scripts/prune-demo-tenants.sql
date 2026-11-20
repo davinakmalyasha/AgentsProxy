@@ -60,12 +60,12 @@ SELECT tenant_id, name, status FROM clients ORDER BY tenant_id;
 -- Should return zero rows.
 SELECT t.table_name, t.tenant_id
 FROM (
-  SELECT 'sports_bookings' AS table_name, tenant_id FROM public.sports_bookings
-  UNION ALL SELECT 'sports_users', tenant_id FROM public.sports_users
-  UNION ALL SELECT 'sports_facilities', tenant_id FROM public.sports_facilities
-  UNION ALL SELECT 'sports_inventory', tenant_id FROM public.sports_inventory
-  UNION ALL SELECT 'sports_members', tenant_id FROM public.sports_members
-  UNION ALL SELECT 'sports_kantin_sales', tenant_id FROM public.sports_kantin_sales
+  SELECT 'sports_bookings' AS table_name, tenant_id FROM project_centrum.sports_bookings
+  UNION ALL SELECT 'sports_users', tenant_id FROM project_centrum.sports_users
+  UNION ALL SELECT 'sports_facilities', tenant_id FROM project_centrum.sports_facilities
+  UNION ALL SELECT 'sports_inventory', tenant_id FROM project_centrum.sports_inventory
+  UNION ALL SELECT 'sports_members', tenant_id FROM project_centrum.sports_members
+  UNION ALL SELECT 'sports_kantin_sales', tenant_id FROM project_centrum.sports_kantin_sales
   UNION ALL SELECT 'agent_reminders', tenant_id FROM public.agent_reminders
   UNION ALL SELECT 'agent_staff_payments', tenant_id FROM public.agent_staff_payments
   UNION ALL SELECT 'notify_jobs', tenant_id FROM public.notify_jobs

@@ -59,7 +59,7 @@ func setReminderTool(pool *pgxpool.Pool) agentstools.Tool {
 			var id string
 			err = records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx,
-					`INSERT INTO agent_reminders (tenant_id, text, remind_at, recipient_ref)
+					`INSERT INTO public.agent_reminders (tenant_id, text, remind_at, recipient_ref)
 					 VALUES ($1, $2, $3, $4) RETURNING id::text`,
 					tenantID, text, when, recipient).Scan(&id)
 			})

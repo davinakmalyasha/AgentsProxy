@@ -19,7 +19,7 @@ ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 out="$OUT_DIR/agents_proxy-$ts.sql.gz"
 
 echo "[backup] dumping $ADMIN_URL -> $out"
-# App schemas only: public (platform + legacy Centrum), private, and every
+# App schemas only: public (platform), private, project_centrum, and every
 # project_<slug> schema. The platform layers (auth/storage/vault/...) are
 # Supabase-managed and covered by the platform WAL-G backups; including
 # them breaks portable restores (hosted-only extensions, pg_cron config

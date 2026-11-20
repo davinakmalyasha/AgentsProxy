@@ -80,3 +80,66 @@ func TestMigrateProjectsFS(t *testing.T) {
 		t.Fatalf("MigrateProjectsFS (second): %v", err)
 	}
 }
+
+// TestMigrateProjectsFS_AutoGrantFalse pins the legacy-project escape hatch:
+// a project that owns its grants must not receive the runner's blanket DML
+// grant. Centrum relies on this for sports_sessions (SELECT-only runtime).
+func TestMigrateProjectsFS_AutoGrantFalse(t *testing.T) {
+	dsn := migrateDSN()
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping project migration test")
+	}
+	requireLocalDB(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("platform migrate: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS project_dbnogrant CASCADE;
+		DELETE FROM public.project_migrations WHERE project_slug = 'dbnogrant'`); err != nil {
+		t.Fatalf("cleanup before: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS project_dbnogrant CASCADE;
+			DELETE FROM public.project_migrations WHERE project_slug = 'dbnogrant'`)
+	})
+
+	fsys := fstest.MapFS{
+		"projects/dbnogrant/project.json": &fstest.MapFile{Data: []byte(`{
+			"slug": "dbnogrant",
+			"display": "DB No Grant",
+			"vertical": "sports",
+			"schema": "project_dbnogrant",
+			"auto_grant": false
+		}`)},
+		"projects/dbnogrant/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(`
+			CREATE TABLE IF NOT EXISTS widgets (
+				id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+				tenant_id text NOT NULL
+			);
+			GRANT SELECT ON widgets TO app_runtime;
+		`)},
+	}
+
+	if err := MigrateProjectsFS(ctx, pool, fsys); err != nil {
+		t.Fatalf("MigrateProjectsFS: %v", err)
+	}
+	var canSelect, canInsert bool
+	if err := pool.QueryRow(ctx,
+		`SELECT has_table_privilege('app_runtime', 'project_dbnogrant.widgets', 'SELECT'),
+		        has_table_privilege('app_runtime', 'project_dbnogrant.widgets', 'INSERT')`).
+		Scan(&canSelect, &canInsert); err != nil {
+		t.Fatal(err)
+	}
+	if !canSelect {
+		t.Error("app_runtime cannot SELECT project_dbnogrant.widgets")
+	}
+	if canInsert {
+		t.Error("auto_grant=false still granted INSERT to app_runtime")
+	}
+}

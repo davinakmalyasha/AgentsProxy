@@ -52,12 +52,12 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_members WHERE tenant_id IN ('mem-a','mem-b');
+			`DELETE FROM project_centrum.sports_members WHERE tenant_id IN ('mem-a','mem-b');
 			 DELETE FROM clients WHERE tenant_id IN ('mem-a','mem-b');`); err != nil {
 			return err
 		}
@@ -105,8 +105,8 @@ func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, ten
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
@@ -118,8 +118,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	); err != nil {
 		t.Fatal(err)
@@ -239,7 +239,7 @@ func TestMembers_TopupIdempotency(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM project_centrum.sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -283,7 +283,7 @@ func TestMembers_TopupIdempotencyScopedToMember(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM project_centrum.sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -321,7 +321,7 @@ func TestMembers_TombstoneDelete(t *testing.T) {
 	var bal float64
 	var delAt time.Time
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT balance, deleted_at FROM sports_members WHERE id=$1::uuid`, id).Scan(&bal, &delAt); err != nil {
+		`SELECT balance, deleted_at FROM project_centrum.sports_members WHERE id=$1::uuid`, id).Scan(&bal, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if bal != 50000 || delAt.IsZero() {

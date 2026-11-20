@@ -69,15 +69,15 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_kantin_stock_movements WHERE tenant_id IN ('ka-a','ka-b');
-			 DELETE FROM sports_kantin_sale_items WHERE tenant_id IN ('ka-a','ka-b');
-			 DELETE FROM sports_kantin_sales WHERE tenant_id IN ('ka-a','ka-b');
-			 DELETE FROM sports_kantin_products WHERE tenant_id IN ('ka-a','ka-b');
+			`DELETE FROM project_centrum.sports_kantin_stock_movements WHERE tenant_id IN ('ka-a','ka-b');
+			 DELETE FROM project_centrum.sports_kantin_sale_items WHERE tenant_id IN ('ka-a','ka-b');
+			 DELETE FROM project_centrum.sports_kantin_sales WHERE tenant_id IN ('ka-a','ka-b');
+			 DELETE FROM project_centrum.sports_kantin_products WHERE tenant_id IN ('ka-a','ka-b');
 			 DELETE FROM clients WHERE tenant_id IN ('ka-a','ka-b');`); err != nil {
 			return err
 		}
@@ -146,8 +146,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	_, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	)
 	return err
@@ -204,7 +204,7 @@ func seedProduct(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant,
 	t.Helper()
 	var id string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_kantin_products (tenant_id, name, price, cost_price, track_stock, stock)
+		`INSERT INTO project_centrum.sports_kantin_products (tenant_id, name, price, cost_price, track_stock, stock)
 		 VALUES ($1,$2,$3,2000,true,$4) RETURNING id::text`,
 		tenant, name, price, stock).Scan(&id); err != nil {
 		t.Fatal(err)
@@ -233,10 +233,10 @@ func TestKantin_AtomicSale(t *testing.T) {
 	}
 	// Stock decremented: 10-2=8, 5-1=4.
 	var s1, s2 int
-	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p1).Scan(&s1); err != nil {
+	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p1).Scan(&s1); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p2).Scan(&s2); err != nil {
+	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p2).Scan(&s2); err != nil {
 		t.Fatal(err)
 	}
 	if s1 != 8 || s2 != 4 {
@@ -245,7 +245,7 @@ func TestKantin_AtomicSale(t *testing.T) {
 	// Movements logged.
 	var mv int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_kantin_stock_movements WHERE tenant_id='ka-a' AND reason='sale'`).Scan(&mv); err != nil {
+		`SELECT count(*) FROM project_centrum.sports_kantin_stock_movements WHERE tenant_id='ka-a' AND reason='sale'`).Scan(&mv); err != nil {
 		t.Fatal(err)
 	}
 	if mv != 2 {
@@ -277,14 +277,14 @@ func TestKantin_SaleIdempotency(t *testing.T) {
 		t.Errorf("replay = %v, want same id with deduplicated:true", second)
 	}
 	var stock, n int
-	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
+	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
 		t.Fatal(err)
 	}
 	if stock != 8 {
 		t.Errorf("stock=%d want 8 (decremented once)", stock)
 	}
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sports_kantin_sales WHERE tenant_id='ka-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM project_centrum.sports_kantin_sales WHERE tenant_id='ka-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -327,7 +327,7 @@ func TestKantin_Oversell(t *testing.T) {
 	}
 	// Stock unchanged, no sale rows.
 	var s int
-	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&s); err != nil {
+	if err := h.adminPool.QueryRow(ctx, `SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&s); err != nil {
 		t.Fatal(err)
 	}
 	if s != 3 {
@@ -335,7 +335,7 @@ func TestKantin_Oversell(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_kantin_sales WHERE tenant_id='ka-a'`).Scan(&n); err != nil {
+		`SELECT count(*) FROM project_centrum.sports_kantin_sales WHERE tenant_id='ka-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -361,7 +361,7 @@ func TestKantin_SoftVoid(t *testing.T) {
 	tracked := seedProduct(t, ctx, h.adminPool, "ka-a", "Air", 5000, 20)
 	untracked := seedProduct(t, ctx, h.adminPool, "ka-a", "Kopi", 15000, 0)
 	if _, err := h.adminPool.Exec(ctx,
-		`UPDATE sports_kantin_products SET track_stock=false, stock=0 WHERE id=$1::uuid`, untracked); err != nil {
+		`UPDATE project_centrum.sports_kantin_products SET track_stock=false, stock=0 WHERE id=$1::uuid`, untracked); err != nil {
 		t.Fatal(err)
 	}
 
@@ -375,7 +375,7 @@ func TestKantin_SoftVoid(t *testing.T) {
 	stock := func(pid string) int {
 		var s int
 		if err := h.adminPool.QueryRow(ctx,
-			`SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, pid).Scan(&s); err != nil {
+			`SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, pid).Scan(&s); err != nil {
 			t.Fatal(err)
 		}
 		return s
@@ -400,14 +400,14 @@ func TestKantin_SoftVoid(t *testing.T) {
 	var voidedAt *string
 	var itemCount int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT voided_at::text FROM sports_kantin_sales WHERE id=$1::uuid`, id).Scan(&voidedAt); err != nil {
+		`SELECT voided_at::text FROM project_centrum.sports_kantin_sales WHERE id=$1::uuid`, id).Scan(&voidedAt); err != nil {
 		t.Fatalf("sale row was deleted by the void: %v", err)
 	}
 	if voidedAt == nil {
 		t.Error("sale row survived but voided_at is NULL")
 	}
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_kantin_sale_items WHERE sale_id=$1::uuid`, id).Scan(&itemCount); err != nil {
+		`SELECT count(*) FROM project_centrum.sports_kantin_sale_items WHERE sale_id=$1::uuid`, id).Scan(&itemCount); err != nil {
 		t.Fatal(err)
 	}
 	if itemCount != 2 {
@@ -426,7 +426,7 @@ func TestKantin_SoftVoid(t *testing.T) {
 	}
 	var voidMovements int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_kantin_stock_movements WHERE reason='void'`).Scan(&voidMovements); err != nil {
+		`SELECT count(*) FROM project_centrum.sports_kantin_stock_movements WHERE reason='void'`).Scan(&voidMovements); err != nil {
 		t.Fatal(err)
 	}
 	if voidMovements != 1 {
@@ -479,7 +479,7 @@ func TestKantin_DeleteDeactivates(t *testing.T) {
 	readAll(t, respD)
 	var active bool
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT is_active FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&active); err != nil {
+		`SELECT is_active FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&active); err != nil {
 		t.Fatal(err)
 	}
 	if active {
@@ -495,7 +495,7 @@ func TestKantin_DeleteDeactivates(t *testing.T) {
 	// History intact: movements + product row still present.
 	var mv int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&mv); err != nil || mv != 1 {
+		`SELECT count(*) FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&mv); err != nil || mv != 1 {
 		t.Errorf("product row missing (count=%d err=%v)", mv, err)
 	}
 	if r := doReq(t, h.router, "DELETE", "/kantin/products/"+p, "tok-ka-a", ""); r.StatusCode != 404 {
@@ -530,7 +530,7 @@ func TestKantin_OpnameSetsLevel(t *testing.T) {
 	}
 	var stock int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
+		`SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
 		t.Fatal(err)
 	}
 	if stock != 5 {
@@ -541,7 +541,7 @@ func TestKantin_OpnameSetsLevel(t *testing.T) {
 	var delta int
 	var reason string
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT delta, reason FROM sports_kantin_stock_movements
+		`SELECT delta, reason FROM project_centrum.sports_kantin_stock_movements
 		  WHERE tenant_id='ka-a' AND product_id=$1::uuid AND reason='correction'
 		  ORDER BY created_at DESC LIMIT 1`, p).Scan(&delta, &reason); err != nil {
 		t.Fatal(err)
@@ -566,7 +566,7 @@ func TestKantin_OpnameRejectsNegative(t *testing.T) {
 	}
 	var stock int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT stock FROM sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
+		`SELECT stock FROM project_centrum.sports_kantin_products WHERE id=$1::uuid`, p).Scan(&stock); err != nil {
 		t.Fatal(err)
 	}
 	if stock != 4 {
