@@ -29,7 +29,7 @@ func CheckContractTx(ctx context.Context, tx pgx.Tx, tenantID, feature string, c
 	var version int
 	var status string
 	err := tx.QueryRow(ctx,
-		`SELECT version, status FROM tenant_schema_contracts WHERE tenant_id=$1 AND feature=$2`,
+		`SELECT version, status FROM public.tenant_schema_contracts WHERE tenant_id=$1 AND feature=$2`,
 		tenantID, feature).Scan(&version, &status)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

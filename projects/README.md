@@ -24,9 +24,14 @@ Rules:
 - **New projects get their own schema.** Set `"schema": "project_<slug>"` (replace `-` with `_`) in
   `project.json` and put tables in `migrations/`. The runtime sets
   `search_path` from `clients.db_schema`.
-- **Centrum is the legacy exception.** It uses `"schema": "public"` until its
-  business tables are moved. Its route remains `/v1/sports/...` for frontend
-  compatibility.
+- **Centrum is the legacy route exception.** Its business tables live in
+  `project_centrum` (moved by its `0001` project migration), but its frontend
+  still calls `/v1/sports/...` until the route cutover. Every project,
+  including Centrum, uses its own schema; `public` is platform-only.
+- **`auto_grant` defaults to true.** New projects get the blanket
+  `app_runtime` DML grant after migrations. Centrum sets it false because its
+  grants are deliberate: `sports_sessions` stays SELECT-only for the runtime
+  role, so the definer session functions remain the only write path.
 - **New project APIs are mounted at `/v1/p/<slug>/...`.** Two projects may
   both own a feature named `bookings` without colliding.
 - **Add a project folder, then run `go generate ./...`.** The generated

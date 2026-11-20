@@ -52,12 +52,12 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_users WHERE tenant_id IN ('usr-a','usr-b');
+			`DELETE FROM project_centrum.sports_users WHERE tenant_id IN ('usr-a','usr-b');
 			 DELETE FROM clients WHERE tenant_id IN ('usr-a','usr-b');`); err != nil {
 			return err
 		}
@@ -111,8 +111,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	_, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	)
 	return err
@@ -122,7 +122,7 @@ func seedUser(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant, em
 	t.Helper()
 	var id string
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, phone)
+		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name, phone)
 		 VALUES ($1,$2,'test-hash',$3,$4,NULLIF($5,'')) RETURNING id::text`,
 		tenant, email, role, name, phone).Scan(&id); err != nil {
 		t.Fatal(err)

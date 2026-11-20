@@ -37,7 +37,7 @@ func TestReportJobs_BuildAndDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer admin.Close()
-	if err := db.Migrate(ctx, admin); err != nil {
+	if err := db.MigrateAll(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
 	runtimePool, err := db.NewPool(ctx, toReportRuntimeDSN(dsn))
@@ -71,8 +71,8 @@ func TestReportJobs_BuildAndDownload(t *testing.T) {
 		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
 	})
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
-		 VALUES ('rjt', $1, 'rj-test-hash', 1000000, 'active')
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, db_schema)
+		 VALUES ('rjt', $1, 'rj-test-hash', 1000000, 'active', 'project_centrum')
 		 ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
 		t.Fatal(err)
 	}

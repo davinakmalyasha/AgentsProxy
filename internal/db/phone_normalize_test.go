@@ -26,7 +26,7 @@ func TestNormalizePhone(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := Migrate(ctx, pool); err != nil {
+	if err := MigrateAll(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,8 +66,8 @@ func TestNormalizePhone(t *testing.T) {
 			return
 		}
 		defer cpool.Close()
-		cpool.Exec(cctx, `DELETE FROM sports_bookings WHERE tenant_id = $1`, tenant)
-		cpool.Exec(cctx, `DELETE FROM sports_customers WHERE tenant_id = $1`, tenant)
+		cpool.Exec(cctx, `DELETE FROM project_centrum.sports_bookings WHERE tenant_id = $1`, tenant)
+		cpool.Exec(cctx, `DELETE FROM project_centrum.sports_customers WHERE tenant_id = $1`, tenant)
 		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
 	})
 	if _, err := pool.Exec(ctx,
@@ -79,13 +79,13 @@ func TestNormalizePhone(t *testing.T) {
 
 	var customerID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO sports_customers (tenant_id, name, phone)
+		`INSERT INTO project_centrum.sports_customers (tenant_id, name, phone)
 		 VALUES ($1, 'Budi', '0812-3456-7890') RETURNING id::text`, tenant).Scan(&customerID); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
 	if err := pool.QueryRow(ctx,
-		`SELECT phone FROM sports_customers WHERE id = $1::uuid`, customerID).Scan(&stored); err != nil {
+		`SELECT phone FROM project_centrum.sports_customers WHERE id = $1::uuid`, customerID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored != "+6281234567890" {
@@ -94,7 +94,7 @@ func TestNormalizePhone(t *testing.T) {
 
 	// Mixed-format duplicate must trip the existing unique constraint.
 	_, err = pool.Exec(ctx,
-		`INSERT INTO sports_customers (tenant_id, name, phone)
+		`INSERT INTO project_centrum.sports_customers (tenant_id, name, phone)
 		 VALUES ($1, 'Budi 2', '6281234567890')`, tenant)
 	if err == nil {
 		t.Error("mixed-format duplicate customer accepted, want unique violation")
@@ -104,13 +104,13 @@ func TestNormalizePhone(t *testing.T) {
 	// string equality against customers.phone).
 	var facilityID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour)
+		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour)
 		 VALUES ($1, 'Court 65', 'badminton', 50000) RETURNING id::text`, tenant).Scan(&facilityID); err != nil {
 		t.Fatal(err)
 	}
 	var bookingPhone string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, price)
 		 VALUES ($1, $2::uuid, '2026-10-20', '18:00', '19:00', 'Budi', '+62 812 3456 7890', 50000)
 		 RETURNING customer_phone`, tenant, facilityID).Scan(&bookingPhone); err != nil {
 		t.Fatal(err)

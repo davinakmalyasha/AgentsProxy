@@ -51,12 +51,12 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_customers WHERE tenant_id IN ('cu-a','cu-b');
+			`DELETE FROM project_centrum.sports_customers WHERE tenant_id IN ('cu-a','cu-b');
 			 DELETE FROM clients WHERE tenant_id IN ('cu-a','cu-b');`); err != nil {
 			return err
 		}
@@ -107,8 +107,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	_, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	)
 	return err
@@ -194,12 +194,12 @@ func TestCustomers_VisitsCounted(t *testing.T) {
 	// Seed a facility + a confirmed booking named Alice.
 	var facID string
 	if err := h.adminPool.QueryRow(ctx,
-		`INSERT INTO sports_facilities (tenant_id, name, type) VALUES ('cu-a','Court 1','badminton') RETURNING id::text`,
+		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type) VALUES ('cu-a','Court 1','badminton') RETURNING id::text`,
 	).Scan(&facID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status)
 		 VALUES ('cu-a',$1::uuid,'2026-09-20','10:00','11:00','Alice','confirmed')`, facID); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestCustomers_TombstoneDelete(t *testing.T) {
 	var delBy string
 	var delAt time.Time
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM sports_customers WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+		`SELECT deleted_by, deleted_at FROM project_centrum.sports_customers WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {

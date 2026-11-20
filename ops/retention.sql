@@ -36,7 +36,7 @@ DECLARE
   v_n bigint;
   v_batch bigint;
 BEGIN
-  DELETE FROM public.sports_sessions
+  DELETE FROM project_centrum.sports_sessions
    WHERE expires_at < pg_catalog.now() - interval '7 days';
   GET DIAGNOSTICS v_n = ROW_COUNT;
   table_name := 'sports_sessions'; deleted := v_n; RETURN NEXT;

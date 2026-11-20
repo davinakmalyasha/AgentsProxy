@@ -41,7 +41,7 @@ func recordStaffPaymentTool(pool *pgxpool.Pool) agentstools.Tool {
 			}
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 				_, err := tx.Exec(ctx,
-					`INSERT INTO agent_staff_payments (tenant_id, staff_name, amount, paid_at, note) VALUES ($1,$2,$3,$4::date,$5)`,
+					`INSERT INTO public.agent_staff_payments (tenant_id, staff_name, amount, paid_at, note) VALUES ($1,$2,$3,$4::date,$5)`,
 					tenantID, p.StaffName, p.Amount, p.PaidAt, p.Note)
 				return err
 			})

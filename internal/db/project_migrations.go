@@ -29,6 +29,12 @@ func MigrateAll(ctx context.Context, pool *Pool) error {
 type projectMigrationDoc struct {
 	Slug   string `json:"slug"`
 	Schema string `json:"schema"`
+	// AutoGrant controls the blanket app_runtime DML grant applied after
+	// a project's migrations. It defaults to true for new projects. The
+	// legacy Centrum project sets it false because its tables already
+	// carry deliberate grants (sports_sessions is SELECT-only so the
+	// definer functions remain the only write path).
+	AutoGrant *bool `json:"auto_grant"`
 }
 
 // MigrateProjects applies projects/<slug>/migrations/*.sql inside each
@@ -90,7 +96,8 @@ func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
 		if schema == "public" && len(files) == 0 {
 			continue
 		}
-		if err := migrateOneProject(ctx, pool, slug, schema, files); err != nil {
+		autoGrant := doc.AutoGrant == nil || *doc.AutoGrant
+		if err := migrateOneProject(ctx, pool, slug, schema, files, autoGrant); err != nil {
 			return err
 		}
 	}
@@ -149,7 +156,7 @@ func projectMigrationFiles(fsys fs.FS, dir string) ([]projectMigrationFile, erro
 	return out, nil
 }
 
-func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, files []projectMigrationFile) error {
+func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, files []projectMigrationFile, autoGrant bool) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("project %q: begin: %w", slug, err)
@@ -209,15 +216,20 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 	if schema != "public" {
 		// Existing objects and future objects both need the runtime grant.
 		// Default privileges are scoped to the migration runner's role.
-		stmts := []string{
-			`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ` + ident + ` TO app_runtime`,
-			`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ` + ident + ` TO app_runtime`,
-			`ALTER DEFAULT PRIVILEGES IN SCHEMA ` + ident + ` GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime`,
-			`ALTER DEFAULT PRIVILEGES IN SCHEMA ` + ident + ` GRANT USAGE, SELECT ON SEQUENCES TO app_runtime`,
-		}
-		for _, stmt := range stmts {
-			if _, err := tx.Exec(ctx, stmt); err != nil {
-				return fmt.Errorf("project %q: grant %s: %w", slug, schema, err)
+		// A project with auto_grant=false owns its grants: Centrum's
+		// sports_sessions must stay SELECT-only so the definer session
+		// functions cannot be bypassed by a direct INSERT/UPDATE/DELETE.
+		if autoGrant {
+			stmts := []string{
+				`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ` + ident + ` TO app_runtime`,
+				`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ` + ident + ` TO app_runtime`,
+				`ALTER DEFAULT PRIVILEGES IN SCHEMA ` + ident + ` GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime`,
+				`ALTER DEFAULT PRIVILEGES IN SCHEMA ` + ident + ` GRANT USAGE, SELECT ON SEQUENCES TO app_runtime`,
+			}
+			for _, stmt := range stmts {
+				if _, err := tx.Exec(ctx, stmt); err != nil {
+					return fmt.Errorf("project %q: grant %s: %w", slug, schema, err)
+				}
 			}
 		}
 		// Supabase's default ACL grants anon/authenticated dangerous table

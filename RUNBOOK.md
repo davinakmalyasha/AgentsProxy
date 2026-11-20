@@ -229,7 +229,7 @@ curl -s -X POST https://<host>/v1/admin/clients \
 # -> returns {id, name, tenant_id, token, schema, monthly_quota_tokens}
 #    The token is shown ONCE. Save it now.
 #    schema is optional; it defaults to project_<tenant_id with hyphens as underscores>.
-#    Only the legacy centrum row may use "public".
+#    Every project, including centrum, uses project_<slug>; public is platform-only.
 
 # 2. Inject into the new frontend project:
 #    NEXT_PUBLIC_AGENTS_PROXY_URL=https://<host>

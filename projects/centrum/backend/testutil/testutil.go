@@ -26,7 +26,7 @@ import (
 // testLockID serialises test setup across the sports packages. Distinct
 // from the migration lock (db package): sharing it would wedge tests
 // against a concurrent migrate.
-const testLockID = 734562
+const testLockID = 734563
 
 // LockAndRun takes a session advisory lock (shared across the sports
 // packages) and runs fn inside a transaction. fn must use tx for all
@@ -61,7 +61,7 @@ func SeedStaffSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ten
 	t.Helper()
 	var userID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, is_active)
+		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name, is_active)
 		 VALUES ($1, $2, 'x', $3, 'Matrix Test', true)
 		 ON CONFLICT (tenant_id, email)
 		 DO UPDATE SET role = EXCLUDED.role, is_active = true

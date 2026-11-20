@@ -78,7 +78,7 @@ func setup(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Migrate(ctx, migPool); err != nil {
+	if err := db.MigrateAll(ctx, migPool); err != nil {
 		migPool.Close()
 		t.Fatal(err)
 	}
@@ -390,14 +390,14 @@ func seedStaffUser(t *testing.T, h *harness) string {
 	ctx := context.Background()
 	bcryptHash := "$2a$10$C6UzMDM.H6dfI/f/IKcEeO7CZp1DlVwH7nK2IYwQmYkYQ9Xk2bXkK" // placeholder, never verified in tests
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name)
+		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name)
 		 VALUES ('alpha','owner@test.dev',$1,'owner','Owner Test')
 		 ON CONFLICT (tenant_id, email) DO NOTHING`, bcryptHash); err != nil {
 		t.Fatal(err)
 	}
 	var uid string
 	if err := h.pool.QueryRow(ctx,
-		`SELECT id::text FROM sports_users WHERE tenant_id='alpha' AND email='owner@test.dev'`).Scan(&uid); err != nil {
+		`SELECT id::text FROM project_centrum.sports_users WHERE tenant_id='alpha' AND email='owner@test.dev'`).Scan(&uid); err != nil {
 		t.Fatal(err)
 	}
 	raw, hash, err := authapi.GenerateSessionToken()
@@ -407,8 +407,8 @@ func seedStaffUser(t *testing.T, h *harness) string {
 	// tenant_id is NOT NULL as of migration 032, so name it. This runs on
 	// the test's superuser pool; the runtime role cannot insert here at all.
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO sports_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, $1, $2, now() + interval '1 hour' FROM sports_users WHERE id = $1`,
+		`INSERT INTO project_centrum.sports_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, $1, $2, now() + interval '1 hour' FROM project_centrum.sports_users WHERE id = $1`,
 		uid, hash); err != nil {
 		t.Fatal(err)
 	}

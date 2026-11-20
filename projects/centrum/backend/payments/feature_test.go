@@ -53,14 +53,14 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.Migrate(ctx, adminPool); err != nil {
+	if err := db.MigrateAll(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
 	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM sports_payments WHERE tenant_id IN ('pay-a','pay-b');
-			 DELETE FROM sports_bookings WHERE tenant_id IN ('pay-a','pay-b');
-			 DELETE FROM sports_facilities WHERE tenant_id IN ('pay-a','pay-b');
+			`DELETE FROM project_centrum.sports_payments WHERE tenant_id IN ('pay-a','pay-b');
+			 DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('pay-a','pay-b');
+			 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('pay-a','pay-b');
 			 DELETE FROM clients WHERE tenant_id IN ('pay-a','pay-b');`); err != nil {
 			return err
 		}
@@ -118,8 +118,8 @@ func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, to
 	t.Helper()
 	hash := auth.HashToken(token)
 	_, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6)`,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
 		name, tenant, hash, quota, status, feats,
 	)
 	return err
@@ -175,12 +175,12 @@ func readAll(t *testing.T, resp *http.Response) string {
 func seedBooking(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) (facilityID, bookingID string) {
 	t.Helper()
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_facilities (tenant_id, name, type, price_per_hour) VALUES ($1,'Court 1','badminton',50000) RETURNING id::text`,
+		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour) VALUES ($1,'Court 1','badminton',50000) RETURNING id::text`,
 		tenant).Scan(&facilityID); err != nil {
 		t.Fatal(err)
 	}
 	if err := admin.QueryRow(ctx,
-		`INSERT INTO sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, price)
+		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, price)
 		 VALUES ($1,$2::uuid,'2026-09-15','18:00','20:00','Alice',100000) RETURNING id::text`,
 		tenant, facilityID).Scan(&bookingID); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func bookingStatus(t *testing.T, ctx context.Context, admin *pgxpool.Pool, booki
 	t.Helper()
 	var s string
 	if err := admin.QueryRow(ctx,
-		`SELECT payment_status FROM sports_bookings WHERE id=$1::uuid`, bookingID).Scan(&s); err != nil {
+		`SELECT payment_status FROM project_centrum.sports_bookings WHERE id=$1::uuid`, bookingID).Scan(&s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -251,7 +251,7 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	var delBy string
 	var delAt time.Time
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM sports_payments WHERE id=$1::uuid`, payID).Scan(&delBy, &delAt); err != nil {
+		`SELECT deleted_by, deleted_at FROM project_centrum.sports_payments WHERE id=$1::uuid`, payID).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {
@@ -308,7 +308,7 @@ func TestPayments_Idempotency(t *testing.T) {
 
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sports_payments WHERE tenant_id='pay-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM project_centrum.sports_payments WHERE tenant_id='pay-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
