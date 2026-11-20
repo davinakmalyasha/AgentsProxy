@@ -8,7 +8,8 @@ Supabase Postgres (shared schema + `tenant_id` + RLS) · **Cache:** Redis 8 ·
 **Deploy:** Vercel / Railway / VPS.
 
 Docs: `README.md` (this file = what it is) · `ARCHITECTURE.md` (how it works) ·
-`docs/GOVERNANCE.md` (branch/DDL/test rules) · `RUNBOOK.md` (ops).
+`docs/GOVERNANCE.md` (branch/DDL/test rules) · `RUNBOOK.md` (ops) ·
+`ops/RUNBOOK-staging.md` (free-plan staging).
 
 ## Live tenants
 

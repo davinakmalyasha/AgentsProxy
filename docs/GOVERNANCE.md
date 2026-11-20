@@ -4,8 +4,9 @@
 
 `main` = prod. Short-lived `feat/*`, `fix/*`, `chore/*`, and `docs/*`
 branches are cut from `main` and merged back through a PR with green CI.
-Tags `v*` are cut from `main` only. There is no long-lived `staging`
-branch in this repository; preview deployments cover pre-prod checks.
+Tags `v*` are cut from `main` only. The long-lived `staging` branch exists
+only to receive Preview deployments with branch-scoped staging variables
+(see `ops/RUNBOOK-staging.md`); ordinary PR previews stay database-less.
 
 Secrets in deploy-target env vars only. `.env` is local, gitignored.
 
