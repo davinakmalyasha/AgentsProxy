@@ -27,12 +27,18 @@ Dashboard → New project:
 - Plan: Free
 - Save the database password in the password manager.
 
-Collect:
+Collect the exact Connect strings from the staging project. Do not reuse
+the production host and change only the ref: staging may be on
+`aws-1-ap-southeast-1.pooler.supabase.com` while production is on
+`aws-0-...`. The pooler will answer `tenant/user ... not found` if the host
+and project ref do not belong together.
 
 - Runtime pooler DSN (port **6543**, user `app_runtime.<ref>`).
 - Admin DSN (port **5432**, user `postgres.<ref>`).
 - A separate Redis instance (Upstash free or a dedicated database) —
-  staging must not share production Redis keys.
+  staging must not share production Redis keys. Copy the **URL**, not the
+  `redis-cli ...` command. Upstash requires TLS, so use `rediss://`, not
+  `redis://`.
 - An LLM key/budget for staging. It may be the same provider key, but keep
   the spend cap separate.
 
