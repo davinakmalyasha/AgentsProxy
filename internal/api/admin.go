@@ -207,9 +207,9 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = a.Pool.QueryRow(r.Context(),
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7) RETURNING id::text`,
-		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema, project_key)
+		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8) RETURNING id::text`,
+		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema, req.Schema,
 	).Scan(&id)
 	if err != nil {
 		if pgerr.IsUniqueViolation(err) {
