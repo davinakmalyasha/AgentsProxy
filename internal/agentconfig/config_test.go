@@ -133,6 +133,65 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 	}
 }
 
+func TestValidateMCPAndModelConfig(t *testing.T) {
+	b := DefaultBudget()
+	base := func() *Project {
+		return &Project{
+			Slug:         "demo",
+			Vertical:     "sports",
+			Schema:       "project_demo",
+			SystemPrompt: "You are a venue assistant.",
+			Agent:        AgentConfig{Enabled: true},
+		}
+	}
+	if err := Validate(base(), b); err != nil {
+		t.Fatalf("valid base rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*Project){
+		"bad model name": func(p *Project) { p.Agent.Model = "two words" },
+		"bad server name": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{Name: "Weather Server", URL: "https://example.com/mcp"}}
+		},
+		"bad url": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{Name: "weather", URL: "ftp://example.com"}}
+		},
+		"duplicate server": func(p *Project) {
+			p.Agent.MCP = []MCPServer{
+				{Name: "weather", URL: "https://example.com/mcp"},
+				{Name: "weather", URL: "https://example.com/mcp"},
+			}
+		},
+		"unknown role": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{Name: "weather", URL: "https://example.com/mcp", Roles: []string{"admin"}}}
+		},
+		"invalid header": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{
+				Name: "weather", URL: "https://example.com/mcp",
+				Headers: map[string]string{"Bad Header": "x"},
+			}}
+		},
+		"empty header": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{
+				Name: "weather", URL: "https://example.com/mcp",
+				Headers: map[string]string{"Authorization": " "},
+			}}
+		},
+		"duplicate remote tool": func(p *Project) {
+			p.Agent.MCP = []MCPServer{{
+				Name: "weather", URL: "https://example.com/mcp",
+				Tools: []string{"forecast", "forecast"},
+			}}
+		},
+	} {
+		p := base()
+		mutate(p)
+		if err := Validate(p, b); err == nil {
+			t.Errorf("%s: expected validation to fail, got nil", name)
+		}
+	}
+}
+
 // TestCentrumConfigIsValid runs the real embedded project through Validate,
 // so a malformed folder fails here rather than in production boot.
 func TestCentrumConfigIsValid(t *testing.T) {
