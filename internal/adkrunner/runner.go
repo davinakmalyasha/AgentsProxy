@@ -27,6 +27,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	"github.com/davinakmalyasha/agents-proxy/internal/mcpclient"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
@@ -50,6 +51,15 @@ type Config struct {
 type Runner struct {
 	cfg   Config
 	model model.LLM
+	// newModel builds one provider client. A field so tests can prove the
+	// project-to-model mapping without calling a provider.
+	newModel func(name string) (model.LLM, error)
+	// models caches per-project provider clients. The default model is also
+	// present under cfg.Model.
+	modelMu sync.Mutex
+	models  map[string]model.LLM
+	// mcp owns external MCP sessions. Nil in hand-built test runners.
+	mcp *mcpclient.Manager
 	// newToolSet builds the role-filtered set. A field (not a direct
 	// NewToolSetFor call) so tests can substitute stub tools without
 	// touching the global registry.
@@ -90,6 +100,16 @@ func cacheKey(parts ...string) string {
 // so test-constructed Runners (which bypass New) work too.
 func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 	key := cacheKey(tenantID, toolsRole)
+	// An MCP server that failed at first use is retried after a short
+	// backoff. The registry half is static, but the MCP half is not, so
+	// drop the cached set when the manager says a reconnect is due.
+	if r.mcp != nil {
+		if p := r.projectFor(tenantID); p != nil && r.mcp.RefreshDue(tenantID, p.Agent.MCP) {
+			r.cacheMu.Lock()
+			delete(r.toolSets, key)
+			r.cacheMu.Unlock()
+		}
+	}
 	r.cacheMu.RLock()
 	ct, ok := r.toolSets[key]
 	r.cacheMu.RUnlock()
@@ -108,6 +128,7 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 	if p := r.projectFor(tenantID); p != nil && len(p.Agent.Tools) > 0 {
 		ts = ts.Only(p.Agent.Tools)
 	}
+	ts = r.withMCP(ts, tenantID, toolsRole)
 	names := ts.Names()
 	adapted := make([]tool.Tool, 0, len(names))
 	for _, name := range names {
@@ -117,8 +138,14 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 		}
 		at, err := adaptTool(t, tenantID)
 		if err != nil {
-			// Proven at boot for every registered tool; reaching here
-			// means the set changed under us, which must be loud.
+			// Native tool schemas are proven at boot. A remote MCP
+			// server can publish a schema the ADK cannot parse; skip
+			// that tool instead of making the whole agent unusable.
+			if strings.HasPrefix(t.Name, "mcp_") {
+				slog.Warn("adkrunner: skipping MCP tool with unparsable schema",
+					"tenant", tenantID, "tool", t.Name, "err", err)
+				continue
+			}
 			return nil, err
 		}
 		adapted = append(adapted, at)
@@ -126,6 +153,77 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 	ct = &cachedTools{names: names, adapted: adapted, defs: ts.Definitions()}
 	r.toolSets[key] = ct
 	return ct, nil
+}
+
+// withMCP appends the project's external MCP tools to the native set. The
+// native tool allow-list (agent.tools) is applied before this step, so it
+// keeps meaning "native tools only"; the MCP server's own tools list is the
+// remote allow-list.
+func (r *Runner) withMCP(native *agentstools.ToolSet, tenantID, role string) *agentstools.ToolSet {
+	p := r.projectFor(tenantID)
+	if r.mcp == nil || p == nil || len(p.Agent.MCP) == 0 {
+		return native
+	}
+	tools := make([]agentstools.Tool, 0, len(native.Names()))
+	for _, name := range native.Names() {
+		if t, ok := native.Get(name); ok {
+			tools = append(tools, t)
+		}
+	}
+	seen := map[string]bool{}
+	for _, name := range native.Names() {
+		seen[name] = true
+	}
+	for _, remote := range r.mcp.Tools(context.Background(), tenantID, p.Agent.MCP) {
+		if !remote.Allowed(role) {
+			continue
+		}
+		if seen[remote.Name] {
+			slog.Warn("adkrunner: MCP tool name collides with an existing tool",
+				"tenant", tenantID, "tool", remote.Name)
+			continue
+		}
+		seen[remote.Name] = true
+		tools = append(tools, remote.Tool)
+	}
+	return agentstools.NewToolSetFrom(native.Pool, tools...)
+}
+
+// modelFor resolves the provider client for a tenant. A project-level
+// agent.model overrides the platform default; an unset or empty value keeps
+// the shared client. A model that failed to build falls back to the default
+// with a warning rather than taking the agent offline.
+func (r *Runner) modelFor(tenantID string) model.LLM {
+	name := ""
+	if p := r.projectFor(tenantID); p != nil {
+		name = strings.TrimSpace(p.Agent.Model)
+	}
+	if name == "" || name == r.cfg.Model || r.newModel == nil {
+		return r.model
+	}
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	if m, ok := r.models[name]; ok {
+		return m
+	}
+	m, err := r.newModel(name)
+	if err != nil {
+		slog.Warn("adkrunner: project model unavailable; using default",
+			"tenant", tenantID, "model", name, "err", err)
+		return r.model
+	}
+	if r.models == nil {
+		r.models = map[string]model.LLM{}
+	}
+	r.models[name] = m
+	return m
+}
+
+// Close releases external MCP sessions. Native tools hold no resources.
+func (r *Runner) Close() {
+	if r != nil && r.mcp != nil {
+		r.mcp.Close()
+	}
 }
 
 // cachedPrompt returns the assembled system prompt for
@@ -171,7 +269,8 @@ func (r *Runner) projectFor(tenantID string) *agentconfig.Project {
 // UpdateProject hot-swaps one tenant's config (admin reload path). Only
 // called after the candidate passes LoadSingle + Validate + tool proof,
 // so serving config is always known-good. Evicts the tenant's cached
-// prompts; the tool set is registry-derived and unaffected.
+// prompts and tool set; the latter now also carries MCP servers, whose
+// sessions are closed and reconnected from the new config.
 func (r *Runner) UpdateProject(p *agentconfig.Project) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -179,12 +278,20 @@ func (r *Runner) UpdateProject(p *agentconfig.Project) {
 		r.projects = map[string]*agentconfig.Project{}
 	}
 	r.projects[p.Slug] = p
+	if r.mcp != nil {
+		r.mcp.CloseProject(p.Slug)
+	}
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 	prefix := p.Slug + "\x00"
 	for k := range r.prompts {
 		if strings.HasPrefix(k, prefix) {
 			delete(r.prompts, k)
+		}
+	}
+	for k := range r.toolSets {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.toolSets, k)
 		}
 	}
 }
@@ -222,25 +329,44 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.Model == "" {
 		return nil, errors.New("adkrunner: model is required")
 	}
-	opts := []option.RequestOption{
-		option.WithJSONSet("reasoning_effort", "low"),
-		// OpenCode Go rejects every request without this header. A stable
-		// process ID satisfies the gateway and keeps prompt-cache affinity
-		// for the life of the deployment; other providers ignore it.
-		option.WithHeader("x-opencode-session", uuid.NewString()),
+	newModel := func(name string) (model.LLM, error) {
+		opts := []option.RequestOption{
+			option.WithJSONSet("reasoning_effort", "low"),
+			// OpenCode Go rejects every request without this header. A stable
+			// process ID satisfies the gateway and keeps prompt-cache affinity
+			// for the life of the deployment; other providers ignore it.
+			option.WithHeader("x-opencode-session", uuid.NewString()),
+		}
+		if llm.IsReasoningModel(name) {
+			opts = append(opts, option.WithJSONSet("thinking", map[string]string{"type": "disabled"}))
+		}
+		return openaimodel.NewModel(context.Background(), name, &openaimodel.ClientConfig{
+			APIKey:     cfg.APIKey,
+			BaseURL:    cfg.BaseURL,
+			API:        openaimodel.APIChatCompletions,
+			HTTPClient: httpx.NewClient(60 * time.Second),
+			Options:    opts,
+		})
 	}
-	if llm.IsReasoningModel(cfg.Model) {
-		opts = append(opts, option.WithJSONSet("thinking", map[string]string{"type": "disabled"}))
-	}
-	m, err := openaimodel.NewModel(context.Background(), cfg.Model, &openaimodel.ClientConfig{
-		APIKey:     cfg.APIKey,
-		BaseURL:    cfg.BaseURL,
-		API:        openaimodel.APIChatCompletions,
-		HTTPClient: httpx.NewClient(60 * time.Second),
-		Options:    opts,
-	})
+	m, err := newModel(cfg.Model)
 	if err != nil {
 		return nil, fmt.Errorf("adkrunner: model: %w", err)
+	}
+	models := map[string]model.LLM{cfg.Model: m}
+	for slug, p := range cfg.Projects {
+		name := strings.TrimSpace(p.Agent.Model)
+		if name == "" || name == cfg.Model {
+			continue
+		}
+		if _, ok := models[name]; ok {
+			continue
+		}
+		pm, err := newModel(name)
+		if err != nil {
+			return nil, fmt.Errorf("adkrunner: project %q model %q: %w", slug, name, err)
+		}
+		models[name] = pm
+		slog.Info("adkrunner: project model", "tenant", slug, "model", name)
 	}
 	full := agentstools.AllTools(cfg.Pool)
 	for _, t := range full {
@@ -263,8 +389,17 @@ func New(cfg Config) (*Runner, error) {
 		slog.Info("adkrunner: tenant tools live",
 			"tenant", tenant, "tools", len(ts.Names()), "schema_bytes", schemaBytes)
 	}
-	return &Runner{cfg: cfg, model: m, projects: cfg.Projects, newToolSet: agentstools.NewToolSetFor,
-		toolSets: map[string]*cachedTools{}, prompts: map[string]string{}}, nil
+	return &Runner{
+		cfg:        cfg,
+		model:      m,
+		newModel:   newModel,
+		models:     models,
+		mcp:        mcpclient.NewManager(),
+		projects:   cfg.Projects,
+		newToolSet: agentstools.NewToolSetFor,
+		toolSets:   map[string]*cachedTools{},
+		prompts:    map[string]string{},
+	}, nil
 }
 
 // TurnTimeout bounds one agent turn end to end. Worst case without it
@@ -346,7 +481,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 	ag, err := llmagent.New(llmagent.Config{
 		Name:        fmt.Sprintf("%s-%s", tenantID, role),
 		Description: fmt.Sprintf("venue assistant for tenant %s at tier %s", tenantID, role),
-		Model:       r.model,
+		Model:       r.modelFor(tenantID),
 		// InstructionProvider, NOT Instruction: ADK runs {key}
 		// templating over the static Instruction string, and our tenant
 		// content carries {{DATE}} / {{TOOLS}} placeholders that break

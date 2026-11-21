@@ -80,10 +80,17 @@ type AgentConfig struct {
 }
 
 // MCPServer is one external MCP endpoint configured for a project.
+//
+// Headers may reference environment variables with ${NAME}; the value is
+// resolved when the connection is opened, so a token never lives in
+// project.json. Roles is the set of agent tiers allowed to see this server's
+// tools; empty means staff only (owner + pegawai), never the public widget.
 type MCPServer struct {
-	Name  string   `json:"name"`
-	URL   string   `json:"url"`
-	Tools []string `json:"tools"`
+	Name    string            `json:"name"`
+	URL     string            `json:"url"`
+	Tools   []string          `json:"tools"`
+	Roles   []string          `json:"roles,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // Document is one knowledge document. Kept for prompt compatibility; new
@@ -130,7 +137,19 @@ func DefaultBudget() Budget {
 	}
 }
 
-var schemaRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+var (
+	schemaRe     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+	modelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	mcpNameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	headerNameRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+)
+
+var mcpRoles = map[string]bool{
+	"owner":   true,
+	"pegawai": true,
+	"client":  true,
+	"anon":    true,
+}
 
 // Validate checks the project for the mistakes that would otherwise
 // surface as a broken agent rather than a failed boot: bad slug, missing
@@ -188,11 +207,17 @@ func Validate(p *Project, b Budget) error {
 		if strings.TrimSpace(p.SystemPrompt) == "" {
 			add("agent.enabled is true but agent/agent.md is empty")
 		}
+		if m := strings.TrimSpace(p.Agent.Model); m != "" && !modelRe.MatchString(m) {
+			add("agent.model %q is not a valid model name", m)
+		}
 		seenMCP := map[string]bool{}
 		for _, srv := range p.Agent.MCP {
 			if strings.TrimSpace(srv.Name) == "" {
 				add("an MCP server has no name")
 				continue
+			}
+			if !mcpNameRe.MatchString(srv.Name) {
+				add("MCP server %q must be lowercase letters, digits, and hyphens/underscores (max 32)", srv.Name)
 			}
 			if seenMCP[srv.Name] {
 				add("duplicate MCP server %q", srv.Name)
@@ -205,6 +230,30 @@ func Validate(p *Project, b Budget) error {
 			u, err := url.Parse(srv.URL)
 			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 				add("MCP server %q has invalid url %q", srv.Name, srv.URL)
+			}
+			for _, role := range srv.Roles {
+				if !mcpRoles[role] {
+					add("MCP server %q has unknown role %q", srv.Name, role)
+				}
+			}
+			seenRemoteTool := map[string]bool{}
+			for _, name := range srv.Tools {
+				if strings.TrimSpace(name) == "" {
+					add("MCP server %q has an empty tool name", srv.Name)
+					continue
+				}
+				if seenRemoteTool[name] {
+					add("MCP server %q lists tool %q twice", srv.Name, name)
+				}
+				seenRemoteTool[name] = true
+			}
+			for name, value := range srv.Headers {
+				if !headerNameRe.MatchString(name) {
+					add("MCP server %q has invalid header name %q", srv.Name, name)
+				}
+				if strings.TrimSpace(value) == "" {
+					add("MCP server %q header %q is empty", srv.Name, name)
+				}
 			}
 		}
 		seenTool := map[string]bool{}

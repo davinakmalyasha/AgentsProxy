@@ -272,6 +272,7 @@ func main() {
 		slog.Error("adk runner", "err", err)
 		os.Exit(1)
 	}
+	defer adkRunner.Close()
 	slog.Info("adk runner ready", "model", cfg.LLMModel)
 
 	// Notification queue (Phase 4 sports vertical). Durable in
