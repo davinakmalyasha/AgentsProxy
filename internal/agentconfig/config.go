@@ -45,8 +45,8 @@ type Project struct {
 	// Vertical decides which feature set the project's tools come from.
 	Vertical string
 	// Schema is the Postgres schema that owns this project's business
-	// tables. Legacy Centrum uses "public"; every new project uses
-	// "project_<slug>". The runtime sets search_path from this value.
+	// tables. Every project, including Centrum, uses "project_<slug>"; the
+	// runtime sets search_path from this value.
 	Schema string
 	// SystemPrompt is the project-level persona and house rules, loaded
 	// from agent/agent.md.
@@ -170,7 +170,7 @@ func Validate(p *Project, b Budget) error {
 		add("vertical is required")
 	}
 	if p.Schema == "" {
-		add("schema is required (use public for the legacy Centrum project)")
+		add("schema is required (use project_<slug>)")
 	} else if !schemaRe.MatchString(p.Schema) {
 		add("schema %q must match %s", p.Schema, schemaRe.String())
 	}

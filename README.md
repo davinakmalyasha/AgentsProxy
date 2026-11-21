@@ -53,7 +53,7 @@ supabase/functions/    deliver-notification, deliver-reminders (serverless drive
 | `/v1/chat`, `/v1/agent/*` | client sites, widgets | `X-Client-Token` / public (rate-limited) |
 | `/v1/auth/*` | staff login | email+password → `X-Session-Token` |
 | `/v1/reports/*` | xlsx downloads | token-in-URL, 30-min TTL |
-| `/v1/{vertical}/*` | platform + legacy Centrum runtime | `X-Client-Token` + `RequireFeature` gate |
+| `/v1/{vertical}/*` | platform runtime + legacy Centrum rollback alias | `X-Client-Token` + `RequireFeature` gate |
 | `/v1/p/{slug}/*` | project-scoped runtime | `X-Client-Token` + project gate |
 | `/v1/admin/*` | operator | `Bearer ADMIN_API_KEY` |
 | `/api/v1/packages|projects|articles|promos|settings` | agency public site | none / IP rate-limit |
