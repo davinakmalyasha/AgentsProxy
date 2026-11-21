@@ -143,23 +143,15 @@ func NewRouter(d Deps) http.Handler {
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}
 
-		// Project-scoped APIs for new projects. Each project owns its
+		// Project-scoped APIs for every project. Each project owns its
 		// handlers and its schema; /v1/p/<slug>/... cannot reach another
-		// project's router or data. Centrum keeps its legacy /v1/sports/*
-		// surface until its frontend is migrated.
+		// project's router or data. Centrum dual-registers its features
+		// so /v1/sports/* keeps working during the frontend cutover.
 		projectCfgs, badProjects := agentconfig.LoadCollect()
 		for slug, err := range badProjects {
 			slog.Warn("project config unavailable for project routes", "project", slug, "err", err)
 		}
 		for slug, p := range projectCfgs {
-			if slug == "centrum" {
-				// Centrum owns project_centrum after the legacy schema
-				// move, but its frontend still calls /v1/sports/*. Do not
-				// mount a half-populated /v1/p/centrum until the route
-				// migration lands; the legacy vertical router remains the
-				// single public surface.
-				continue
-			}
 			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, bDeps, p.Vertical))
 		}
 		for _, project := range features.RegisteredProjects() {

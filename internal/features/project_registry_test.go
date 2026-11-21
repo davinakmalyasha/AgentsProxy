@@ -27,6 +27,21 @@ func TestRegisterProjectIsScoped(t *testing.T) {
 	}
 }
 
+func TestRegisterLegacyProjectUsesBothRegistries(t *testing.T) {
+	ResetForTest()
+	defer ResetForTest()
+	RegisterLegacyProject("centrum", "sports", Feature{Name: "quote"})
+	if _, ok := Get("quote"); !ok {
+		t.Fatal("legacy registration missing from the global registry")
+	}
+	if !IsKnownProjectFeature("centrum", "quote") {
+		t.Fatal("project registration missing from the project registry")
+	}
+	if IsKnownProjectFeature("other", "quote") {
+		t.Fatal("project feature leaked into another project")
+	}
+}
+
 func TestRegisterProjectDuplicatePanics(t *testing.T) {
 	resetProjectRegistryForTest()
 	RegisterProject("acme", "sports", Feature{Name: "bookings"})

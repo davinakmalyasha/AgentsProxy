@@ -27,11 +27,12 @@ const featureName = "availability"
 func init() { Register() }
 
 func Register() {
-	features.Register(features.Feature{
+	features.RegisterLegacyProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // route-only, read-only
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
+		PublicRead:    true, // landing page polls this without a token
 	})
 }
 

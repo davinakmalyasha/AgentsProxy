@@ -155,6 +155,16 @@ var (
 	projectSlugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
 
+// RegisterLegacyProject registers a project feature in both the global and
+// project-scoped registries. It exists only for the Centrum route cutover:
+// /v1/sports/... keeps working while /v1/p/centrum/... comes online. New
+// projects call RegisterProject directly, and the legacy registration is
+// removed once the frontend has moved.
+func RegisterLegacyProject(project, vertical string, f Feature) {
+	Register(f)
+	RegisterProject(project, vertical, f)
+}
+
 // RegisterProject adds a feature owned by one project. The feature name is
 // scoped to the project; duplicate names for the same project panic at boot.
 func RegisterProject(project, vertical string, f Feature) {

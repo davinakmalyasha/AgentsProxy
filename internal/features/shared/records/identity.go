@@ -209,9 +209,14 @@ func isPublicRead(r *http.Request) bool {
 	}
 	segs := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	// Project-scoped routes are /v1/p/{slug}/{collection}/...; strip the
-	// project prefix so the same public-read allowlist applies.
-	if len(segs) >= 5 && segs[0] == "v1" && segs[1] == "p" {
-		segs = append([]string{"v1"}, segs[3:]...)
+	// project prefix so the same public-read allowlist applies. The
+	// collection itself is four segments (/v1/p/centrum/facilities), not
+	// five, so the guard must include that case.
+	if len(segs) >= 4 && segs[0] == "v1" && segs[1] == "p" {
+		// Replace /v1/p/{slug} with a synthetic vertical. The collection
+		// stays at segs[2] so the fixed-position allowlist below applies
+		// exactly as it does for /v1/{vertical}/{collection}.
+		segs = append([]string{"v1", "project"}, segs[3:]...)
 	}
 	// /v1/{vertical}/{collection}/...
 	if len(segs) < 3 || segs[0] != "v1" {
