@@ -37,11 +37,12 @@ const SchemaVersion = 1
 func init() { Register() }
 
 func Register() {
-	features.Register(features.Feature{
+	features.RegisterLegacyProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
+		PublicRead:    true, // GET is a landing-page read; writes stay gated
 	})
 }
 

@@ -27,7 +27,7 @@ const featureName = "series"
 func init() { Register() }
 
 func Register() {
-	features.Register(features.Feature{
+	features.RegisterLegacyProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "",
 		VerticalSlugs: []string{"sports"},

@@ -51,12 +51,46 @@ func MigrateProjects(ctx context.Context, pool *Pool) error {
 // MigrateProjectsFS is the testable core of MigrateProjects. The fsys must
 // contain projects/<dir>/project.json and projects/<dir>/migrations/*.sql.
 func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
+	plans, err := loadProjectPlans(fsys)
+	if err != nil {
+		return err
+	}
+	for _, p := range plans {
+		// The legacy Centrum project has no project migrations; its tables
+		// are part of the historical platform chain in public. Do not create
+		// an empty public-schema step.
+		if p.Schema == "public" && len(p.Files) == 0 {
+			continue
+		}
+		if err := migrateOneProject(ctx, pool, p.Slug, p.Schema, p.Files, p.AutoGrant); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// projectPlan is the filesystem half of a project migration run: identity,
+// schema, and every embedded SQL file in apply order. Both the runner and
+// the read-only status/check/plan commands use it, so a plan can never
+// disagree with what apply would do.
+type projectPlan struct {
+	Dir       string
+	Slug      string
+	Schema    string
+	AutoGrant bool
+	Files     []projectMigrationFile
+}
+
+// loadProjectPlans walks projects/ and validates each project's identity and
+// schema without touching the database. A missing projects/ directory is an
+// empty plan, not an error (unit-test binaries and stripped builds).
+func loadProjectPlans(fsys fs.FS) ([]projectPlan, error) {
 	entries, err := fs.ReadDir(fsys, "projects")
 	if err != nil {
 		if strings.Contains(err.Error(), "file does not exist") {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("read projects: %w", err)
+		return nil, fmt.Errorf("read projects: %w", err)
 	}
 	var dirs []string
 	for _, e := range entries {
@@ -66,10 +100,13 @@ func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
 	}
 	sort.Strings(dirs)
 
+	plans := make([]projectPlan, 0, len(dirs))
+	seenSlug := map[string]string{}
+	seenSchema := map[string]string{}
 	for _, dir := range dirs {
 		doc, err := readProjectDoc(fsys, dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		slug := doc.Slug
 		if slug == "" {
@@ -80,28 +117,33 @@ func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
 			schema = "project_" + strings.ReplaceAll(slug, "-", "_")
 		}
 		if !projectSchemaRe.MatchString(schema) {
-			return fmt.Errorf("project %q: invalid schema %q", slug, schema)
+			return nil, fmt.Errorf("project %q: invalid schema %q", slug, schema)
 		}
 		if schema == "public" && slug != "centrum" {
-			return fmt.Errorf("project %q: only centrum may use the public schema", slug)
+			return nil, fmt.Errorf("project %q: only centrum may use the public schema", slug)
 		}
+		if other, ok := seenSlug[slug]; ok {
+			return nil, fmt.Errorf("project %q: slug is also declared by projects/%s", slug, other)
+		}
+		seenSlug[slug] = dir
+		if other, ok := seenSchema[schema]; ok {
+			return nil, fmt.Errorf("project %q: schema %q is also owned by projects/%s", slug, schema, other)
+		}
+		seenSchema[schema] = dir
 
 		files, err := projectMigrationFiles(fsys, dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		// The legacy Centrum project has no project migrations; its tables
-		// are part of the historical platform chain in public. Do not create
-		// an empty public-schema step.
-		if schema == "public" && len(files) == 0 {
-			continue
-		}
-		autoGrant := doc.AutoGrant == nil || *doc.AutoGrant
-		if err := migrateOneProject(ctx, pool, slug, schema, files, autoGrant); err != nil {
-			return err
-		}
+		plans = append(plans, projectPlan{
+			Dir:       dir,
+			Slug:      slug,
+			Schema:    schema,
+			AutoGrant: doc.AutoGrant == nil || *doc.AutoGrant,
+			Files:     files,
+		})
 	}
-	return nil
+	return plans, nil
 }
 
 func readProjectDoc(fsys fs.FS, dir string) (projectMigrationDoc, error) {
