@@ -27,6 +27,18 @@ func TestIsPublicReadOnlyMatchesWholeSegments(t *testing.T) {
 		// tenant of business.
 		{http.MethodGet, "/v1/other/facilities/", true},
 
+		// Project-scoped routes have one extra path segment. The bare
+		// collection (/v1/p/centrum/facilities) is four segments, and it
+		// used to fail the five-segment strip guard and return 401.
+		{http.MethodGet, "/v1/p/centrum/facilities", true},
+		{http.MethodGet, "/v1/p/centrum/facilities/", true},
+		{http.MethodGet, "/v1/p/centrum/facilities/abc", true},
+		{http.MethodGet, "/v1/p/centrum/pricing/", true},
+		{http.MethodGet, "/v1/p/centrum/availability", true},
+		{http.MethodGet, "/v1/p/centrum/bookings", false},
+		{http.MethodGet, "/v1/p/centrum/admin/facilities", false},
+		{http.MethodGet, "/v1/p/centrum", false},
+
 		// The bug: a raw substring anywhere in the path used to be enough,
 		// so a path merely CONTAINING one of these words leaked. Each of
 		// these contains "/pricing" or "/facilities" as text.

@@ -15,5 +15,8 @@ package features
 // The legacy Centrum backend still uses Register() and /v1/sports/... so
 // its frontend keeps working unchanged.
 
-// ResetForTest clears the global registry. Test-only.
-func ResetForTest() { MustInit() }
+// ResetForTest clears both registries. Test-only.
+func ResetForTest() {
+	MustInit()
+	resetProjectRegistryForTest()
+}

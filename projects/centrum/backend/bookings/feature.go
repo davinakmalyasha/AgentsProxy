@@ -52,7 +52,7 @@ var NotifyFunc func(ctx context.Context, tenantID, to, text string)
 // Register registers the bookings feature. Safe to call from tests
 // after features.ResetForTest().
 func Register() {
-	features.Register(features.Feature{
+	features.RegisterLegacyProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
 		VerticalSlugs: []string{"sports"},

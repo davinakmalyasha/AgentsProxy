@@ -36,11 +36,12 @@ func init() { Register() }
 // Register registers the facilities feature. Safe to call from tests
 // after features.ResetForTest().
 func Register() {
-	features.Register(features.Feature{
+	features.RegisterLegacyProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
 		VerticalSlugs: []string{"sports"},
 		Routes:        routes,
+		PublicRead:    true, // GET is a landing-page read
 	})
 }
 

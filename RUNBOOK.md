@@ -271,7 +271,8 @@ create `tenant_records` in the project schema. If it has a custom agent, add
 `projects/<slug>/agent/` and run `go generate ./...` before deploying.
 
 A project's business tables live in its own schema; its frontend uses
-`/v1/p/<slug>/...` (Centrum keeps `/v1/sports/...` as the legacy alias).
+`/v1/p/<slug>/...`. Centrum serves both that prefix and the legacy
+`/v1/sports/...` alias until its frontend cutover is complete.
 
 ---
 
