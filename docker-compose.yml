@@ -1,10 +1,10 @@
-# docker-compose.yml — PROD ONLY (Railway/VPS), NOT for Laragon dev.
-# Local Laragon runs Postgres + Redis directly; this file brings the
-# production-like stack up with one command.
+# docker-compose.yml — production-like local stack, NOT for Laragon daily dev.
+# Vercel + Supabase is the supported production deployment; this file is useful
+# for testing the long-running binary and boot-migration path.
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

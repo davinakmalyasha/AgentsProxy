@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -140,6 +141,43 @@ func InspectMigrationsFS(ctx context.Context, pool *Pool, fsys fs.FS) (*Migratio
 	}
 
 	seenProjects := map[string]bool{}
+	declaredSchemas := map[string]bool{}
+	for _, p := range plans {
+		declaredSchemas[p.Schema] = true
+	}
+	// One project schema, one client. Provisioning checks this on write; the
+	// read-only report catches historical or hand-edited drift (and test
+	// databases that intentionally seed multiple tenants in one schema).
+	schemaOwners := map[string][]string{}
+	for tenant, schema := range status.ClientSchemas {
+		if strings.HasPrefix(schema, "project_") {
+			schemaOwners[schema] = append(schemaOwners[schema], tenant)
+		}
+	}
+	var duplicateSchemas []string
+	for schema, tenants := range schemaOwners {
+		if len(tenants) > 1 {
+			sort.Strings(tenants)
+			duplicateSchemas = append(duplicateSchemas, fmt.Sprintf(
+				"project schema %q is claimed by multiple clients: %s", schema, strings.Join(tenants, ", ")))
+		}
+	}
+	sort.Strings(duplicateSchemas)
+	status.Issues = append(status.Issues, duplicateSchemas...)
+
+	// A client pointed at a project schema that no projects/ folder declares
+	// cannot be served reproducibly: the next deploy may not know its
+	// migrations or features.
+	var undeclared []string
+	for tenant, schema := range status.ClientSchemas {
+		if strings.HasPrefix(schema, "project_") && !declaredSchemas[schema] {
+			undeclared = append(undeclared, fmt.Sprintf(
+				"client %q uses project schema %q but no projects/ folder declares it", tenant, schema))
+		}
+	}
+	sort.Strings(undeclared)
+	status.Issues = append(status.Issues, undeclared...)
+
 	for _, p := range plans {
 		ps := ProjectMigrationStatus{
 			Slug:      p.Slug,
@@ -154,12 +192,31 @@ func InspectMigrationsFS(ctx context.Context, pool *Pool, fsys fs.FS) (*Migratio
 				status.Pending++
 			}
 		}
-		status.Issues = append(status.Issues, ps.Issues...)
+		// The ledger must agree with the project's declared schema; otherwise
+		// apply would create a new schema and skip every already-recorded
+		// version.
+		var ledgerMismatch string
+		for version, row := range applied {
+			if row.Schema != "" && row.Schema != p.Schema {
+				ledgerMismatch = fmt.Sprintf(
+					"project %q: migration %s was applied to schema %q but project.json uses %q",
+					p.Slug, version, row.Schema, p.Schema)
+				break
+			}
+		}
+		if ledgerMismatch != "" {
+			ps.Issues = append(ps.Issues, ledgerMismatch)
+		}
 		if schema, ok := status.ClientSchemas[p.Slug]; ok && schema != p.Schema {
 			msg := fmt.Sprintf("project %q: clients.db_schema is %q but project.json uses %q", p.Slug, schema, p.Schema)
 			ps.Issues = append(ps.Issues, msg)
-			status.Issues = append(status.Issues, msg)
 		}
+		rlsIssues, err := auditProjectRLS(ctx, tx, p.Schema)
+		if err != nil {
+			return nil, err
+		}
+		ps.Issues = append(ps.Issues, rlsIssues...)
+		status.Issues = append(status.Issues, ps.Issues...)
 		status.Projects = append(status.Projects, ps)
 	}
 
@@ -225,6 +282,7 @@ func platformMigrationFiles() ([]projectMigrationFile, error) {
 
 type ledgerRow struct {
 	Checksum  string
+	Schema    string
 	AppliedAt time.Time
 }
 
@@ -270,27 +328,80 @@ func readProjectLedger(ctx context.Context, tx pgx.Tx, exists bool) (map[string]
 	if !exists {
 		return out, nil
 	}
-	rows, err := tx.Query(ctx,
-		`SELECT project_slug, version, checksum, applied_at FROM public.project_migrations`)
+	hasSchema, err := hasColumn(ctx, tx, "project_migrations", "db_schema")
+	if err != nil {
+		return nil, err
+	}
+	query := `SELECT project_slug, version, checksum, applied_at FROM public.project_migrations`
+	if hasSchema {
+		query = `SELECT project_slug, version, checksum, db_schema, applied_at FROM public.project_migrations`
+	}
+	rows, err := tx.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("read project_migrations: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var slug, version, checksum string
+		var slug, version, checksum, schema string
 		var applied time.Time
-		if err := rows.Scan(&slug, &version, &checksum, &applied); err != nil {
+		if hasSchema {
+			if err := rows.Scan(&slug, &version, &checksum, &schema, &applied); err != nil {
+				return nil, fmt.Errorf("scan project_migrations: %w", err)
+			}
+		} else if err := rows.Scan(&slug, &version, &checksum, &applied); err != nil {
 			return nil, fmt.Errorf("scan project_migrations: %w", err)
 		}
 		if out[slug] == nil {
 			out[slug] = map[string]ledgerRow{}
 		}
-		out[slug][version] = ledgerRow{Checksum: checksum, AppliedAt: applied}
+		out[slug][version] = ledgerRow{Checksum: checksum, Schema: schema, AppliedAt: applied}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read project_migrations: %w", err)
 	}
 	return out, nil
+}
+
+// auditProjectRLS reports tables in a project schema that do not carry the
+// ENABLE+FORCE RLS invariant. app_runtime is not the owner, so ENABLE alone
+// protects tenant traffic today; FORCE also protects definer/owner paths and
+// keeps the schema contract honest.
+func auditProjectRLS(ctx context.Context, tx pgx.Tx, schema string) ([]string, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schema).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("inspect project schema %q: %w", schema, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relkind = 'r'
+		 ORDER BY c.relname`, schema)
+	if err != nil {
+		return nil, fmt.Errorf("inspect project RLS %q: %w", schema, err)
+	}
+	defer rows.Close()
+	var issues []string
+	for rows.Next() {
+		var table string
+		var rls, force bool
+		if err := rows.Scan(&table, &rls, &force); err != nil {
+			return nil, fmt.Errorf("scan project RLS %q: %w", schema, err)
+		}
+		if !rls || !force {
+			issues = append(issues, fmt.Sprintf(
+				"project schema %q: table %q has RLS=%t force=%t; every project table must ENABLE+FORCE RLS",
+				schema, table, rls, force))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read project RLS %q: %w", schema, err)
+	}
+	return issues, nil
 }
 
 func hasColumn(ctx context.Context, tx pgx.Tx, table, column string) (bool, error) {

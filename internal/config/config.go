@@ -18,11 +18,15 @@ type Config struct {
 	Env              string
 	DatabaseURL      string
 	DatabaseAdminURL string
-	RedisURL         string
-	LLMBaseURL       string
-	LLMAPIKey        string
-	LLMModel         string
-	AdminAPIKey      string
+	// ExpectedDBRef pins this process to one Supabase project. Supabase
+	// pooler usernames carry the ref ("app_runtime.<ref>"); direct hosts
+	// carry it too. An empty value disables the guard (local development).
+	ExpectedDBRef string
+	RedisURL      string
+	LLMBaseURL    string
+	LLMAPIKey     string
+	LLMModel      string
+	AdminAPIKey   string
 	// ReportWorkerToken authenticates the pg_cron report worker
 	// (migration 064). Empty disables the internal build endpoint.
 	ReportWorkerToken  string
@@ -142,6 +146,7 @@ func Load() (*Config, error) {
 		Env:                     env,
 		DatabaseURL:             os.Getenv("DATABASE_URL"),
 		DatabaseAdminURL:        os.Getenv("DATABASE_ADMIN_URL"),
+		ExpectedDBRef:           strings.TrimSpace(os.Getenv("EXPECTED_DB_REF")),
 		RedisURL:                getenv("REDIS_URL", "localhost:6379"),
 		LLMBaseURL:              getenv("LLM_BASE_URL", "https://api.deepseek.com"),
 		LLMAPIKey:               os.Getenv("LLM_API_KEY"),
@@ -297,6 +302,43 @@ func validateDatabaseTargets(c *Config) error {
 		if strings.TrimSpace(c.DatabaseAdminURL) == "" {
 			return errors.New("DATABASE_ADMIN_URL is required when ENV=production")
 		}
+	} else {
+		for _, target := range []struct {
+			name string
+			dsn  string
+		}{
+			{"DATABASE_URL", c.DatabaseURL},
+			{"DATABASE_ADMIN_URL", c.DatabaseAdminURL},
+		} {
+			if target.dsn == "" {
+				continue
+			}
+			host, ok := dsnHost(target.dsn)
+			if !ok {
+				// Let pgx report a malformed DSN at connect time; the
+				// guard is about reachable remote hosts, not URL lint.
+				continue
+			}
+			if isLoopbackHost(host) {
+				continue
+			}
+			if c.Env == "staging" && c.AllowRemoteDB {
+				continue
+			}
+			return fmt.Errorf("%s points at remote host %q while ENV=%s; local development must use localhost, and only staging may opt in with ALLOW_REMOTE_DB=true", target.name, host, c.Env)
+		}
+	}
+	return validateExpectedDBRef(c)
+}
+
+// validateExpectedDBRef makes the environment boundary identity-based, not
+// just host-based. Staging and production use different Supabase projects,
+// but both are remote; a copied DSN would otherwise boot happily. The ref is
+// validated from the pooler username ("role.<ref>") or a direct host
+// ("db.<ref>.supabase.co"). Empty disables the check.
+func validateExpectedDBRef(c *Config) error {
+	ref := strings.TrimSpace(c.ExpectedDBRef)
+	if ref == "" {
 		return nil
 	}
 	for _, target := range []struct {
@@ -309,21 +351,33 @@ func validateDatabaseTargets(c *Config) error {
 		if target.dsn == "" {
 			continue
 		}
-		host, ok := dsnHost(target.dsn)
+		ok, err := dsnMatchesRef(target.dsn, ref)
+		if err != nil {
+			return fmt.Errorf("%s: cannot verify EXPECTED_DB_REF: %w", target.name, err)
+		}
 		if !ok {
-			// Let pgx report a malformed DSN at connect time; the
-			// guard is about reachable remote hosts, not URL lint.
-			continue
+			return fmt.Errorf("%s does not belong to EXPECTED_DB_REF; refusing to use another environment's database", target.name)
 		}
-		if isLoopbackHost(host) {
-			continue
-		}
-		if c.Env == "staging" && c.AllowRemoteDB {
-			continue
-		}
-		return fmt.Errorf("%s points at remote host %q while ENV=%s; local development must use localhost, and only staging may opt in with ALLOW_REMOTE_DB=true", target.name, host, c.Env)
 	}
 	return nil
+}
+
+func dsnMatchesRef(dsn, ref string) (bool, error) {
+	u, err := url.Parse(strings.TrimSpace(dsn))
+	if err != nil {
+		return false, err
+	}
+	if u.User != nil {
+		user := u.User.Username()
+		if user == ref || strings.HasSuffix(user, "."+ref) {
+			return true, nil
+		}
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == ref || strings.HasPrefix(host, ref+".") || strings.Contains(host, "."+ref+".") {
+		return true, nil
+	}
+	return false, nil
 }
 
 func dsnHost(dsn string) (string, bool) {

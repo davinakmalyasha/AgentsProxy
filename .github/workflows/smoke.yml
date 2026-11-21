@@ -41,21 +41,37 @@ jobs:
 
   frontend-health:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     env:
-      FRONTEND_URL: https://centrum-badminton.vercel.app
+      CENTRUM_URL: https://centrum-badminton.vercel.app
+      DFD_URL: https://dfdagency.vercel.app
     steps:
-      - name: probe frontend root (3 attempts, 20s apart)
-        # Same retry philosophy as prod-health above: one sample can
-        # catch a cold start; three spaced samples distinguish a flap.
+      - name: probe frontend + API contracts (3 attempts, 20s apart)
+        # The Oct 2026 outage was a CORS break that health-only checks
+        # missed. Probe the actual data surfaces: Centrum's tenant API and
+        # the DFD catalog, not just the HTML shell.
         run: |
           set -euo pipefail
-          ok=0
-          for i in 1 2 3; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 "$FRONTEND_URL/") || code="000"
-            if [ "$code" = "200" ]; then ok=1; break; fi
-            echo "attempt $i: http=$code — retrying in 20s"
-            sleep 20
-          done
-          echo "http=$code attempts_used=$i"
-          test "$ok" = "1"
+          probe() {
+            local name="$1" url="$2" want="$3"
+            local ok=0 code body
+            body=$(mktemp)
+            for i in 1 2 3; do
+              code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 25 "$url") || code="000"
+              if [ "$code" = "200" ] && { [ -z "$want" ] || grep -q "$want" "$body"; }; then ok=1; break; fi
+              echo "$name attempt $i: http=$code — retrying in 20s"
+              sleep 20
+            done
+            echo "$name http=$code attempts_used=$i"
+            if [ "$ok" != "1" ]; then
+              echo "--- $name body ---"
+              head -c 600 "$body" || true
+              echo
+              return 1
+            fi
+          }
+
+          probe "centrum root" "$CENTRUM_URL/" ""
+          probe "centrum health" "$CENTRUM_URL/api/health" '"configured":true'
+          probe "centrum availability" "$CENTRUM_URL/api/availability?date=$(date -u +%F)" '"facilities"'
+          probe "dfd catalog" "$DFD_URL/id" ""
