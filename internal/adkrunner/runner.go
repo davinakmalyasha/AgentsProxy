@@ -104,7 +104,7 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 	// backoff. The registry half is static, but the MCP half is not, so
 	// drop the cached set when the manager says a reconnect is due.
 	if r.mcp != nil {
-		if p := r.projectFor(tenantID); p != nil && r.mcp.RefreshDue(tenantID, p.Agent.MCP) {
+		if p := r.projectFor(tenantID); p != nil && r.mcp.RefreshDue(tenantID, toolsRole, p.Agent.MCP) {
 			r.cacheMu.Lock()
 			delete(r.toolSets, key)
 			r.cacheMu.Unlock()
@@ -174,7 +174,16 @@ func (r *Runner) withMCP(native *agentstools.ToolSet, tenantID, role string) *ag
 	for _, name := range native.Names() {
 		seen[name] = true
 	}
-	for _, remote := range r.mcp.Tools(context.Background(), tenantID, p.Agent.MCP) {
+	servers := make([]agentconfig.MCPServer, 0, len(p.Agent.MCP))
+	for _, srv := range p.Agent.MCP {
+		if mcpclient.ServerAllowsRole(srv, role) {
+			servers = append(servers, srv)
+		}
+	}
+	if len(servers) == 0 {
+		return native
+	}
+	for _, remote := range r.mcp.Tools(context.Background(), tenantID, role, servers) {
 		if !remote.Allowed(role) {
 			continue
 		}

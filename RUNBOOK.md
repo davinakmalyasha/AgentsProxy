@@ -202,6 +202,18 @@ Existing pooled sessions survive a password change; new connections fail
 until the consumer has the new value. Do `postgres` last, in a low-traffic
 window.
 
+Supavisor's **session** pooler (port 5432) can reject a just-changed password
+for roughly 10–20 seconds while it refreshes its credential cache. The
+transaction pooler (6543) often accepts it immediately. Wait and retry the
+5432 check before concluding the rotation failed; do not rotate again on the
+first auth error. Session mode is required for `pg_dump`, so the backup
+credential must be verified on 5432, not 6543.
+
+Both `backup_reader` and `delivery_caller` were rotated and verified in
+November 2026. Their current values live only in the GitHub secret and the
+Supabase Edge secret; if either is lost, rotate again rather than trying to
+recover it from logs or a deployment.
+
 ## 6. Feature toggle (instant or ≤15 min)
 
 `PATCH /v1/admin/clients/{id} {"features":["records","menu","booking"]}` — the cache entry is evicted on the way out, so the next request sees the new feature set. If Redis is down, the cached entry lives up to 15 minutes (the cache TTL); use `redis-cli DEL ck:<sha256>` to force the eviction.
