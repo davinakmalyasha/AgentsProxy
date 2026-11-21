@@ -107,6 +107,9 @@ func loadProjectPlans(fsys fs.FS) ([]projectPlan, error) {
 		if slug == "" {
 			slug = strings.ToLower(dir)
 		}
+		if slug != strings.ToLower(dir) {
+			return nil, fmt.Errorf("project folder %q declares slug %q; the folder name and slug must match", dir, slug)
+		}
 		schema := doc.Schema
 		if schema == "" {
 			schema = "project_" + strings.ReplaceAll(slug, "-", "_")
