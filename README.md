@@ -21,9 +21,9 @@ prune script and tenant hygiene.
 
 New projects are not shared vertical code: each one gets
 `projects/<slug>/` and its own Postgres schema (`project_<slug>`). Centrum
-now owns `project_centrum`; its frontend is moving from the legacy
-`/v1/sports/...` alias to `/v1/p/centrum/...`, and new frontends use
-`/v1/p/<slug>/...` from day one.
+now owns `project_centrum`; its frontend uses `/v1/p/centrum/...`, with the
+legacy `/v1/sports/...` alias retained as a rollback surface for one
+release. New frontends use `/v1/p/<slug>/...` from day one.
 
 ## Layout
 
