@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
@@ -31,23 +32,14 @@ type BuilderDeps struct {
 	RateLimitPerMinute int
 }
 
-// AllowedVerticals is the single source for the supported business
-// verticals. Mirror of the legacy internal/api list; the builder is
-// the consumer from now on.
-var AllowedVerticals = []string{
-	"fnb", "salon", "laundry", "klinik", "gym", "bimbel",
-	"bengkel", "beauty", "travel", "property", "katering", "photo",
-	"sports",
-}
+// AllowedVerticals is re-exported for the router and tests. The single
+// source lives in agentconfig so a project folder cannot name a vertical
+// that the builder does not mount.
+var AllowedVerticals = agentconfig.AllowedVerticals
 
 // IsAllowedVertical reports whether v is one of the allowed verticals.
 func IsAllowedVertical(v string) bool {
-	for _, a := range AllowedVerticals {
-		if a == v {
-			return true
-		}
-	}
-	return false
+	return agentconfig.IsAllowedVertical(v)
 }
 
 // LiveVerticals returns the verticals that have at least one active

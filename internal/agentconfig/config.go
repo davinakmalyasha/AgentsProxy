@@ -31,6 +31,25 @@ import (
 	"strings"
 )
 
+// AllowedVerticals is the single source for the supported business
+// verticals. The feature builder consumes it; project validation rejects a
+// folder that names a vertical nobody mounts.
+var AllowedVerticals = []string{
+	"fnb", "salon", "laundry", "klinik", "gym", "bimbel",
+	"bengkel", "beauty", "travel", "property", "katering", "photo",
+	"sports",
+}
+
+// IsAllowedVertical reports whether v is one of the supported verticals.
+func IsAllowedVertical(v string) bool {
+	for _, a := range AllowedVerticals {
+		if a == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Project is one client project's configuration. A project and a tenant
 // are the same identity: project.json's slug is clients.tenant_id.
 type Project struct {
@@ -173,6 +192,8 @@ func Validate(p *Project, b Budget) error {
 	}
 	if p.Vertical == "" {
 		add("vertical is required")
+	} else if !IsAllowedVertical(p.Vertical) {
+		add("unknown vertical %q (add it to AllowedVerticals first)", p.Vertical)
 	}
 	if p.Schema == "" {
 		add("schema is required (use project_<slug>)")
