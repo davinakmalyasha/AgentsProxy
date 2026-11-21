@@ -56,9 +56,9 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   `ENABLE+FORCE RLS` + policy `tenant_id = current_setting('app.tenant_id')`
   + `GRANT app_runtime`. Handlers run in `WithTenantTx`, which sets both the
   GUC and `search_path` from `clients.db_schema` per transaction — defense in
-  depth. Centrum now mounts both `/v1/p/centrum/...` and its legacy
-  `/v1/sports/...` alias; the alias is removed after the frontend cutover,
-  and the data boundary is already project-scoped.
+  depth. Centrum's frontend uses `/v1/p/centrum/...`; the legacy
+  `/v1/sports/...` alias stays mounted as a rollback surface for one release.
+  The data boundary is already project-scoped.
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;

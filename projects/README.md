@@ -25,11 +25,11 @@ Rules:
   `project.json` and put tables in `migrations/`. The runtime sets
   `search_path` from `clients.db_schema`.
 - **Centrum is the route-transition exception.** Its business tables live in
-  `project_centrum` (moved by its `0001` project migration). Its features are
-  registered in both registries, so `/v1/sports/...` and
-  `/v1/p/centrum/...` are live while the frontend moves; remove the legacy
-  registration after the cutover. Every project, including Centrum, uses its
-  own schema; `public` is platform-only.
+  `project_centrum` (moved by its `0001` project migration). Its frontend now
+  uses `/v1/p/centrum/...`; both registries stay populated so
+  `/v1/sports/...` remains a rollback surface for one release. Remove the
+  legacy registration after the stability window. Every project, including
+  Centrum, uses its own schema; `public` is platform-only.
 - **`auto_grant` defaults to true.** New projects get the blanket
   `app_runtime` DML grant after migrations. Centrum sets it false because its
   grants are deliberate: `sports_sessions` stays SELECT-only for the runtime
