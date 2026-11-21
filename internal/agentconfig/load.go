@@ -153,8 +153,8 @@ func loadOne(dir string) (*Project, error) {
 	p.Contact = doc.Contact
 	p.Schema = doc.Schema
 	if p.Schema == "" {
-		// A new project is isolated by default. The legacy Centrum project
-		// states "public" explicitly in its project.json.
+		// A new project is isolated by default. Centrum states
+		// "project_centrum" explicitly in its project.json.
 		p.Schema = "project_" + strings.ReplaceAll(p.Slug, "-", "_")
 	}
 	p.Agent.Enabled = doc.Agent.Enabled

@@ -115,7 +115,8 @@ func withTenantTxOnce(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 	// The schema lookup is part of the same statement as the GUC set, so a
 	// tenant transaction costs one round trip. `clients` is resolved before
 	// search_path changes; subsequent statements see only the project schema
-	// (or public for legacy Centrum). Excluding public for project schemas is
+	// (or public for a legacy public-schema project). Excluding public for
+	// project schemas is
 	// deliberate: an unqualified table that is missing from the project
 	// schema must fail, not silently fall back to a shared platform table.
 	if _, err := tx.Exec(ctx, `

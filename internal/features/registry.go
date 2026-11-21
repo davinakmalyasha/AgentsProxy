@@ -145,8 +145,8 @@ func hasFeature(name string) bool {
 // by exactly one project and are mounted under /v1/p/<slug>/..., so two
 // projects may both implement a feature named "bookings" without colliding.
 //
-// The legacy Centrum backend still registers into the global registry to keep
-// /v1/sports/... working unchanged. New projects use RegisterProject.
+// Centrum dual-registers into the global registry so /v1/sports/... remains a
+// one-release rollback alias. New projects use RegisterProject only.
 
 var (
 	projectMu        sync.RWMutex
