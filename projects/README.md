@@ -85,6 +85,27 @@ server that is down is logged and skipped; native tools keep working, and the
 connection is retried after 30 seconds. Results are capped at 16 KB and calls
 time out at 15 seconds.
 
+## Removing or renaming a project
+
+Decommission is deliberate and never part of `migrate apply`:
+
+1. Export the project schema (`pg_dump --schema=project_<slug>`) and keep it
+   with the client's records.
+2. Pause the client (`PATCH /v1/admin/clients/{id} {"status":"paused"}`) and
+   remove its frontend origins; stop the frontend.
+3. Delete the `clients` row. Its `tenant_id` rows cascade in platform and
+   project tables.
+4. Drop the project schema manually (`DROP SCHEMA project_<slug> CASCADE`)
+   only after the export is verified.
+5. Remove `projects/<slug>/`, run `go generate ./...`, and delete the
+   frontend/DNS entries.
+6. Run `go run ./cmd/migrate check`; it fails if a client or ledger row still
+   points at a schema with no project folder.
+
+Renaming a project is a migration, not a folder rename: the ledger records
+the schema each version ran in, and `migrate apply` refuses a schema change
+without a deliberate export/move procedure.
+
 ## Adding a project
 
 1. Create `projects/<slug>/project.json` with a unique slug and
