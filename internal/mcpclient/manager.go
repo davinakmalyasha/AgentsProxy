@@ -36,6 +36,22 @@ const (
 	retryAfter     = 30 * time.Second
 )
 
+// ServerAllowsRole reports whether a tier may use this server at all. An
+// empty role list means staff only, never the public widget. Filtering before
+// connecting matters: an anon turn must not open sessions for staff-only
+// servers just to discard their tools.
+func ServerAllowsRole(srv agentconfig.MCPServer, role string) bool {
+	if len(srv.Roles) == 0 {
+		return role == "owner" || role == "pegawai"
+	}
+	for _, r := range srv.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
 // Tool is one remote tool plus the tiers allowed to see it. Roles is empty
 // for the safe default: staff only.
 type Tool struct {
@@ -92,12 +108,12 @@ func NewManagerWithLookup(lookup func(string) (string, bool)) *Manager {
 // Tools returns the project's current MCP tools. A server that is down is
 // logged and skipped; native tools still work. Failures are retried after a
 // short backoff instead of adding a connection timeout to every turn.
-func (m *Manager) Tools(ctx context.Context, project string, servers []agentconfig.MCPServer) []Tool {
+func (m *Manager) Tools(ctx context.Context, project, role string, servers []agentconfig.MCPServer) []Tool {
 	if m == nil || len(servers) == 0 {
 		return nil
 	}
 	fp := fingerprint(servers)
-	e := m.entry(project)
+	e := m.entry(project, role)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -135,11 +151,11 @@ func (m *Manager) Tools(ctx context.Context, project string, servers []agentconf
 // RefreshDue reports whether the cached tool set is stale: config changed,
 // or a failed server is past its retry backoff. The runner uses it to evict
 // its own per-(tenant, role) cache.
-func (m *Manager) RefreshDue(project string, servers []agentconfig.MCPServer) bool {
+func (m *Manager) RefreshDue(project, role string, servers []agentconfig.MCPServer) bool {
 	if m == nil || len(servers) == 0 {
 		return false
 	}
-	e := m.entry(project)
+	e := m.entry(project, role)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.fingerprint != fingerprint(servers) {
@@ -154,13 +170,21 @@ func (m *Manager) CloseProject(project string) {
 	if m == nil {
 		return
 	}
-	e := m.entry(project)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.closeLocked()
-	e.fingerprint = ""
-	e.tools = nil
-	e.failed = false
+	m.mu.Lock()
+	var entries []*projectEntry
+	prefix := project + "\x00"
+	for key, e := range m.projects {
+		if strings.HasPrefix(key, prefix) {
+			entries = append(entries, e)
+			delete(m.projects, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, e := range entries {
+		e.mu.Lock()
+		e.closeLocked()
+		e.mu.Unlock()
+	}
 }
 
 // Close drops every session. Safe to call more than once.
@@ -181,16 +205,17 @@ func (m *Manager) Close() {
 	}
 }
 
-func (m *Manager) entry(project string) *projectEntry {
+func (m *Manager) entry(project, role string) *projectEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.projects == nil {
 		m.projects = map[string]*projectEntry{}
 	}
-	e := m.projects[project]
+	key := project + "\x00" + role
+	e := m.projects[key]
 	if e == nil {
 		e = &projectEntry{}
-		m.projects[project] = e
+		m.projects[key] = e
 	}
 	return e
 }

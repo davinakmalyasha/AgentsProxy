@@ -56,7 +56,7 @@ func TestToolsListsCallsAndFiltersByAllowList(t *testing.T) {
 	m := NewManagerWithLookup(nil)
 	defer m.Close()
 	servers := []agentconfig.MCPServer{{Name: "echo", URL: srv.URL, Tools: []string{"echo"}}}
-	tools := m.Tools(context.Background(), "acme", servers)
+	tools := m.Tools(context.Background(), "acme", "owner", servers)
 	if len(tools) != 1 {
 		t.Fatalf("tools=%d, want 1", len(tools))
 	}
@@ -96,7 +96,7 @@ func TestToolsResolveHeaderEnvironmentAndSkipWhenMissing(t *testing.T) {
 		Tools:   []string{"echo"},
 		Headers: map[string]string{"Authorization": "Bearer ${MCP_TOKEN}"},
 	}}
-	if tools := m.Tools(context.Background(), "acme", servers); len(tools) != 1 {
+	if tools := m.Tools(context.Background(), "acme", "owner", servers); len(tools) != 1 {
 		t.Fatalf("tools=%d, want 1", len(tools))
 	}
 
@@ -111,7 +111,7 @@ func TestToolsResolveHeaderEnvironmentAndSkipWhenMissing(t *testing.T) {
 		Tools:   []string{"echo"},
 		Headers: map[string]string{"Authorization": "Bearer ${MCP_TOKEN}"},
 	}}
-	if tools := m2.Tools(context.Background(), "acme", servers2); len(tools) != 0 {
+	if tools := m2.Tools(context.Background(), "acme", "owner", servers2); len(tools) != 0 {
 		t.Fatalf("tools=%d, want 0 when the token is absent", len(tools))
 	}
 	if hits.Load() != 0 {
@@ -125,13 +125,34 @@ func TestRefreshDueOnConfigChange(t *testing.T) {
 	m := NewManagerWithLookup(nil)
 	defer m.Close()
 	servers := []agentconfig.MCPServer{{Name: "echo", URL: srv.URL}}
-	_ = m.Tools(context.Background(), "acme", servers)
-	if m.RefreshDue("acme", servers) {
+	_ = m.Tools(context.Background(), "acme", "owner", servers)
+	if m.RefreshDue("acme", "owner", servers) {
 		t.Fatal("unchanged config should not be due")
 	}
 	servers[0].Tools = []string{"echo"}
-	if !m.RefreshDue("acme", servers) {
+	if !m.RefreshDue("acme", "owner", servers) {
 		t.Fatal("changed config should be due")
+	}
+}
+
+func TestServerAllowsRole(t *testing.T) {
+	srv := agentconfig.MCPServer{Name: "x", URL: "https://example.com/mcp"}
+	for _, role := range []string{"owner", "pegawai"} {
+		if !ServerAllowsRole(srv, role) {
+			t.Errorf("default server rejected %s", role)
+		}
+	}
+	for _, role := range []string{"client", "anon"} {
+		if ServerAllowsRole(srv, role) {
+			t.Errorf("default server allowed %s", role)
+		}
+	}
+	explicit := agentconfig.MCPServer{Name: "x", URL: "https://example.com/mcp", Roles: []string{"client"}}
+	if !ServerAllowsRole(explicit, "client") {
+		t.Error("explicit client role rejected")
+	}
+	if ServerAllowsRole(explicit, "owner") {
+		t.Error("explicit roles should not implicitly include owner")
 	}
 }
 
