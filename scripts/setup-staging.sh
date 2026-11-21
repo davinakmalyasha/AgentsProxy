@@ -130,7 +130,7 @@ if user.startswith("postgres."):
     ref = user.split(".", 1)[1]
 elif host.startswith("db."):
     ref = host.split(".")[1]
-pooler = host if "pooler.supabase.com" in host else "aws-0-ap-southeast-1.pooler.supabase.com"
+pooler = host if "pooler.supabase.com" in host else "aws-1-ap-southeast-1.pooler.supabase.com"
 print(ref, pooler)
 PY
 )
