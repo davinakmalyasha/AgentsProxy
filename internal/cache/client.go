@@ -44,7 +44,8 @@ type ClientModel struct {
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
 	// DBSchema is the project schema that owns this tenant's business
-	// tables. Legacy Centrum is "public"; new projects use project_<slug>.
+	// tables. Every project uses project_<slug>; "public" is the legacy
+	// platform tenant (dfd-agency), which owns no project folder.
 	DBSchema string `json:"db_schema"`
 }
 

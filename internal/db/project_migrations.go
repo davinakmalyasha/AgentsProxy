@@ -9,13 +9,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	projectembed "github.com/davinakmalyasha/agents-proxy"
 )
 
-var projectSchemaRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+var projectSchemaRe = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
 
 // MigrateAll applies the platform migrations, then every project's own
 // migrations. It is the deploy-step entry point (cmd/migrate and boot).
@@ -56,12 +57,6 @@ func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
 		return err
 	}
 	for _, p := range plans {
-		// A public-schema project with no files is the historical escape
-		// hatch; there is no schema step to create. Every real project,
-		// including Centrum, now has its own schema and at least one file.
-		if p.Schema == "public" && len(p.Files) == 0 {
-			continue
-		}
 		if err := migrateOneProject(ctx, pool, p.Slug, p.Schema, p.Files, p.AutoGrant); err != nil {
 			return err
 		}
@@ -117,10 +112,7 @@ func loadProjectPlans(fsys fs.FS) ([]projectPlan, error) {
 			schema = "project_" + strings.ReplaceAll(slug, "-", "_")
 		}
 		if !projectSchemaRe.MatchString(schema) {
-			return nil, fmt.Errorf("project %q: invalid schema %q", slug, schema)
-		}
-		if schema == "public" && slug != "centrum" {
-			return nil, fmt.Errorf("project %q: only centrum may use the public schema", slug)
+			return nil, fmt.Errorf("project %q: invalid schema %q (must match project_<slug>)", slug, schema)
 		}
 		if other, ok := seenSlug[slug]; ok {
 			return nil, fmt.Errorf("project %q: slug is also declared by projects/%s", slug, other)
@@ -219,15 +211,44 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 		}
 	}
 
-	applied, err := readAppliedProjectMigrations(ctx, tx, slug)
+	applied, hasSchema, err := readAppliedProjectMigrations(ctx, tx, slug)
 	if err != nil {
 		return err
 	}
 	for _, f := range files {
 		stored, ok := applied[f.Name]
 		if ok {
-			if stored == "" {
+			if hasSchema && stored.Schema == "" {
+				// Legacy row from before migration 075; record the
+				// schema now so a later schema edit cannot be mistaken
+				// for "already applied".
 				if _, err := tx.Exec(ctx,
+					`UPDATE public.project_migrations SET db_schema = $1
+					  WHERE project_slug = $2 AND version = $3 AND db_schema = ''`,
+					schema, slug, f.Name); err != nil {
+					return fmt.Errorf("project %q: backfill schema for %s: %w", slug, f.Name, err)
+				}
+				stored.Schema = schema
+			}
+			// A project that moved to a different schema must not look
+			// migrated in the new schema. The ledger has to record where
+			// each version ran; changing that is a deliberate procedure,
+			// not a quiet config edit.
+			if stored.Schema != "" && stored.Schema != schema {
+				return fmt.Errorf(
+					"project %q: migration %s was applied to schema %q but project.json now uses %q; changing a project schema requires a deliberate migration procedure",
+					slug, f.Name, stored.Schema, schema)
+			}
+			if stored.Checksum == "" {
+				if hasSchema {
+					if _, err := tx.Exec(ctx,
+						`UPDATE public.project_migrations
+						    SET checksum = $1, db_schema = $2
+						  WHERE project_slug = $3 AND version = $4 AND checksum = ''`,
+						f.Checksum, schema, slug, f.Name); err != nil {
+						return fmt.Errorf("project %q: backfill %s: %w", slug, f.Name, err)
+					}
+				} else if _, err := tx.Exec(ctx,
 					`UPDATE public.project_migrations SET checksum = $1
 					  WHERE project_slug = $2 AND version = $3 AND checksum = ''`,
 					f.Checksum, slug, f.Name); err != nil {
@@ -235,7 +256,7 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 				}
 				continue
 			}
-			if stored != f.Checksum {
+			if stored.Checksum != f.Checksum {
 				return fmt.Errorf("project %q: migration %s was modified after it was applied; add a new migration instead", slug, f.Name)
 			}
 			continue
@@ -246,7 +267,15 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 		if _, err := tx.Exec(ctx, string(f.Body)); err != nil {
 			return fmt.Errorf("project %q: apply %s: %w", slug, f.Name, err)
 		}
-		if _, err := tx.Exec(ctx,
+		if hasSchema {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO public.project_migrations (project_slug, version, checksum, db_schema)
+				 VALUES ($1, $2, $3, $4) ON CONFLICT (project_slug, version)
+				 DO UPDATE SET checksum = EXCLUDED.checksum, db_schema = EXCLUDED.db_schema`,
+				slug, f.Name, f.Checksum, schema); err != nil {
+				return fmt.Errorf("project %q: record %s: %w", slug, f.Name, err)
+			}
+		} else if _, err := tx.Exec(ctx,
 			`INSERT INTO public.project_migrations (project_slug, version, checksum)
 			 VALUES ($1, $2, $3) ON CONFLICT (project_slug, version)
 			 DO UPDATE SET checksum = EXCLUDED.checksum`,
@@ -302,23 +331,35 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 	return nil
 }
 
-func readAppliedProjectMigrations(ctx context.Context, tx pgx.Tx, slug string) (map[string]string, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT version, checksum FROM public.project_migrations WHERE project_slug = $1`, slug)
+func readAppliedProjectMigrations(ctx context.Context, tx pgx.Tx, slug string) (map[string]ledgerRow, bool, error) {
+	hasSchema, err := hasColumn(ctx, tx, "project_migrations", "db_schema")
 	if err != nil {
-		return nil, fmt.Errorf("project %q: read ledger: %w", slug, err)
+		return nil, false, fmt.Errorf("project %q: read ledger schema: %w", slug, err)
+	}
+	query := `SELECT version, checksum, applied_at FROM public.project_migrations WHERE project_slug = $1`
+	if hasSchema {
+		query = `SELECT version, checksum, db_schema, applied_at FROM public.project_migrations WHERE project_slug = $1`
+	}
+	rows, err := tx.Query(ctx, query, slug)
+	if err != nil {
+		return nil, false, fmt.Errorf("project %q: read ledger: %w", slug, err)
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	out := map[string]ledgerRow{}
 	for rows.Next() {
-		var version, checksum string
-		if err := rows.Scan(&version, &checksum); err != nil {
-			return nil, fmt.Errorf("project %q: read ledger: %w", slug, err)
+		var version, checksum, schema string
+		var applied time.Time
+		if hasSchema {
+			if err := rows.Scan(&version, &checksum, &schema, &applied); err != nil {
+				return nil, false, fmt.Errorf("project %q: read ledger: %w", slug, err)
+			}
+		} else if err := rows.Scan(&version, &checksum, &applied); err != nil {
+			return nil, false, fmt.Errorf("project %q: read ledger: %w", slug, err)
 		}
-		out[version] = checksum
+		out[version] = ledgerRow{Checksum: checksum, Schema: schema, AppliedAt: applied}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("project %q: read ledger: %w", slug, err)
+		return nil, false, fmt.Errorf("project %q: read ledger: %w", slug, err)
 	}
-	return out, nil
+	return out, hasSchema, nil
 }

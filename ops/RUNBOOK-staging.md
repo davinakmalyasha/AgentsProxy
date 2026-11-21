@@ -69,7 +69,8 @@ if you test backup/delivery on staging.
 
 This creates the platform tables, `app_runtime`, `auth_definer`,
 `money_reader`, `backup_reader`, `project_centrum`, and applies Centrum's
-`0001_move_to_project_schema.sql`. Verify:
+project migrations (`0001` schema move, `0002` records, `0003` FORCE RLS).
+Verify:
 
 ```sql
 select count(*) from pg_namespace where nspname = 'project_centrum';
@@ -103,11 +104,14 @@ Add separate entries instead.
 | `ALLOW_REMOTE_DB` | `true` |
 | `DATABASE_URL` | staging `app_runtime` pooler, port `6543`, `?pgbouncer=true` |
 | `DATABASE_ADMIN_URL` | staging `postgres` direct, port `5432` |
+| `EXPECTED_DB_REF` | staging Supabase project ref (blocks a copied production DSN) |
 | `DB_USE_SIMPLE_PROTOCOL` | `true` |
 | `DB_POOL_MIN` / `DB_POOL_MAX` | `0` / `2` |
 | `REDIS_URL` | staging Redis only |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | staging budget |
 | `ADMIN_API_KEY` | staging-only random value |
+| `JWT_SECRET` | optional staging-only 32+ char value; enables agency auth/portal routes |
+| `SIGNUP_ENABLED` | `false` unless testing self-service signup |
 | `RUN_MIGRATIONS` | `false` |
 | `BACKGROUND_TICKERS` | `false` |
 | `ALLOW_ORIGINS` | staging frontend origin |
@@ -118,11 +122,26 @@ Add separate entries instead.
 to its Production target would see `VERCEL_ENV=production` and correctly
 refuse `ENV=staging`, which is why the branch approach is used.
 
+### Staging scope
+
+The client plane is a full rehearsal: separate database, Redis, migrations,
+Centrum project routes, and agent calls. The agency plane needs one more
+step: set a staging-only `JWT_SECRET` (32+ chars) and seed a staging
+`users` row before testing `/api/v1/auth/*`, the portal, or admin screens.
+Without `RESEND_API_KEY`, OTP/signup codes are logged to the staging
+function logs instead of emailed; that is acceptable for staging, not for
+production. Google login and Supabase Storage stay disabled unless their
+staging-scoped values are added.
+
+Use a separate LLM key or a hard provider-side budget for staging. The
+runbook permits sharing the provider key, but nothing in the app enforces a
+per-environment spend cap.
+
 ## 5. Verify
 
 ```bash
 curl -s https://<staging-preview-url>/healthz
-curl -s "https://<staging-preview-url>/v1/sports/facilities?tenant_id=centrum"
+curl -s "https://<staging-preview-url>/v1/p/centrum/facilities"
 ```
 
 Logs must show:

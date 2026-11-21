@@ -13,11 +13,17 @@ name: backup
 
 on:
   schedule:
-    - cron: "0 18 * * *" # 01:00 Asia/Jakarta (UTC+7)
+    # Every 6 hours: the free plan has no PITR, so the logical dump is the
+    # recovery point. 01:00/07:00/13:00/19:00 Asia/Jakarta.
+    - cron: "0 18,0,6,12 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: backup-production
+  cancel-in-progress: false
 
 jobs:
   dump:

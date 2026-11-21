@@ -138,7 +138,12 @@ func DefaultBudget() Budget {
 }
 
 var (
-	schemaRe     = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+	// A project schema lives in its own namespace. "public" is reserved for
+	// the legacy platform tenant row (dfd-agency), which owns no project
+	// folder. Keeping the prefix rule here, in the migration runner, and in
+	// the admin API stops a typo like "auth" from granting app_runtime
+	// access to a Supabase-managed schema.
+	schemaRe     = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
 	modelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 	mcpNameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	headerNameRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -172,10 +177,7 @@ func Validate(p *Project, b Budget) error {
 	if p.Schema == "" {
 		add("schema is required (use project_<slug>)")
 	} else if !schemaRe.MatchString(p.Schema) {
-		add("schema %q must match %s", p.Schema, schemaRe.String())
-	}
-	if p.Schema == "public" && p.Slug != "centrum" {
-		add("only the legacy centrum project may use the public schema")
+		add("schema %q must match %s (project_<slug>, max 63 characters)", p.Schema, schemaRe.String())
 	}
 
 	for _, s := range p.Skills {

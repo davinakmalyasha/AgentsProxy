@@ -122,8 +122,11 @@ func TestValidateCatchesConfigDrift(t *testing.T) {
 		"oversized information": func(p *Project) {
 			p.Information = []Document{{Name: "big", Body: strings.Repeat("y", b.MaxInformationRunes+1)}}
 		},
-		"no vertical":        func(p *Project) { p.Vertical = "" },
-		"a slug with spaces": func(p *Project) { p.Slug = "My Venue" },
+		"no vertical":             func(p *Project) { p.Vertical = "" },
+		"a slug with spaces":      func(p *Project) { p.Slug = "My Venue" },
+		"a public schema":         func(p *Project) { p.Schema = "public" },
+		"a platform schema":       func(p *Project) { p.Schema = "auth" },
+		"an empty project schema": func(p *Project) { p.Schema = "project_" },
 	} {
 		p := &Project{Slug: "demo", Vertical: "sports", Schema: "project_demo"}
 		mutate(p)

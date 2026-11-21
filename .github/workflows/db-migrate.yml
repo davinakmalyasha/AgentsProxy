@@ -2,21 +2,25 @@
 #
 # Production boots with RUN_MIGRATIONS=false. This workflow applies the
 # embedded platform chain and every projects/<slug>/migrations/ inside its
-# own schema, then prints the ledger. It is manual and gated by the
-# `production` GitHub Environment; add required reviewers there.
+# own schema, then verifies the ledger. It is manual and gated by the
+# `production` GitHub Environment. GitHub Free does not support required
+# reviewers; the environment branch policy (protected branches) plus the
+# main-only job condition are the gate. On a plan with reviewers, add them.
+#
+# Release order: merge the migration-only PR to main, run this workflow,
+# then merge the code that depends on the new schema. Additive, backward-
+# compatible migrations may ship with their code, but the binary must never
+# depend on a column the database does not have yet.
 #
 # Secret: PROD_DATABASE_ADMIN_URL — the DIRECT 5432 postgres DSN. It is used
 # for both DATABASE_URL and DATABASE_ADMIN_URL because cmd/migrate only needs
 # the admin connection, and config.Load requires both names to be present.
+# Variable: PROD_DB_REF — optional Supabase ref guard (EXPECTED_DB_REF).
 name: db-migrate
 
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Git ref whose embedded migrations to apply (e.g. feat/projects-architecture)"
-        required: true
-        default: main
       command:
         description: "apply writes DDL; status/check/plan are read-only"
         type: choice
@@ -36,14 +40,17 @@ concurrency:
 
 jobs:
   migrate:
+    # workflow_dispatch can be started from any branch; production DDL is
+    # always built from main. The environment protection is the second gate.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: main
           fetch-depth: 1
 
       - name: Set up Go
@@ -55,6 +62,7 @@ jobs:
       - name: Run migration command
         env:
           ENV: production
+          EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
           DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
           DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
           # Production config validation rejects a wildcard origin. The
@@ -69,6 +77,18 @@ jobs:
           test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }
           go run ./cmd/migrate "${{ inputs.command }}"
 
+      - name: Verify ledger is clean after apply
+        if: inputs.command == 'apply'
+        env:
+          ENV: production
+          EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          ALLOW_ORIGINS: https://dfdagency.vercel.app
+          LLM_API_KEY: migrate-unused
+          ADMIN_API_KEY: migrate-unused
+        run: go run ./cmd/migrate check
+
       - name: Show ledger
         env:
           DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
@@ -79,4 +99,4 @@ jobs:
             "select version from public.schema_migrations order by version desc limit 5"
           echo "project ledger (latest 10):"
           psql "$DATABASE_ADMIN_URL" -Atc \
-            "select project_slug || ' ' || version from public.project_migrations order by applied_at desc limit 10"
+            "select project_slug || ' ' || version || ' ' || db_schema from public.project_migrations order by applied_at desc limit 10"

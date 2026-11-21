@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -22,7 +23,7 @@ func TestMigrateProjectsFS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("platform migrate: %v", err)
 	}
@@ -81,6 +82,53 @@ func TestMigrateProjectsFS(t *testing.T) {
 	}
 }
 
+// TestMigrateProjectsFS_RefusesSchemaChange pins the ledger's schema
+// identity. Without it, editing project.json to a new schema would create an
+// empty schema and skip every already-recorded migration.
+func TestMigrateProjectsFS_RefusesSchemaChange(t *testing.T) {
+	dsn := migrateDSN()
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping project schema-change test")
+	}
+	requireLocalDB(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("platform migrate: %v", err)
+	}
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS project_dbschema CASCADE;
+			DELETE FROM public.project_migrations WHERE project_slug = 'dbschema'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	fsys := fstest.MapFS{
+		"projects/dbschema/project.json": &fstest.MapFile{Data: []byte(`{
+			"slug": "dbschema", "vertical": "sports", "schema": "project_dbschema"
+		}`)},
+		"projects/dbschema/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(
+			`CREATE TABLE IF NOT EXISTS widgets (id int PRIMARY KEY);`)},
+	}
+	if err := MigrateProjectsFS(ctx, pool, fsys); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.project_migrations SET db_schema = 'project_dbschema_old'
+		  WHERE project_slug = 'dbschema'`); err != nil {
+		t.Fatal(err)
+	}
+	err = MigrateProjectsFS(ctx, pool, fsys)
+	if err == nil || !strings.Contains(err.Error(), "deliberate migration procedure") {
+		t.Fatalf("schema change was accepted: %v", err)
+	}
+}
+
 // TestMigrateProjectsFS_AutoGrantFalse pins the legacy-project escape hatch:
 // a project that owns its grants must not receive the runner's blanket DML
 // grant. Centrum relies on this for sports_sessions (SELECT-only runtime).
@@ -96,7 +144,7 @@ func TestMigrateProjectsFS_AutoGrantFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("platform migrate: %v", err)
 	}

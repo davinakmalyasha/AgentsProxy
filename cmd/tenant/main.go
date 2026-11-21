@@ -45,7 +45,10 @@ Commands:
   usage   show token usage for a period
 `
 
-var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var (
+	slugRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	schemaRe = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -126,7 +129,7 @@ func runCreate(args []string, stdout, stderr io.Writer) int {
 	features := fs.String("features", "", "comma-separated feature names (default: server default set)")
 	origins := &csvFlag{}
 	fs.Var(origins, "origin", "frontend origin (repeatable)")
-	requireProject := fs.Bool("require-project", false, "fail when projects/<slug>/project.json is absent")
+	allowMissing := fs.Bool("allow-missing-project", false, "create a platform tenant with no projects/<slug> folder")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -143,7 +146,7 @@ func runCreate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	doc, err := readProjectDoc(*slug, *requireProject)
+	doc, err := readProjectDoc(*slug, !*allowMissing)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "tenant create: %v\n", err)
 		return 1
@@ -439,6 +442,9 @@ func readProjectDoc(slug string, required bool) (*projectDoc, error) {
 	}
 	if doc.Schema == "" {
 		doc.Schema = "project_" + strings.ReplaceAll(slug, "-", "_")
+	}
+	if !schemaRe.MatchString(doc.Schema) {
+		return nil, fmt.Errorf("%s declares schema %q; project schemas must match project_<slug> (max 63 characters)", path, doc.Schema)
 	}
 	return &doc, nil
 }

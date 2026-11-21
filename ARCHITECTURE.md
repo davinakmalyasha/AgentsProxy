@@ -59,6 +59,15 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   depth. Centrum's frontend uses `/v1/p/centrum/...`; the legacy
   `/v1/sports/...` alias stays mounted as a rollback surface for one release.
   The data boundary is already project-scoped.
+  The database enforces the namespace: `clients.db_schema` is `public` (the
+  legacy platform row only) or `project_*`. Admin provisioning and
+  `migrate check` enforce one client per project schema; the tenant tables
+  remain RLS-scoped so the feature tests can exercise multi-tenant
+  isolation inside one schema. `project_migrations` records the schema each
+  version ran in, so a project that changes its schema fails loudly instead of
+  silently skipping every applied migration. `migrate check` also audits
+  ENABLE+FORCE RLS on every table in every project schema.
+  Production runs PostgreSQL 17 (the CI and compose images match).
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;

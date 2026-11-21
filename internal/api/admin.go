@@ -30,7 +30,7 @@ type Admin struct {
 	Cache *cache.Client
 }
 
-var projectSchemaRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+var projectSchemaRe = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
 
 type createClientReq struct {
 	Name               string   `json:"name"`
@@ -39,8 +39,8 @@ type createClientReq struct {
 	Vertical           string   `json:"vertical"`
 	Features           []string `json:"features"`
 	// Schema is the project's business schema. Empty defaults to
-	// project_<tenant_id> for new projects. Only the legacy centrum row may
-	// use "public".
+	// project_<tenant_id>. It must match project_<slug>; "public" is
+	// reserved for the legacy platform tenant row, not project provisioning.
 	Schema string `json:"schema"`
 	// Origins optionally registers frontend origins in the same call
 	// (migration 058): one round trip for new-project onboarding.
@@ -147,10 +147,11 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// A project owns its business tables in its own schema. "public" is
-	// reserved for the legacy centrum row; new projects cannot ask for it.
-	// If the tenant has a project folder, its project.json is authoritative,
-	// so provisioning cannot silently put the row in a different schema.
+	// A project owns its business tables in its own schema. The schema
+	// namespace is project_*; "public" is reserved for the legacy platform
+	// tenant (dfd-agency), which owns no project folder. If the tenant has a
+	// project folder, its project.json is authoritative, so provisioning
+	// cannot silently put the row in a different schema.
 	if dir, err := agentconfig.DirForSlug(req.TenantID); err == nil {
 		p, err := agentconfig.LoadSingle(dir)
 		if err != nil {
@@ -168,8 +169,24 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	if req.Schema == "" {
 		req.Schema = "project_" + strings.ReplaceAll(req.TenantID, "-", "_")
 	}
-	if req.Schema == "public" || !projectSchemaRe.MatchString(req.Schema) {
-		writeJSONError(w, http.StatusBadRequest, "invalid schema")
+	if !projectSchemaRe.MatchString(req.Schema) {
+		writeJSONError(w, http.StatusBadRequest, "schema must match project_<slug> (max 63 characters)")
+		return
+	}
+	// One project schema, one client. The check is application-level because
+	// the tenant tables remain RLS-scoped and the feature tests intentionally
+	// seed multiple tenants inside one schema.
+	var schemaOwner string
+	switch err := a.Pool.QueryRow(r.Context(),
+		`SELECT tenant_id FROM public.clients
+		  WHERE db_schema = $1 AND db_schema LIKE 'project\_%'`, req.Schema).Scan(&schemaOwner); {
+	case err == nil:
+		writeJSONError(w, http.StatusConflict, "schema already belongs to tenant "+schemaOwner)
+		return
+	case errors.Is(err, pgx.ErrNoRows):
+		// Available.
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	// Validate origins before creating anything: a bad origin must
@@ -196,7 +213,7 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	).Scan(&id)
 	if err != nil {
 		if pgerr.IsUniqueViolation(err) {
-			writeJSONError(w, http.StatusConflict, "tenant_id or token_hash already exists")
+			writeJSONError(w, http.StatusConflict, "tenant_id, token_hash, or project schema already exists")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "internal")

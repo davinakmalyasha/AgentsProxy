@@ -344,6 +344,43 @@ func TestLoad_ProductionRequiresAdminURL(t *testing.T) {
 	}
 }
 
+func TestLoad_ExpectedDBRefRejectsAnotherEnvironment(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("ENV", "staging")
+	t.Setenv("ALLOW_REMOTE_DB", "true")
+	t.Setenv("DATABASE_URL", "postgres://app_runtime.stagingref@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres")
+	t.Setenv("DATABASE_ADMIN_URL", "postgres://postgres.stagingref@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres")
+	t.Setenv("EXPECTED_DB_REF", "prodref")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "EXPECTED_DB_REF") {
+		t.Fatalf("expected DB identity mismatch, got %v", err)
+	}
+
+	t.Setenv("EXPECTED_DB_REF", "stagingref")
+	if _, err := Load(); err != nil {
+		t.Fatalf("matching staging ref should load: %v", err)
+	}
+}
+
+func TestDSNMatchesRef(t *testing.T) {
+	cases := []struct {
+		dsn  string
+		ref  string
+		want bool
+	}{
+		{"postgres://app_runtime.abc@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres", "abc", true},
+		{"postgres://postgres.abc@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres", "abc", true},
+		{"postgres://postgres@db.abc.supabase.co:5432/postgres", "abc", true},
+		{"postgres://app_runtime.xyz@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres", "abc", false},
+		{"postgres://postgres@evilabc.example.com:5432/postgres", "abc", false},
+	}
+	for _, tc := range cases {
+		got, err := dsnMatchesRef(tc.dsn, tc.ref)
+		if err != nil || got != tc.want {
+			t.Errorf("dsnMatchesRef(%q, %q) = %t, %v; want %t", tc.dsn, tc.ref, got, err, tc.want)
+		}
+	}
+}
+
 func TestLoad_RunMigrationsDefaults(t *testing.T) {
 	t.Run("development", func(t *testing.T) {
 		baseEnv(t)
