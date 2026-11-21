@@ -127,8 +127,9 @@ func (m *Manager) Tools(ctx context.Context, project, role string, servers []age
 	e.tools = nil
 	e.failed = false
 
+	used := map[string]bool{}
 	for _, srv := range servers {
-		tools, session, err := connect(ctx, project, srv, m.lookup)
+		tools, session, err := connect(ctx, project, srv, m.lookup, used)
 		if err != nil {
 			e.failed = true
 			slog.Warn("mcp: server unavailable",
@@ -236,7 +237,7 @@ func fingerprint(servers []agentconfig.MCPServer) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func connect(ctx context.Context, project string, srv agentconfig.MCPServer, lookup func(string) (string, bool)) ([]Tool, *mcp.ClientSession, error) {
+func connect(ctx context.Context, project string, srv agentconfig.MCPServer, lookup func(string) (string, bool), used map[string]bool) ([]Tool, *mcp.ClientSession, error) {
 	endpoint, err := expandEnv(srv.URL, lookup)
 	if err != nil {
 		return nil, nil, fmt.Errorf("url: %w", err)
@@ -250,8 +251,10 @@ func connect(ctx context.Context, project string, srv agentconfig.MCPServer, loo
 		headers[name] = v
 	}
 
+	// The per-request contexts below carry the real 10s/15s bounds. A
+	// shorter client-wide timeout would cut a tool call before its own
+	// deadline; no timeout lets the context do its job.
 	client := &http.Client{
-		Timeout:   connectTimeout,
 		Transport: &headerTransport{base: http.DefaultTransport, headers: headers},
 	}
 	mcpClient := mcp.NewClient(&mcp.Implementation{
@@ -290,7 +293,6 @@ func connect(ctx context.Context, project string, srv agentconfig.MCPServer, loo
 		roles = nil
 	}
 
-	used := map[string]bool{}
 	out := make([]Tool, 0, len(res.Tools))
 	for _, remote := range res.Tools {
 		if len(allow) > 0 && !allow[remote.Name] {
