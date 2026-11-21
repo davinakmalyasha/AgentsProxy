@@ -436,7 +436,7 @@ Do not restore production data into staging. Staging is synthetic.
 - [x] `pgx` parameterized (`$1,$2`) — no `fmt.Sprintf` into SQL anywhere
 - [x] RLS on `tenant_records` with `FORCE ROW LEVEL SECURITY` + RESTRICTIVE-style predicate (migration 002)
 - [x] Every project table `ENABLE+FORCE RLS`, audited by `migrate check`
-- [x] `clients.db_schema` constrained to `public` or `project_*`; duplicate project schemas rejected by provisioning and `migrate check`
+- [x] `clients.db_schema` constrained to `public` or `project_*`; `project_key` partial unique index prevents concurrent duplicate ownership
 - [x] Staging/production DB identity pinned with `EXPECTED_DB_REF`
 - [x] slog redaction: `Authorization` + any `*password*` / `*secret*` keys → `[REDACTED]`
 - [x] Sentry BeforeSend: same redaction
