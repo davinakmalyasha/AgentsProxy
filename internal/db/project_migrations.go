@@ -56,9 +56,9 @@ func MigrateProjectsFS(ctx context.Context, pool *Pool, fsys fs.FS) error {
 		return err
 	}
 	for _, p := range plans {
-		// The legacy Centrum project has no project migrations; its tables
-		// are part of the historical platform chain in public. Do not create
-		// an empty public-schema step.
+		// A public-schema project with no files is the historical escape
+		// hatch; there is no schema step to create. Every real project,
+		// including Centrum, now has its own schema and at least one file.
 		if p.Schema == "public" && len(p.Files) == 0 {
 			continue
 		}
