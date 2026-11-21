@@ -110,7 +110,7 @@ Add separate entries instead.
 | `REDIS_URL` | staging Redis only |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | staging budget |
 | `ADMIN_API_KEY` | staging-only random value |
-| `JWT_SECRET` | optional staging-only 32+ char value; enables agency auth/portal routes |
+| `JWT_SECRET` | staging-only 32+ char value; enables agency auth/portal routes |
 | `SIGNUP_ENABLED` | `false` unless testing self-service signup |
 | `RUN_MIGRATIONS` | `false` |
 | `BACKGROUND_TICKERS` | `false` |
@@ -125,9 +125,9 @@ refuse `ENV=staging`, which is why the branch approach is used.
 ### Staging scope
 
 The client plane is a full rehearsal: separate database, Redis, migrations,
-Centrum project routes, and agent calls. The agency plane needs one more
-step: set a staging-only `JWT_SECRET` (32+ chars) and seed a staging
-`users` row before testing `/api/v1/auth/*`, the portal, or admin screens.
+Centrum project routes, and agent calls. The agency plane is enabled by the staging-only `JWT_SECRET`; seed a
+staging `users` row before testing `/api/v1/auth/*`, the portal, or admin
+screens. `/api/v1/auth/config` should report `signupEnabled:false`.
 Without `RESEND_API_KEY`, OTP/signup codes are logged to the staging
 function logs instead of emailed; that is acceptable for staging, not for
 production. Google login and Supabase Storage stay disabled unless their
