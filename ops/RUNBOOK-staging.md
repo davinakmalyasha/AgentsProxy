@@ -38,18 +38,28 @@ Collect:
 
 ## 2. Apply the embedded migration chain
 
-From a clean checkout, with the staging admin DSN in the environment:
+The migration chain creates `app_runtime`, `auth_definer`, `money_reader`,
+`backup_reader`, and `delivery_caller`. Until it runs, `ALTER ROLE
+app_runtime` fails with `role "app_runtime" does not exist`.
+
+Copy `.env.staging.example` to `.env.staging` (gitignored), fill the staging
+admin DSN, then:
 
 ```bash
-ENV=staging \
-ALLOW_REMOTE_DB=true \
-DATABASE_URL="$STAGING_ADMIN_DSN" \
-DATABASE_ADMIN_URL="$STAGING_ADMIN_DSN" \
-LLM_API_KEY=unused \
-ADMIN_API_KEY=unused \
-ALLOW_ORIGINS=https://staging.example.com \
-go run ./cmd/migrate
+bash scripts/migrate-staging.sh
 ```
+
+The script refuses the production project ref and any non-Supabase host.
+After it succeeds, set the runtime password:
+
+```sql
+ALTER ROLE app_runtime PASSWORD '<random-staging-password>';
+```
+
+Use a generated value (`openssl rand -hex 24` or a password manager). This
+is the password for the **app_runtime** role, not the `postgres` admin
+password. The same pattern applies to `backup_reader` and `delivery_caller`
+if you test backup/delivery on staging.
 
 This creates the platform tables, `app_runtime`, `auth_definer`,
 `money_reader`, `backup_reader`, `project_centrum`, and applies Centrum's
