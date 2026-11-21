@@ -10,6 +10,49 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// TestProjectKeyIsUnique pins the race-safe owner key from migration 076.
+func TestProjectKeyIsUnique(t *testing.T) {
+	dsn := migrateDSN()
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set — skipping project_key test")
+	}
+	requireLocalDB(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("platform migrate: %v", err)
+	}
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM public.clients WHERE tenant_id IN ('key-a','key-b','key-c')`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	insert := func(tenant, schema, key string) error {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO public.clients
+			   (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema, project_key)
+			 VALUES ($1, $1, $1 || '-hash', 500000, 'active', 'sports', ARRAY['records'], $2, $3)`,
+			tenant, schema, key)
+		return err
+	}
+	if err := insert("key-a", "project_keytest", "project_keytest"); err != nil {
+		t.Fatalf("first owner: %v", err)
+	}
+	if err := insert("key-b", "project_keytest", "project_keytest"); err == nil {
+		t.Fatal("second owner of the same project_key was accepted")
+	}
+	if err := insert("key-c", "project_keytest", "project_other"); err == nil {
+		t.Fatal("project_key that does not match db_schema was accepted")
+	}
+}
+
 // TestTwoProjectSchemasAreIsolated is the end-to-end proof of the
 // one-project/one-schema promise: two projects migrate into two schemas,
 // app_runtime sees only the schema selected for the request, and RLS keeps

@@ -31,7 +31,8 @@ else fails boot. The two safety invariants are enforced in
 * Production boots with `DATABASE_URL` as `app_runtime`; a superuser or
   `BYPASSRLS` role fails the boot. The admin pool stays separate.
 * Project schemas must match `project_*`; the database check constraint
-  enforces the namespace, and admin provisioning plus `migrate check`
+  enforces the namespace, `clients.project_key` has a partial unique index
+  for race-safe provisioning, and admin provisioning plus `migrate check`
   enforce one client per project schema. `public` is only for the legacy
   platform tenant row (dfd-agency).
 * Vercel Preview must not carry production secrets. A preview backend is

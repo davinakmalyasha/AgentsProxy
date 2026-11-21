@@ -27,7 +27,9 @@ Rules:
   `^project_[a-z0-9_]{1,55}$`; `public` and platform schemas such as `auth`
   or `private` are rejected by config, the admin API, and the database.
   Admin provisioning and `migrate check` enforce one client per project
-  schema. The runtime sets `search_path` from `clients.db_schema`.
+  schema; `clients.project_key` is the partial unique owner key, so concurrent
+  admin calls cannot claim the same schema. The runtime sets `search_path`
+  from `clients.db_schema`.
 - **Centrum is the route-transition exception.** Its business tables live in
   `project_centrum` (moved by its `0001` project migration). Its frontend now
   uses `/v1/p/centrum/...`; both registries stay populated so
