@@ -41,22 +41,23 @@ UptimeRobot should ping `GET /healthz` every 5 min and alert on 5xx.
 
 ## 2. Logs (slog JSON → stdout)
 
-All logs are JSON on stdout. In production (Railway), `railway logs -f`.
+All logs are JSON on stdout. Production runs on Vercel:
+`vercel logs https://agents-proxy-nine.vercel.app`.
 
 Quick filters:
 
 ```bash
 # All errors
-railway logs -f | grep '"level":"ERROR"'
+vercel logs https://agents-proxy-nine.vercel.app | grep '"level":"ERROR"'
 
 # All panics
-railway logs -f | grep '"msg":"panic recovered"'
+vercel logs https://agents-proxy-nine.vercel.app | grep '"msg":"panic recovered"'
 
 # Per-client traffic (uses client_id in attrs)
-railway logs -f | jq 'select(.client_id=="<uuid>")'
+vercel logs https://agents-proxy-nine.vercel.app | jq 'select(.client_id=="<uuid>")'
 
 # Per-request via request_id (returned in X-Request-ID)
-railway logs -f | jq 'select(.request_id=="<id>")'
+vercel logs https://agents-proxy-nine.vercel.app | jq 'select(.request_id=="<id>")'
 ```
 
 ---
@@ -69,7 +70,7 @@ railway logs -f | jq 'select(.request_id=="<id>")'
 - **Diagnose:**
   ```bash
   # Top clients by 429s in last 1h
-  railway logs --since 1h | grep '"status":429' | jq -r .client_id | sort | uniq -c | sort -rn | head
+  vercel logs https://agents-proxy-nine.vercel.app | grep '"status":429' | jq -r .client_id | sort | uniq -c | sort -rn | head
   ```
 - **Fix:**
   - Quota exhaustion: `POST /v1/admin/clients` then `PATCH /v1/admin/clients/{id} {"monthly_quota_tokens": <new>}` to raise the cap. Or wait until the 1st of next month.
@@ -85,13 +86,13 @@ railway logs -f | jq 'select(.request_id=="<id>")'
 - **What it means:** the upstream (DeepSeek / mimo / etc.) returned non-2xx or timed out.
 - **Diagnose:**
   ```bash
-  railway logs -f | grep '"msg":"listen"'  # confirm LLM_BASE_URL
-  railway logs -f | grep '"status":502'    # count of 502s
+  vercel logs https://agents-proxy-nine.vercel.app | grep '"msg":"listen"'  # confirm LLM_BASE_URL
+  vercel logs https://agents-proxy-nine.vercel.app | grep '"status":502'    # count of 502s
   ```
 - **Fix:**
   - Provider outage: wait + `POST /v1/admin/clients` is unaffected. Chat returns 502 to the client widget; user sees a graceful error.
-  - Bad `LLM_MODEL`: update `LLM_MODEL` env, restart container.
-  - Bad `LLM_BASE_URL`: same — fix env, restart.
+  - Bad `LLM_MODEL`: update `LLM_MODEL` env, then redeploy (Vercel → Deployments → Redeploy).
+  - Bad `LLM_BASE_URL`: same — fix env, then redeploy.
 
 ### 3.3 Postgres Down
 
@@ -111,7 +112,7 @@ railway logs -f | jq 'select(.request_id=="<id>")'
 
 ### 3.5 Sentry Not Receiving Events
 
-- Check `SENTRY_DSN` is set in env (`railway variables | grep SENTRY`).
+- Check `SENTRY_DSN` is set in the Vercel project environment.
 - Check `slog` output for `"msg":"sentry initialised"` on boot.
 - Check sample rate: `TRACES_SAMPLE_RATE=0.1` means 10% of transactions — bump to `1.0` temporarily to confirm pipeline.
 
@@ -127,10 +128,17 @@ git log --oneline -20
 git revert <bad-sha>
 git push origin main
 
-# 3. Wait for CI to pass; deploy auto-runs on push to main.
-#    If you need an immediate hotfix without CI, deploy a known-good tag:
-railway up --detach  # uses current branch
+# 3. Wait for CI to pass; Vercel deploys main automatically.
+#    For an immediate binary rollback, promote the last known-good
+#    production deployment (Vercel dashboard → Deployments → Promote, or):
+vercel ls agents-proxy
+vercel rollback <known-good-deployment-url> --yes
 ```
+
+Database migrations are additive and forward-only. Rolling the binary back
+does not roll the schema back; the previous binary must tolerate the newer
+schema (this is why additive migrations are mandatory). A destructive change
+needs a separate phased migration, not a revert.
 
 For data incidents: restore from `ops/backup.sh` output:
 ```bash
@@ -149,6 +157,7 @@ live in a local `.env`; the app refuses a remote database in development.
 | `ENV` | development | strict enum: `development` / `staging` / `production`; anything else fails boot |
 | `DATABASE_URL` | required | runtime pool — **must be `app_runtime` (NOBYPASSRLS) in production**; boot rejects superuser/BYPASSRLS |
 | `DATABASE_ADMIN_URL` | empty | migrations + admin endpoints — superuser (Supabase 5432 direct); required when `ENV=production` |
+| `EXPECTED_DB_REF` | empty | optional Supabase project ref guard; when set, both DSNs must belong to that project or boot fails |
 | `ALLOW_REMOTE_DB` | false | staging-only opt-in for a remote database; development always rejects remote |
 | `RUN_MIGRATIONS` | true in development, false otherwise | Vercel preview/production may never set true |
 | `REDIS_URL` | localhost:6379 | production: `rediss://...` for TLS |
@@ -176,6 +185,10 @@ live in a local `.env`; the app refuses a remote database in development.
   production DSN on a laptop cannot be used, even with
   `ALLOW_REMOTE_DB=true`.
 * `ENV=staging` + remote host requires `ALLOW_REMOTE_DB=true`.
+* `EXPECTED_DB_REF` (production and staging) makes the remote-host rule
+  identity-based: the pooler username (`role.<ref>`) or direct host
+  (`db.<ref>.supabase.co`) must contain the configured ref. This is what
+  stops a copied staging DSN from booting production and vice versa.
 * `VERCEL_ENV=production` requires `ENV=production`; `VERCEL_ENV=preview`
   rejects `ENV=production`.
 * `RUN_MIGRATIONS=true` on Vercel preview/production → boot fails.
@@ -266,6 +279,9 @@ export AGENTS_PROXY_URL=https://<host>
 export ADMIN_API_KEY=...                    # from the password manager
 
 go run ./cmd/tenant create --slug warung-sari --name "Warung Sari" --vertical fnb
+# The CLI requires projects/warung-sari/project.json by default. A platform
+# row with no project folder is the exception, not the normal path:
+#   --allow-missing-project
 go run ./cmd/tenant list
 go run ./cmd/tenant patch --tenant warung-sari --status paused
 go run ./cmd/tenant usage --tenant warung-sari
@@ -322,12 +338,23 @@ local Postgres service.
 On Vercel `RUN_MIGRATIONS=false` (and is forced false): cold starts must not
 replay the ledger, and a preview must never run DDL. Production migrations run
 through the manual `db-migrate` GitHub workflow, gated by the `production`
-Environment; it runs the same command against the admin DSN.
+Environment; it always checks out `main` and runs the same command against the
+admin DSN. The Environment is restricted to protected branches (main).
+GitHub Free does not support required reviewers; on a plan that does, add
+them. The workflow itself also refuses to run from any ref other than main.
+
+**Release order matters.** Merge a migration-only PR to `main`, run
+`db-migrate` with `apply`, then merge the code that depends on the new
+schema. Additive, backward-compatible migrations may ship with their code,
+but the binary must never require a column the database does not have yet.
 
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
 instead. Platform rows are in `public.schema_migrations`; project rows are in
-`public.project_migrations` (scoped by `project_slug`).
+`public.project_migrations` (scoped by `project_slug`) and now carry
+`db_schema`, the schema the version was applied to. A project that changes
+its `project.json` schema fails loudly instead of skipping every recorded
+migration in a new, empty schema.
 
 ### Inspecting without writing
 
@@ -342,20 +369,52 @@ go run ./cmd/migrate plan     # only what apply would still run
 ```
 
 Add `--json` for CI. The `db-migrate` workflow exposes the same modes through
-its `command` input (`apply` is the default). `check` also fails when
-`clients.db_schema` disagrees with a project's `project.json`, when two
-projects claim the same slug or schema, and when the ledger contains a
-project folder that disappeared from the build.
+its `command` input (`apply` is the default). `check` also fails when:
+
+* `clients.db_schema` disagrees with a project's `project.json`;
+* two projects claim the same slug or schema, or two clients share a
+  `project_*` schema;
+* a client points at a `project_*` schema that no project folder declares;
+* the ledger contains a project folder that disappeared from the build;
+* a table in any project schema is missing `ENABLE+FORCE RLS`.
+
+The `schema-check` workflow runs the same read-only check daily.
 
 The runner takes `pg_advisory_xact_lock(734561)` for platform migrations and
-`734562` per project. On Vercel, `RUN_MIGRATIONS=false`; run the command as a
-deploy step before the new binary serves.
+`734562` per project. On Vercel, `RUN_MIGRATIONS=false`; production applies
+DDL only through the workflow above.
 
 To add a platform migration: drop `internal/db/migrations/0XX_name.sql`.
 To add a project migration: drop `projects/<slug>/migrations/000X_name.sql`
 and set that project's `schema` in `project.json`. Sort order is lexical.
+Project schemas must match `project_<slug>`; `public` is reserved for the
+legacy platform tenant (dfd-agency), which owns no project folder.
+
+Production and staging run PostgreSQL 17. CI and `docker-compose.yml` use
+`postgres:17-alpine` so a migration cannot pass on an older server and fail
+in production.
 
 **Phase 4 note:** migrations `007`–`010` (sports vertical) create custom tables with RLS. Migration `008` runs `CREATE EXTENSION btree_gist` (needs superuser) — migrations run on the admin pool, so this is fine. The booking exclusion constraint (`tsrange`, NOT `tstzrange` — see ARCHITECTURE §11.3) prevents double-bookings at the DB level; a concurrent double-book surfaces as HTTP `409 slot already booked`.
+
+---
+
+## 9a. Backup and recovery
+
+`backup.yml` runs every 6 hours (01:00/07:00/13:00/19:00 Asia/Jakarta),
+dumps through `ops/backup.sh`, and restores the dump into a scratch
+`postgres:17` in the same workflow. Artifacts are retained for 30 days.
+
+* **RPO:** up to 6 hours. The free Supabase plan has no PITR
+  (`pitr_enabled=false`); the logical dump is the recovery point.
+* **RTO:** restore the newest artifact, then recreate roles/extensions and
+  apply the embedded migration chain. The restore smoke already exercises
+  the schema + data path; treat a failed restore-smoke run as a release
+  blocker.
+* **Scope:** the dump includes platform and project schemas. Roles are
+  cluster-level and are recreated by the platform migration chain; hosted
+  extensions (`pg_cron`, `pg_net`) are recreated by the host.
+
+Do not restore production data into staging. Staging is synthetic.
 
 ---
 
@@ -372,6 +431,9 @@ and set that project's `schema` in `project.json`. Sort order is lexical.
 - [x] `subtle.ConstantTimeCompare` on token + admin key (auth/tokens.go)
 - [x] `pgx` parameterized (`$1,$2`) — no `fmt.Sprintf` into SQL anywhere
 - [x] RLS on `tenant_records` with `FORCE ROW LEVEL SECURITY` + RESTRICTIVE-style predicate (migration 002)
+- [x] Every project table `ENABLE+FORCE RLS`, audited by `migrate check`
+- [x] `clients.db_schema` constrained to `public` or `project_*`; duplicate project schemas rejected by provisioning and `migrate check`
+- [x] Staging/production DB identity pinned with `EXPECTED_DB_REF`
 - [x] slog redaction: `Authorization` + any `*password*` / `*secret*` keys → `[REDACTED]`
 - [x] Sentry BeforeSend: same redaction
 - [x] Rate limit + quota

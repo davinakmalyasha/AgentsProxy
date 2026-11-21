@@ -47,6 +47,7 @@ Set in the dashboard, never in git.
 | `ALLOW_ORIGINS` | optional fallback only | CORS is normally DB-backed through `frontend_origins` + `origin_suffix_rules`. Keep this only as an emergency/debug fallback; `*` in prod defeats the `ENV=production` tightening. |
 | `ALLOW_REMOTE_DB` | unset | Staging only. Production is remote by definition; Preview carries no database at all. |
 | `DATABASE_ADMIN_URL` | direct **5432**, superuser | Admin endpoints (and `cmd/migrate`). Required when `ENV=production`. |
+| `EXPECTED_DB_REF` | production Supabase ref | Pins both DSNs to this project. A copied staging DSN fails boot. |
 | `REDIS_URL` | `rediss://…` **in ap-southeast-1 (Singapore)** | Cache, quota, rate limits — every request pays 1–3 sequential Redis round trips, so a cross-region Upstash adds 100–500ms per request. Same-region (`sin1` ↔ ap-southeast-1) keeps them at ~1–2ms. |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | as `.env` | |
 | `ADMIN_API_KEY` | 64 hex chars | |
@@ -67,14 +68,16 @@ npx vercel deploy --prod
 Production DDL is a separate, auditable step:
 
 ```bash
-gh workflow run db-migrate.yml -f ref=main
+gh workflow run db-migrate.yml -f command=apply
 ```
 
-The workflow is gated by the GitHub `production` Environment (add required
-reviewers). It applies platform migrations and every `projects/<slug>/`
-migration, then prints both ledgers. Never run `cmd/migrate` from a laptop
-against production; the local `.env` has no remote credentials and
-`ENV=development` refuses them.
+Run it from `main` (the workflow always checks out `main`). The workflow is
+gated by the GitHub `production` Environment, which is restricted to protected
+branches. GitHub Free does not support required reviewers; on a plan that does,
+add them. It applies platform migrations and every `projects/<slug>/`
+migration, verifies the ledger is clean, then prints both ledgers. Never run
+`cmd/migrate` from a laptop against production; the local `.env` has no remote
+credentials and `ENV=development` refuses them.
 
 Fluid Compute defaults to a 300s cap on every plan (Hobby maximum).
 It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +
@@ -103,8 +106,9 @@ Supabase-side delivery are required rather than optional.
 | Supabase pg_cron | `reaper-tick` | `*/5` | hands back orphaned claims (older than 10 min) |
 | Supabase pg_cron | `retention-tick` | `17 20` (03:17 WIB) | batched deletes: sessions 7d, sent reminders 90d, dead 30d, usage 400d, archived notify 14d, events 180d, report backstop |
 | Supabase pg_cron | `report-jobs-tick` | `* * * * *` | deferred report builds (064): reaps stale `working` jobs, then posts ONE build to the backend worker. No-op until the Vault secrets `report_worker_url` + `report_worker_token` exist (see `ops/schedule-report-jobs.sql`). |
-| GitHub Actions | `backup.yml` | `0 18` (01:00 WIB) | pg_dump of `public`+`private` → artifact (30d) → restore-smoke into postgres:17 |
-| GitHub Actions | `smoke.yml` | `*/30` | backend `/healthz` + frontend probe (3 attempts each) |
+| GitHub Actions | `backup.yml` | `0 18,0,6,12` (01/07/13/19 WIB) | pg_dump of `public`+`private`+`project_*` → artifact (30d) → restore-smoke into postgres:17 |
+| GitHub Actions | `smoke.yml` | `*/30` | backend `/healthz`, Centrum API, DFD catalog (3 attempts each) |
+| GitHub Actions | `schema-check.yml` | `17 2` (09:17 WIB) | read-only `migrate check` against production |
 | GitHub Actions | `security.yml` | Mondays 06:17 | govulncheck + gitleaks |
 
 - pg_cron evaluates schedules in the **database** timezone (UTC on
@@ -122,8 +126,8 @@ Supabase-side delivery are required rather than optional.
   (auth/storage/vault) are Supabase-managed and covered by the platform's
   daily WAL-G backups; including them breaks portable restores and drags
   platform PII (auth password hashes) into the artifact. Platform PITR is
-  off (`pitr_enabled=false`); the nightly dump is the independent,
-  off-platform copy.
+  off (`pitr_enabled=false`); the four-times-daily dump is the independent,
+  off-platform copy. RPO is up to 6 hours.
 - Verify: `gh run list --workflow backup.yml --limit 3`, then download
   `db-backup` and restore into a scratch database
   (`gunzip -c *.sql.gz | psql <scratch>`); the smoke job does exactly

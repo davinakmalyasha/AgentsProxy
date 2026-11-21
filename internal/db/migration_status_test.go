@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -99,6 +100,68 @@ func TestCompareProjectFilesCountsPending(t *testing.T) {
 	}
 }
 
+func TestInspectMigrationsDetectsRLSGap(t *testing.T) {
+	dsn := migrateDSN()
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping RLS audit test")
+	}
+	requireLocalDB(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("platform migrate: %v", err)
+	}
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS project_rlsgap CASCADE;
+			DELETE FROM public.project_migrations WHERE project_slug='rlsgap';
+			DELETE FROM public.clients WHERE tenant_id='rls-gap'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	fsys := fstest.MapFS{
+		"projects/rlsgap/project.json": &fstest.MapFile{Data: []byte(`{
+			"slug": "rlsgap", "vertical": "sports", "schema": "project_rlsgap"
+		}`)},
+		"projects/rlsgap/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(`
+			CREATE TABLE widgets (
+				id int PRIMARY KEY,
+				tenant_id text NOT NULL
+			);
+			ALTER TABLE widgets ENABLE ROW LEVEL SECURITY;
+			CREATE POLICY widgets_isolation ON widgets
+				USING (tenant_id = current_setting('app.tenant_id', true));
+		`)},
+	}
+	if err := MigrateProjectsFS(ctx, pool, fsys); err != nil {
+		t.Fatalf("project migrate: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ('RLS Gap','rls-gap','rls-gap-hash',500000,'active','sports',ARRAY['records'],'project_rlsgap')`); err != nil {
+		t.Fatal(err)
+	}
+	status, err := InspectMigrationsFS(ctx, pool, fsys)
+	if err != nil {
+		t.Fatalf("InspectMigrationsFS: %v", err)
+	}
+	found := false
+	for _, issue := range status.Issues {
+		if strings.Contains(issue, "ENABLE+FORCE RLS") && strings.Contains(issue, "project_rlsgap") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("RLS gap not reported: %v", status.Issues)
+	}
+}
+
 func TestInspectMigrationsCleanAfterApply(t *testing.T) {
 	dsn := migrateDSN()
 	if dsn == "" {
@@ -111,9 +174,17 @@ func TestInspectMigrationsCleanAfterApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	if err := MigrateAll(ctx, pool); err != nil {
 		t.Fatalf("MigrateAll: %v", err)
+	}
+	// This test asserts a globally clean report, so remove leftover demo
+	// tenants/ledgers from other integration packages. It is local-only
+	// (requireLocalDB) and runs with `-p 1` in CI.
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM public.clients WHERE tenant_id NOT IN ('centrum','dfd-agency');
+		 DELETE FROM public.project_migrations WHERE project_slug <> 'centrum'`); err != nil {
+		t.Fatalf("cleanup test tenants: %v", err)
 	}
 	status, err := InspectMigrations(ctx, pool)
 	if err != nil {

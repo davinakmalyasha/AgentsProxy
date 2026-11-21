@@ -102,11 +102,11 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('alpha','bravo','gamma','x','x1','x2','salon-a','klinik-a','orig-probe','orig-probe-bad','auth-t')`); err != nil {
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id NOT IN ('centrum','dfd-agency')`); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
-	if _, err := adminPool.Exec(ctx, `DELETE FROM tenant_records WHERE tenant_id IN ('alpha','bravo','gamma','x','x1','x2','salon-a','klinik-a')`); err != nil {
+	if _, err := adminPool.Exec(ctx, `DELETE FROM tenant_records WHERE tenant_id NOT IN ('centrum','dfd-agency')`); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
@@ -805,6 +805,56 @@ func TestAdmin_CreateRejectsBadShape(t *testing.T) {
 		if resp.StatusCode != 400 {
 			t.Errorf("case %d status=%d body=%s want 400", i, resp.StatusCode, raw)
 		}
+	}
+}
+
+// TestAdmin_CreateEnforcesProjectSchemaBoundary pins the database-level
+// invariant: only project_* schemas, and one client per project schema.
+func TestAdmin_CreateEnforcesProjectSchemaBoundary(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	cleanup := func() {
+		ctx := context.Background()
+		_, _ = h.pool.Exec(ctx, `DROP SCHEMA IF EXISTS project_schema_a CASCADE`)
+		_, _ = h.pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id LIKE 'schema-%'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	create := func(tenant, schema string) *http.Response {
+		t.Helper()
+		body := `{"name":"` + tenant + `","tenant_id":"` + tenant + `","vertical":"sports","schema":"` + schema + `"}`
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		return mustReq(t, req)
+	}
+
+	resp := create("schema-a", "project_schema_a")
+	if resp.StatusCode != 201 {
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("first create status=%d body=%s", resp.StatusCode, raw)
+	}
+	resp.Body.Close()
+
+	resp = create("schema-b", "project_schema_a")
+	if resp.StatusCode != 409 {
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("duplicate schema status=%d body=%s, want 409", resp.StatusCode, raw)
+	}
+	resp.Body.Close()
+
+	for _, schema := range []string{"auth", "public", "project_", "private"} {
+		resp = create("schema-c", schema)
+		if resp.StatusCode != 400 {
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("schema %q status=%d body=%s, want 400", schema, resp.StatusCode, raw)
+		}
+		resp.Body.Close()
 	}
 }
 

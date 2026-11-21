@@ -4,8 +4,10 @@ One Go binary serves every frontend: client business sites (bookings, menus,
 kantin), the DFD agency site + client portal, and machine agents over REST/MCP.
 
 **Stack:** Go 1.27 + `chi/v5` + `pgx/v5/pgxpool` + `go-redis/v9` · **DB:** one
-Supabase Postgres (shared schema + `tenant_id` + RLS) · **Cache:** Redis 8 ·
-**Deploy:** Vercel / Railway / VPS.
+Supabase Postgres, one schema per project (`project_<slug>`) + `tenant_id` +
+RLS in every project table · **Cache:** Redis 8 · **Deploy:** Vercel
+(supported production host), with Docker/Compose kept as a production-like
+local stack.
 
 Docs: `README.md` (this file = what it is) · `ARCHITECTURE.md` (how it works) ·
 `docs/GOVERNANCE.md` (branch/DDL/test rules) · `RUNBOOK.md` (ops) ·
@@ -104,7 +106,8 @@ call proxy admin and a client token can't list agency leads — wrong group =
 401 before any handler runs. Same Postgres, different tables/pools
 (`pool` = `app_runtime` tenant writes, `adminPool` = cross-tenant/DDL).
 
-* Static client sites (Hostinger) → `/v1/sports/bookings` + `X-Client-Token`.
+* Static client sites (Hostinger) → `/v1/p/<slug>/...` + `X-Client-Token`
+  (`/v1/sports/...` is the one-release Centrum rollback alias).
 * Agency Next.js (Vercel) → rewrite `/api/v1/*` → Go; portal `/api/v1/client/*`.
 * Agents/MCP → `/api/v1/agent/*` + `/mcp` with bearer key.
 

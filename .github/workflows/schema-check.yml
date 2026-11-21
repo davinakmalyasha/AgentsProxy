@@ -1,0 +1,46 @@
+# schema-check.yml — read-only production drift monitor.
+#
+# The deploy workflow applies DDL; this one proves the result stayed true.
+# It never writes: cmd/migrate check runs in a READ ONLY transaction and
+# exits non-zero on pending, checksum drift, missing files, schema/client
+# mismatch, duplicate project schemas, or a project table without
+# ENABLE+FORCE RLS.
+#
+# Uses the same admin DSN as db-migrate because the inspection reads both
+# ledgers. It is read-only by construction, so it does not need the manual
+# production gate; move the secret to the environment if you prefer.
+name: schema-check
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # 09:17 Asia/Jakarta
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Inspect production ledgers
+        env:
+          ENV: production
+          EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          ALLOW_ORIGINS: https://dfdagency.vercel.app
+          LLM_API_KEY: schema-check-unused
+          ADMIN_API_KEY: schema-check-unused
+        run: |
+          set -euo pipefail
+          test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }
+          go run ./cmd/migrate check

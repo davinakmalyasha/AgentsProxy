@@ -72,6 +72,18 @@ func TestCentrumProjectRoutesParity(t *testing.T) {
 		resp.Body.Close()
 	}
 
+	// The router mounts /records unconditionally; the project schema must
+	// actually contain tenant_records (migration 0002).
+	if resp := get("/v1/p/centrum/records", "X-Client-Token", "tok-centrum-test"); resp.StatusCode != http.StatusOK {
+		body := readJSON(t, resp)
+		t.Fatalf("records read status=%d body=%v, want 200", resp.StatusCode, body)
+	} else {
+		body := readJSON(t, resp)
+		if items, _ := body["items"].([]any); len(items) != 0 {
+			t.Fatalf("records items=%v, want empty", items)
+		}
+	}
+
 	if resp := get("/v1/p/centrum/facilities", "X-Client-Token", "tok-alpha"); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-project read status=%d, want 403", resp.StatusCode)
 	} else {
