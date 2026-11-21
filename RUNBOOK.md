@@ -342,6 +342,10 @@ Environment; it always checks out `main` and runs the same command against the
 admin DSN. The Environment is restricted to protected branches (main).
 GitHub Free does not support required reviewers; on a plan that does, add
 them. The workflow itself also refuses to run from any ref other than main.
+`PROD_DATABASE_ADMIN_URL` is still a repository secret because the same
+read-only secret is used by `schema-check`; move it to the production
+Environment secret when the plan supports environment-scoped secrets and
+update both workflows.
 
 **Release order matters.** Merge a migration-only PR to `main`, run
 `db-migrate` with `apply`, then merge the code that depends on the new
