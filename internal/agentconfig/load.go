@@ -144,6 +144,9 @@ func loadOne(dir string) (*Project, error) {
 		return nil, err
 	}
 	if doc.Slug != "" {
+		if doc.Slug != strings.ToLower(dir) {
+			return nil, fmt.Errorf("project folder %q declares slug %q; the folder name and slug must match", dir, doc.Slug)
+		}
 		p.Slug = doc.Slug
 	}
 	if doc.Display != "" {

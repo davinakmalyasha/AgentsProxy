@@ -1,7 +1,8 @@
 # Projects
 
 One folder per client project. A project and a tenant are the same identity:
-`project.json`'s `slug` is `clients.tenant_id`.
+`projects/<slug>/`'s directory name and `project.json`'s `slug` are both
+`clients.tenant_id`; the loader rejects a mismatch.
 
 ```text
 projects/<slug>/
