@@ -246,6 +246,19 @@ curl -X PATCH https://<host>/v1/admin/clients/<id> \
   -d '{"status":"paused"}'
 ```
 
+The same flow through the operator CLI (recommended: it refuses plain HTTP,
+checks `projects/<slug>/project.json`, and never prints the token twice):
+
+```bash
+export AGENTS_PROXY_URL=https://<host>
+export ADMIN_API_KEY=...                    # from the password manager
+
+go run ./cmd/tenant create --slug warung-sari --name "Warung Sari" --vertical fnb
+go run ./cmd/tenant list
+go run ./cmd/tenant patch --tenant warung-sari --status paused
+go run ./cmd/tenant usage --tenant warung-sari
+```
+
 The admin call creates the `clients` row and its project schema. If the
 project has `projects/<slug>/migrations/*.sql`, run the migration deploy step:
 
@@ -302,6 +315,24 @@ Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
 instead. Platform rows are in `public.schema_migrations`; project rows are in
 `public.project_migrations` (scoped by `project_slug`).
+
+### Inspecting without writing
+
+The same command has three read-only modes. They run inside a `READ ONLY`
+transaction and never create the ledger tables, so they are safe against
+production:
+
+```bash
+go run ./cmd/migrate status   # every file: applied, pending, drift, missing
+go run ./cmd/migrate check    # exit 1 unless everything is applied and unchanged
+go run ./cmd/migrate plan     # only what apply would still run
+```
+
+Add `--json` for CI. The `db-migrate` workflow exposes the same modes through
+its `command` input (`apply` is the default). `check` also fails when
+`clients.db_schema` disagrees with a project's `project.json`, when two
+projects claim the same slug or schema, and when the ledger contains a
+project folder that disappeared from the build.
 
 The runner takes `pg_advisory_xact_lock(734561)` for platform migrations and
 `734562` per project. On Vercel, `RUN_MIGRATIONS=false`; run the command as a
