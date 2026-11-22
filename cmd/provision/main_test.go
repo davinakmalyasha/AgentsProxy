@@ -58,6 +58,20 @@ func TestPlatformRejectsProjectFolder(t *testing.T) {
 	}
 }
 
+func TestPlatformRejectsOwnerSeed(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--dry-run", "--platform", "--slug", "mail", "--name", "Mail",
+		"--owner-email", "owner@mail.example", "--generate-owner-password",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit=%d want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "no project staff provider") {
+		t.Errorf("stderr=%s", stderr.String())
+	}
+}
+
 func TestResolveTenantValidatesOverrides(t *testing.T) {
 	p := projectForTest()
 	if _, _, _, err := resolveTenant(options{vertical: "fnb"}, p); err == nil {
