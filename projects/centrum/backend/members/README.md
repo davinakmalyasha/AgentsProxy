@@ -34,12 +34,12 @@ CREATE TABLE sports_members (
 ## Endpoints
 
 ```
-POST   /v1/sports/members                create (name required, balance >= 0)
-GET    /v1/sports/members                list
-GET    /v1/sports/members/{id}           get one
-PATCH  /v1/sports/members/{id}           update name/phone/status
-DELETE /v1/sports/members/{id}           hard delete
-POST   /v1/sports/members/{id}/topup     {amount} — amount > 0, atomic balance += amount
+POST   /v1/p/centrum/members                create (name required, balance >= 0)
+GET    /v1/p/centrum/members                list
+GET    /v1/p/centrum/members/{id}           get one
+PATCH  /v1/p/centrum/members/{id}           update name/phone/status
+DELETE /v1/p/centrum/members/{id}           hard delete
+POST   /v1/p/centrum/members/{id}/topup     {amount} — amount > 0, atomic balance += amount
 ```
 
 ## Tenants using it

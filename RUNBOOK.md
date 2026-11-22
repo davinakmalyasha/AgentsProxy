@@ -438,6 +438,9 @@ the frontend `NEXT_PUBLIC_PROXY_PREFIX` rollback switch are removed. Verify
 `/v1/sports/facilities` is 404 and `/v1/p/centrum/facilities` is 200 after a
 deploy.
 
+The contract release and the route retirement were applied to staging and
+production on 2026-11-23.
+
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
 instead. Platform rows are in `public.schema_migrations`; project rows are in

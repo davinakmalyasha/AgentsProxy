@@ -56,11 +56,11 @@ back-to-back is allowed; 19:00–20:00 and 19:30–20:30 conflict.
 ## Endpoints
 
 ```
-POST   /v1/sports/bookings                       create (409 "slot already booked" on overlap)
-GET    /v1/sports/bookings?date=YYYY-MM-DD[&facility_id=&status=]  schedule view
-GET    /v1/sports/bookings/{id}                  get one
-PATCH  /v1/sports/bookings/{id}                  update status/price/deposit/customer
-DELETE /v1/sports/bookings/{id}                  soft delete → status=cancelled
+POST   /v1/p/centrum/bookings                       create (409 "slot already booked" on overlap)
+GET    /v1/p/centrum/bookings?date=YYYY-MM-DD[&facility_id=&status=]  schedule view
+GET    /v1/p/centrum/bookings/{id}                  get one
+PATCH  /v1/p/centrum/bookings/{id}                  update status/price/deposit/customer
+DELETE /v1/p/centrum/bookings/{id}                  soft delete → status=cancelled
 ```
 
 On a confirmed create, the handler calls `NotifyFunc` (wired to the
