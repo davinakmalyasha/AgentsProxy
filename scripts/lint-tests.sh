@@ -21,7 +21,7 @@ fi
 # Platform packages must not reach into a project's user table. The auth
 # provider lives in projects/<slug>/backend/auth; the platform only owns the
 # session directory.
-if grep -rn -E "sports_users|private\.login_user|private\.session_user" internal \
+if grep -rn -E "sports_users|private\.login_user|private\.create_session|private\.session_user" internal \
     --include='*.go' | grep -v '_test\.go' | grep -v '^internal/db/migrations/'; then
   echo "PLATFORM PACKAGE REFERENCES A PROJECT AUTH TABLE/FUNCTION; move it to the project provider"
   fail=1

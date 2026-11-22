@@ -96,8 +96,8 @@ func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 		if b, err := a.RDB.Get(ctx, sessKey(hash)).Bytes(); err == nil {
 			var u User
 			if err := json.Unmarshal(b, &u); err == nil {
-				// Cache hit skips the session_user SELECT; the
-				// throttled touch below still runs (usually a no-op).
+				// Cache hit skips the staff_session_resolve SELECT;
+				// the throttled touch below still runs (usually a no-op).
 				_, _ = a.Pool.Exec(ctx,
 					`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
 				return &u, nil

@@ -302,9 +302,11 @@ tenant is not left behind. A platform tenant (no project folder, shared
 `public` schema) uses `--platform`:
 
 ```bash
-go run ./cmd/provision --platform --slug mail --name "Mail" \
-  --owner-email owner@mail.example --generate-owner-password
+go run ./cmd/provision --platform --slug mail --name "Mail"
 ```
+
+A platform tenant has no project staff provider, so `cmd/provision` rejects
+`--owner-email` for it; there is no project user table to seed.
 
 The lower-level path is still available:
 
