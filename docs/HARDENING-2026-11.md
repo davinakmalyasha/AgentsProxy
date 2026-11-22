@@ -102,7 +102,7 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
   without `BYPASSRLS` (Supabase's `postgres` cannot alter that attribute,
   so this is checked at use rather than in a migration).
 
-- [~] **P1-6 Docker/release build.**
+- [x] **P1-6 Docker/release build.**
   `.dockerignore` excludes `*.md`, but `projectembed.go` embeds
   `projects/*/agent/agent.md` and skills. `make docker` and
   `release.yml` cannot build. Fix `.dockerignore` and add a Docker build
@@ -181,6 +181,15 @@ architecture work above.
 - `bash scripts/lint-tests.sh` — pass.
 - `bash scripts/lint-migration.sh` — `migrations additive-clean (95 files checked)`.
 - Final full local suite: `go test -p 1 ./... -count=1` — `exit=0`.
+- Production backup run 45078864220: dump + restore-smoke green.
+- Production `db-migrate` run 45079048441: applied `082` and `084`; ledger
+  check clean. `schema-check` run 45079228695 and `smoke` run 45079229484
+  passed.
+- Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
+  `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
+  DFD frontends healthy.
+- Staging after `082`/`084`: `migrations clean`; preview `46a0f4c` healthy
+  with the same 404/200 route contract.
 
 ## Accepted residual / follow-up
 
