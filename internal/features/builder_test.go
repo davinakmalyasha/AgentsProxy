@@ -6,14 +6,37 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-func TestVerticalsToMount_EmptyFallsBackToAll(t *testing.T) {
+func TestVerticalsToMount_NilFallsBackToAll(t *testing.T) {
+	ResetForTest()
+	defer ResetForTest()
 	got := VerticalsToMount(nil)
 	if len(got) != len(AllowedVerticals) {
 		t.Fatalf("nil live mounted %d verticals, want all %d", len(got), len(AllowedVerticals))
 	}
-	got = VerticalsToMount([]string{})
-	if len(got) != len(AllowedVerticals) {
-		t.Fatalf("empty live mounted %d verticals, want all %d", len(got), len(AllowedVerticals))
+	// A non-nil empty slice means the query succeeded and found nothing.
+	// It must not mount every vertical, or a platform-only deployment
+	// would resurrect /v1/sports on an empty database.
+	if got := VerticalsToMount([]string{}); len(got) != 0 {
+		t.Fatalf("empty live mounted %v, want none", got)
+	}
+}
+
+func TestVerticalsToMount_PlatformOnly(t *testing.T) {
+	ResetForTest()
+	SetLegacyProjectRoutes(false)
+	defer func() {
+		SetLegacyProjectRoutes(true)
+		ResetForTest()
+	}()
+	if got := VerticalsToMount(nil); len(got) != 0 {
+		t.Fatalf("platform-only lookup failure mounted %v, want none", got)
+	}
+	if got := VerticalsToMount([]string{}); len(got) != 0 {
+		t.Fatalf("platform-only empty mounted %v, want none", got)
+	}
+	got := VerticalsToMount([]string{"fnb"})
+	if len(got) != 1 || got[0] != "fnb" {
+		t.Fatalf("platform-only live mounted %v, want [fnb]", got)
 	}
 }
 

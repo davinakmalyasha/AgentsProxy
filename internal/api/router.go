@@ -41,6 +41,9 @@ type Deps struct {
 	// the static env list only (tests, local dev); production wires it
 	// at boot and exits when it cannot load (fail closed).
 	Origins *middleware.DBResolver
+	// Projects is the provisioning catalog. Nil uses the embedded project
+	// folders; tests inject a fixture catalog.
+	Projects ProjectCatalog
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -138,7 +141,11 @@ func NewRouter(d Deps) http.Handler {
 			Redis:              d.Redis,
 			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
 		}
-		for _, v := range features.VerticalsToMount(features.LiveVerticals(context.Background(), d.Pool)) {
+		live := features.LiveVerticals(context.Background(), d.Pool)
+		if !features.LegacyProjectRoutes() {
+			live = features.LivePlatformVerticals(context.Background(), d.Pool)
+		}
+		for _, v := range features.VerticalsToMount(live) {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}
@@ -176,8 +183,13 @@ func NewRouter(d Deps) http.Handler {
 		// doubles them (adminPool computed above).
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
-			adm := &Admin{Pool: adminPool, Cache: d.Cache}
+			projects := d.Projects
+			if projects == nil {
+				projects = newEmbeddedProjectCatalog(adminPool)
+			}
+			adm := &Admin{Pool: adminPool, Cache: d.Cache, Projects: projects, Auth: d.Auth}
 			r.Post("/clients", adm.Create)
+			r.Post("/clients/{id}/owner", records.WithValidID(adm.SeedOwner))
 			r.Get("/clients", adm.List)
 			r.Patch("/clients/{id}", records.WithValidID(adm.Patch))
 			r.Post("/clients/{id}/contract", records.WithValidID(adm.ContractBump))

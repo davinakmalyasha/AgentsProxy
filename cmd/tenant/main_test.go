@@ -69,6 +69,53 @@ func TestCreatePrintsTokenOnceAndSendsProjectSchema(t *testing.T) {
 	}
 }
 
+func TestCreatePlatformUsesPublicSchema(t *testing.T) {
+	var got createRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"id-1","name":"Mail","tenant_id":"mail","token":"tok_once","monthly_quota_tokens":500000,"vertical":"fnb","features":["records"],"schema":"public"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("AGENTS_PROXY_URL", srv.URL)
+	t.Setenv("ADMIN_API_KEY", "test-key")
+	t.Chdir(t.TempDir())
+
+	code, stdout, stderr := runCLI(t, "create", "--slug", "mail", "--name", "Mail", "--platform")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr)
+	}
+	if got.Schema != "public" || got.TenantID != "mail" {
+		t.Fatalf("request=%+v want schema=public tenant=mail", got)
+	}
+	if !strings.Contains(stdout, "tok_once") {
+		t.Errorf("token not printed: %s", stdout)
+	}
+}
+
+func TestCreatePlatformRejectsExistingProjectFolder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "projects", "acme"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "projects", "acme", "project.json"),
+		[]byte(`{"slug":"acme","vertical":"sports","schema":"project_acme"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	code, _, stderr := runCLI(t, "create", "--slug", "acme", "--name", "Acme", "--platform")
+	if code != 1 {
+		t.Fatalf("exit=%d want 1", code)
+	}
+	if !strings.Contains(stderr, "has a project folder") {
+		t.Errorf("stderr=%s", stderr)
+	}
+}
+
 func TestCreateRequiresHTTPSOutsideLoopback(t *testing.T) {
 	t.Setenv("AGENTS_PROXY_URL", "http://example.com")
 	t.Setenv("ADMIN_API_KEY", "test-key")

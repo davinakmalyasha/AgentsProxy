@@ -462,7 +462,7 @@ func cloneSchema(ctx context.Context, admin *pgxpool.Pool, source, dest string) 
 	}
 
 	// Grants are not copied by LIKE. Reproduce every explicit table and
-	// sequence grant, including auth_definer and money_reader.
+	// sequence grant, including project and platform definers.
 	rows, err = tx.Query(ctx, `
 		SELECT c.relname, c.relkind::text, COALESCE(r.rolname, 'PUBLIC'), a.privilege_type
 		  FROM pg_class c

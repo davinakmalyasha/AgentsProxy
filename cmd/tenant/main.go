@@ -43,6 +43,9 @@ Commands:
   list    list clients
   patch   update quota, status, vertical, or features
   usage   show token usage for a period
+
+A project tenant requires projects/<slug>/project.json and its schema must
+already be migrated. --platform creates a platform tenant in public instead.
 `
 
 var (
@@ -129,9 +132,13 @@ func runCreate(args []string, stdout, stderr io.Writer) int {
 	features := fs.String("features", "", "comma-separated feature names (default: server default set)")
 	origins := &csvFlag{}
 	fs.Var(origins, "origin", "frontend origin (repeatable)")
-	allowMissing := fs.Bool("allow-missing-project", false, "create a platform tenant with no projects/<slug> folder")
+	platform := fs.Bool("platform", false, "create a platform tenant in public with no projects/<slug> folder")
+	allowMissing := fs.Bool("allow-missing-project", false, "deprecated; use --platform")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *allowMissing {
+		*platform = true
 	}
 	if fs.NArg() != 0 {
 		_, _ = fmt.Fprintf(stderr, "tenant create: unexpected argument %q\n", fs.Arg(0))
@@ -146,12 +153,23 @@ func runCreate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	doc, err := readProjectDoc(*slug, !*allowMissing)
+	doc, err := readProjectDoc(*slug, !*platform)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "tenant create: %v\n", err)
 		return 1
 	}
-	if doc != nil {
+	if *platform {
+		if doc != nil {
+			_, _ = fmt.Fprintf(stderr,
+				"tenant create: %s has a project folder; omit --platform to provision it as a project\n", *slug)
+			return 1
+		}
+		if *schema != "" && *schema != "public" {
+			_, _ = fmt.Fprintln(stderr, "tenant create: --platform requires schema=public")
+			return 1
+		}
+		*schema = "public"
+	} else if doc != nil {
 		if *vertical == "" {
 			*vertical = doc.Vertical
 		}

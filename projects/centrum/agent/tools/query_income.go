@@ -40,20 +40,20 @@ func queryIncomeTool(pool *pgxpool.Pool) agentstools.Tool {
 				from = now.Format("2006-01") + "-01"
 				to = now.AddDate(0, 1, 0).Format("2006-01-02")
 			}
-			// One round trip, no transaction (was BEGIN + LoadBasis×3 +
-			// COMMIT = 5 RTs). See LoadRangeSummary for the scoping note.
-			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
+			// One round trip inside the tenant transaction; the project function
+			// owns the aggregates and RLS scopes the rows.
+			s, err := loadRangeSummary(ctx, pool, tenantID, from, to)
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			b := s.Basis()
+			b := s.basis()
 			// "Income" is money in the drawer, not the value of slots that
 			// were reserved. This used to sum booking prices, so a fully
 			// unpaid month reported income while the Laporan screen the
 			// owner reads showed zero. Both figures are returned now, with
 			// the received one first.
 			return fmt.Sprintf("income %s (%s to %s), %d payments",
-				b.Describe(), from, to, b.Count)
+				b.describe(), from, to, b.Count)
 		},
 	}
 }

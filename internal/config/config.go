@@ -102,6 +102,11 @@ type Config struct {
 	// false and run `cmd/migrate` as a deploy step. Vercel preview and
 	// production may never set it true.
 	RunMigrations bool
+	// LegacyProjectRoutes keeps /v1/{vertical}/... mounted for a
+	// project-owned vertical during the Centrum cutover. Defaults to true;
+	// set LEGACY_PROJECT_ROUTES=false after the frontend has moved to
+	// /v1/p/centrum. The project-scoped router is unaffected.
+	LegacyProjectRoutes bool
 	// AllowRemoteDB is the explicit staging-only opt-in for a database
 	// that is not on localhost. Development refuses remote databases
 	// outright so a leftover production DSN can never be used by a
@@ -205,6 +210,9 @@ func Load() (*Config, error) {
 	// never opt back in: a preview deployment must not apply DDL.
 	defaultRunMigrations := c.Env == "development"
 	if c.RunMigrations, err = getenvBool("RUN_MIGRATIONS", defaultRunMigrations); err != nil {
+		return nil, err
+	}
+	if c.LegacyProjectRoutes, err = getenvBool("LEGACY_PROJECT_ROUTES", true); err != nil {
 		return nil, err
 	}
 	if err := validateVercelMigrations(c); err != nil {

@@ -71,7 +71,8 @@ This creates the platform tables, `app_runtime`, `auth_definer`,
 `money_reader`, `backup_reader`, `project_centrum`, `public.staff_sessions`,
 and applies Centrum's project migrations (`0001` schema move, `0002` records,
 `0003` FORCE RLS, `0004` schema-relative auth, `0005` legacy-session drop,
-`0006` money-reader schema grant). Verify:
+`0006` money-reader schema grant, `0007` staff-payments move, `0008`
+project money summary) plus platform `081_staff_sessions_generic.sql`. Verify:
 
 ```sql
 select count(*) from pg_namespace where nspname = 'project_centrum';

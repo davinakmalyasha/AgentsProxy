@@ -27,10 +27,17 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
+	_ "github.com/davinakmalyasha/agents-proxy/internal/projectsgen"
 )
 
 const usage = `usage: migrate [apply|status|check|plan] [--json]
@@ -118,6 +125,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		slog.Error("inspect migrations", "err", err)
 		return 1
 	}
+	metadataIssues, err := projectMetadataIssues(ctx, pool)
+	if err != nil {
+		slog.Error("inspect project metadata", "err", err)
+		return 1
+	}
+	status.Issues = append(status.Issues, metadataIssues...)
 
 	if *jsonOut {
 		enc := json.NewEncoder(stdout)
@@ -141,6 +154,79 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// projectMetadataIssues reconciles the build-time project declaration with
+// the runtime client row. The schema/ledger checks already live in
+// db.InspectMigrations; this adds the fields that are not part of a
+// migration: vertical and feature entitlement.
+func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	projects, bad := agentconfig.LoadCollect()
+	issues := make([]string, 0, len(bad))
+	for slug, err := range bad {
+		issues = append(issues, fmt.Sprintf("project %q: %v", slug, err))
+	}
+	for slug, p := range projects {
+		if err := agentconfig.Validate(p, agentconfig.DefaultBudget()); err != nil {
+			issues = append(issues, fmt.Sprintf("project %q: %v", slug, err))
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT tenant_id, db_schema, vertical, features FROM public.clients`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tenant, schema, vertical string
+		var feats []string
+		if err := rows.Scan(&tenant, &schema, &vertical, &feats); err != nil {
+			return nil, err
+		}
+		p, ok := projects[tenant]
+		if !ok {
+			// A client without a folder is either a platform tenant
+			// (public) or the undeclared-schema issue db already reports.
+			continue
+		}
+		if p.Schema != schema {
+			// db.InspectMigrations reports the schema mismatch with the
+			// project ledger context; do not duplicate it.
+			continue
+		}
+		if p.Vertical != vertical {
+			issues = append(issues, fmt.Sprintf(
+				"project %q: clients.vertical is %q but project.json declares %q",
+				tenant, vertical, p.Vertical))
+		}
+		// project.json.features is the default for new tenants, not a
+		// minimum entitlement: a tenant may intentionally run a subset.
+		// What must not drift is the meaning of a name that IS present.
+		for _, f := range feats {
+			if features.IsKnownFeature(f) {
+				if !features.AllowedForVertical(f, vertical) {
+					issues = append(issues, fmt.Sprintf(
+						"project %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
+				}
+				continue
+			}
+			if features.IsKnownProjectFeature(tenant, f) {
+				if !features.ProjectFeatureAllowed(tenant, f, vertical) {
+					issues = append(issues, fmt.Sprintf(
+						"project %q: project feature %q is not allowed for vertical %q", tenant, f, vertical))
+				}
+				continue
+			}
+			issues = append(issues, fmt.Sprintf(
+				"project %q: clients.features contains unknown feature %q", tenant, f))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(issues)
+	return issues, nil
 }
 
 func printStatus(w io.Writer, s *db.MigrationStatus) {

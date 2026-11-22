@@ -31,7 +31,7 @@ func listStaffPaymentsTool(pool *pgxpool.Pool) agentstools.Tool {
 			_ = json.Unmarshal(args, &p)
 			var rows []string
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				sql := `SELECT staff_name, amount, paid_at::text, note FROM public.agent_staff_payments WHERE tenant_id=$1`
+				sql := `SELECT staff_name, amount, paid_at::text, note FROM sports_staff_payments WHERE tenant_id=$1`
 				qargs := []any{tenantID}
 				idx := 2
 				if p.StaffName != "" {

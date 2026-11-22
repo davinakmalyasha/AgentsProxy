@@ -31,14 +31,13 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 			}
 			_ = json.Unmarshal(args, &p)
 			from, to := agentstools.DefaultMonthRange(p.From, p.To)
-			// One round trip, no transaction: private.range_summary (056) runs
-			// all seven aggregates server-side (was BEGIN + 7 statements +
-			// COMMIT = 9 RTs). Output formatting below is unchanged.
-			s, err := agentstools.LoadRangeSummary(ctx, pool, tenantID, from, to)
+			// One round trip inside the tenant transaction: the project function
+			// runs all seven aggregates server-side. Output formatting is unchanged.
+			s, err := loadRangeSummary(ctx, pool, tenantID, from, to)
 			if err != nil {
 				return "error: " + err.Error()
 			}
-			b := s.Basis()
+			b := s.basis()
 			peak := map[int]int{}
 			for _, hc := range s.Peak {
 				peak[hc[0]] = hc[1]
@@ -58,7 +57,7 @@ func queryRangeSummaryTool(pool *pgxpool.Pool) agentstools.Tool {
 				best = fmt.Sprintf("%s (%.0f)", *s.BestDay, s.BestDayAmt)
 			}
 			return fmt.Sprintf("range %s to %s: %s, expenses %.0f, net %.0f, payments %d, bookings %d, best day %s%s",
-				from, to, b.Describe(), s.Expenses, b.Received()-s.Expenses, b.Count, s.Bookings, best, peakTxt)
+				from, to, b.describe(), s.Expenses, b.received()-s.Expenses, b.Count, s.Bookings, best, peakTxt)
 		},
 	}
 }

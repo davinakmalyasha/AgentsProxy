@@ -70,6 +70,22 @@ func (a *Auth) RegisterProvider(tenantID string, p Provider) {
 	a.Providers[tenantID] = p
 }
 
+// RegisterUser creates a staff user for a tenant through its provider. It is
+// the shared path for the owner-session /register endpoint and the admin
+// bootstrap endpoint; the caller is responsible for authorization.
+func (a *Auth) RegisterUser(ctx context.Context, tenantID string, in RegisterInput) (User, error) {
+	p := a.providerFor(tenantID)
+	if p == nil {
+		return User{}, ErrInvalidCredentials
+	}
+	u, err := p.Register(ctx, tenantID, in)
+	if err != nil {
+		return User{}, err
+	}
+	u.TenantID = tenantID
+	return u, nil
+}
+
 // UserByToken resolves a session token to a user, checking expiry and asking
 // the tenant's project provider for the live profile. A missing user,
 // inactive user, unknown tenant, or missing provider all become pgx.ErrNoRows

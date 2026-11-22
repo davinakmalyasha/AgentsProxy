@@ -5,6 +5,22 @@
   "contact": "0815-9408-136 (Owner)",
   "schema": "project_centrum",
   "auto_grant": false,
+  "features": [
+    "records",
+    "availability",
+    "bookings",
+    "courtblocks",
+    "customers",
+    "expenses",
+    "facilities",
+    "inventory",
+    "kantin",
+    "members",
+    "payments",
+    "pricing",
+    "series",
+    "users"
+  ],
   "agent": {
     "enabled": true,
     "persona": "agent/agent.md",

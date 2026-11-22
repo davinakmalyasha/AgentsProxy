@@ -121,11 +121,12 @@ func listProjects(folder string) (map[string]bool, error) {
 }
 
 type projectDoc struct {
-	Slug     string `json:"slug"`
-	Display  string `json:"display"`
-	Vertical string `json:"vertical"`
-	Contact  string `json:"contact"`
-	Schema   string `json:"schema"`
+	Slug     string   `json:"slug"`
+	Display  string   `json:"display"`
+	Vertical string   `json:"vertical"`
+	Contact  string   `json:"contact"`
+	Schema   string   `json:"schema"`
+	Features []string `json:"features"`
 	Agent    struct {
 		Enabled bool     `json:"enabled"`
 		Model   string   `json:"model"`
@@ -155,6 +156,8 @@ func loadOne(dir string) (*Project, error) {
 	p.Vertical = doc.Vertical
 	p.Contact = doc.Contact
 	p.Schema = doc.Schema
+	p.Features = doc.Features
+	p.Migrations = countProjectMigrations(dir)
 	if p.Schema == "" {
 		// A new project is isolated by default. Centrum states
 		// "project_centrum" explicitly in its project.json.
@@ -206,7 +209,7 @@ func readProjectDoc(dir string) (*projectDoc, error) {
 	raw, err := fs.ReadFile(projectembed.FS, path.Join("projects", dir, "project.json"))
 	if err != nil {
 		if isNotExist(err) {
-			return &projectDoc{}, nil
+			return nil, fmt.Errorf("project %q: project.json is required", dir)
 		}
 		return nil, fmt.Errorf("project %q: read project.json: %w", dir, err)
 	}
@@ -226,6 +229,24 @@ func readProjectFile(dir, rel string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid project-relative path %q", rel)
 	}
 	return fs.ReadFile(projectembed.FS, path.Join("projects", dir, clean))
+}
+
+// countProjectMigrations returns the number of SQL files under the project's
+// migrations/ directory. A missing directory is zero, not an error: a project
+// can exist without its own tables (for example an agent-only project that
+// uses platform records).
+func countProjectMigrations(dir string) int {
+	entries, err := fs.ReadDir(projectembed.FS, path.Join("projects", dir, "migrations"))
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			n++
+		}
+	}
+	return n
 }
 
 // loadSkills reads every .md under the project's skills directory as one
