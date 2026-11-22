@@ -119,7 +119,7 @@ func TestCreatePlatformRejectsExistingProjectFolder(t *testing.T) {
 func TestCreateRequiresHTTPSOutsideLoopback(t *testing.T) {
 	t.Setenv("AGENTS_PROXY_URL", "http://example.com")
 	t.Setenv("ADMIN_API_KEY", "test-key")
-	code, _, stderr := runCLI(t, "create", "--slug", "acme", "--name", "Acme", "--allow-missing-project")
+	code, _, stderr := runCLI(t, "create", "--slug", "acme", "--name", "Acme", "--platform")
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
