@@ -39,22 +39,46 @@ type pgxSessionService struct {
 	pool *pgxpool.Pool
 }
 
-// TENANT ISOLATION CONTRACT: app_name IS the tenant slug (migration
-// 041), and every query in this file filters on it — Get requires all
-// three of (app_name, user_id, session_id), List requires app_name,
-// writes carry it on every row. The table RLS policies are USING (true)
-// (041), so this application-layer scoping is the entire enforcement:
-// a new query MUST filter app_name, or it reads every tenant's
-// transcripts. There is no test that can assert this without a live
-// DB; it is enforced by review. A future migration may add a
-// tenant_id column + restrictive policy once the service sets the
-// app.tenant_id GUC (needs tx-scoped set_config on the read paths,
-// which costs round trips — not done lightly on this hot path).
+// TENANT ISOLATION CONTRACT: app_name IS the tenant slug. Every query in
+// this file still filters on it (defense in depth), and every operation runs
+// in a transaction that sets app.tenant_id. Migration 085 makes the table
+// policies compare app_name with that GUC, so a missing filter in a future
+// query reads zero rows instead of every tenant's transcript. An unset GUC
+// fails closed for reads and writes.
 
 // NewPgxSessionService builds the pgx-backed session store on the app
-// pool. No extra connections: every query runs on the shared pool.
+// pool. No extra connections: every operation borrows one pooled connection
+// for its transaction.
 func NewPgxSessionService(pool *pgxpool.Pool) session.Service {
 	return &pgxSessionService{pool: pool}
+}
+
+// withTenantTx runs fn in a transaction with the tenant GUC set. The GUC is
+// transaction-local, so a pooled connection can never carry a previous
+// tenant's value into the next request.
+func (s *pgxSessionService) withTenantTx(ctx context.Context, appName string, fn func(pgx.Tx) error) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if _, err := tx.Exec(ctx,
+		`SELECT set_config('app.tenant_id', $1, true)`, appName); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // pgxLocalSession mirrors ADK's localSession: in-memory view with the
@@ -597,55 +621,46 @@ func (s *pgxSessionService) Create(ctx context.Context, req *session.CreateReque
 		updatedAt: now,
 	}
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
+	err := s.withTenantTx(ctx, req.AppName, func(tx pgx.Tx) error {
+		appState, _, err := fetchAppStateTx(ctx, tx, req.AppName)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
 		}
-	}()
-	appState, _, err := fetchAppStateTx(ctx, tx, req.AppName)
-	if err != nil {
-		return nil, fmt.Errorf("error on create session: %w", err)
-	}
-	userState, _, err := fetchUserStateTx(ctx, tx, req.AppName, req.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("error on create session: %w", err)
-	}
+		userState, _, err := fetchUserStateTx(ctx, tx, req.AppName, req.UserID)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
+		}
 
-	appDelta, userDelta, sessionState := extractStateDeltas(req.State)
-	if len(appDelta) > 0 {
-		maps.Copy(appState, appDelta)
-		if err := upsertAppStateTx(ctx, tx, req.AppName, appState, now); err != nil {
-			return nil, fmt.Errorf("failed to save app state: %w", err)
+		appDelta, userDelta, sessionState := extractStateDeltas(req.State)
+		if len(appDelta) > 0 {
+			maps.Copy(appState, appDelta)
+			if err := upsertAppStateTx(ctx, tx, req.AppName, appState, now); err != nil {
+				return fmt.Errorf("failed to save app state: %w", err)
+			}
 		}
-	}
-	if len(userDelta) > 0 {
-		maps.Copy(userState, userDelta)
-		if err := upsertUserStateTx(ctx, tx, req.AppName, req.UserID, userState, now); err != nil {
-			return nil, fmt.Errorf("failed to save user state: %w", err)
+		if len(userDelta) > 0 {
+			maps.Copy(userState, userDelta)
+			if err := upsertUserStateTx(ctx, tx, req.AppName, req.UserID, userState, now); err != nil {
+				return fmt.Errorf("failed to save user state: %w", err)
+			}
 		}
-	}
-	sessionJSON, err := encodeStateMap(sessionState)
+		sessionJSON, err := encodeStateMap(sessionState)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO sessions (app_name, user_id, id, state, create_time, update_time)
+			 VALUES ($1,$2,$3,$4::jsonb,$5,$6)`,
+			req.AppName, req.UserID, sessionID, sessionJSON, now, now); err != nil {
+			return fmt.Errorf("error creating session on database: %w", err)
+		}
+		val.state = mergeStates(appState, userState, sessionState)
+		val.updatedAt = now
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO sessions (app_name, user_id, id, state, create_time, update_time)
-		 VALUES ($1,$2,$3,$4::jsonb,$5,$6)`,
-		req.AppName, req.UserID, sessionID, sessionJSON, now, now); err != nil {
-		return nil, fmt.Errorf("error creating session on database: %w", err)
-	}
-
-	val.state = mergeStates(appState, userState, sessionState)
-	val.updatedAt = now
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	committed = true
 	return &session.CreateResponse{Session: val}, nil
 }
 
@@ -654,63 +669,75 @@ func (s *pgxSessionService) Get(ctx context.Context, req *session.GetRequest) (*
 		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q",
 			req.AppName, req.UserID, req.SessionID)
 	}
-	var stateSrc any
-	var createTime, updateTime time.Time
-	err := s.pool.QueryRow(ctx,
-		`SELECT state, create_time, update_time FROM sessions
-		  WHERE app_name=$1 AND user_id=$2 AND id=$3`,
-		req.AppName, req.UserID, req.SessionID).Scan(&stateSrc, &createTime, &updateTime)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %q: %w", session.ErrNotFound, req.SessionID, err)
+	var (
+		storedState   map[string]any
+		updateTime    time.Time
+		storageEvents []*session.Event
+		appState      map[string]any
+		userState     map[string]any
+	)
+	err := s.withTenantTx(ctx, req.AppName, func(tx pgx.Tx) error {
+		var stateSrc any
+		var createTime time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT state, create_time, update_time FROM sessions
+			  WHERE app_name=$1 AND user_id=$2 AND id=$3`,
+			req.AppName, req.UserID, req.SessionID).Scan(&stateSrc, &createTime, &updateTime); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: %q: %w", session.ErrNotFound, req.SessionID, err)
+			}
+			return fmt.Errorf("database error while fetching session: %w", err)
 		}
-		return nil, fmt.Errorf("database error while fetching session: %w", err)
-	}
-	storedState, err := decodeStateMap(stateSrc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to map storage object: %w", err)
-	}
-
-	q := `SELECT ` + eventColumns + ` FROM events
-	      WHERE app_name=$1 AND user_id=$2 AND session_id=$3`
-	args := []any{req.AppName, req.UserID, req.SessionID}
-	if !req.After.IsZero() {
-		q += ` AND "timestamp" >= $4`
-		args = append(args, req.After)
-	}
-	q += ` ORDER BY "timestamp" DESC, id DESC`
-	if req.NumRecentEvents > 0 {
-		q += fmt.Sprintf(` LIMIT %d`, req.NumRecentEvents)
-	}
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
-	}
-	storageEvents := []*session.Event{}
-	for rows.Next() {
-		ev, err := scanEventRow(rows)
+		var err error
+		storedState, err = decodeStateMap(stateSrc)
 		if err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("failed to map storage event: %w", err)
+			return fmt.Errorf("failed to map storage object: %w", err)
 		}
-		storageEvents = append(storageEvents, ev)
-	}
-	if err := rows.Err(); err != nil {
+
+		q := `SELECT ` + eventColumns + ` FROM events
+		      WHERE app_name=$1 AND user_id=$2 AND session_id=$3`
+		args := []any{req.AppName, req.UserID, req.SessionID}
+		if !req.After.IsZero() {
+			q += ` AND "timestamp" >= $4`
+			args = append(args, req.After)
+		}
+		q += ` ORDER BY "timestamp" DESC, id DESC`
+		if req.NumRecentEvents > 0 {
+			q += fmt.Sprintf(` LIMIT %d`, req.NumRecentEvents)
+		}
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("database error while fetching events: %w", err)
+		}
+		for rows.Next() {
+			ev, err := scanEventRow(rows)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("failed to map storage event: %w", err)
+			}
+			storageEvents = append(storageEvents, ev)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("database error while fetching events: %w", err)
+		}
 		rows.Close()
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
+
+		appState, _, err = fetchAppStateTx(ctx, tx, req.AppName)
+		if err != nil {
+			return fmt.Errorf("error on get session: %w", err)
+		}
+		userState, _, err = fetchUserStateTx(ctx, tx, req.AppName, req.UserID)
+		if err != nil {
+			return fmt.Errorf("error on get session: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	rows.Close()
 	for i, j := 0, len(storageEvents)-1; i < j; i, j = i+1, j-1 {
 		storageEvents[i], storageEvents[j] = storageEvents[j], storageEvents[i]
-	}
-
-	appState, err := fetchAppState(ctx, s.pool, req.AppName)
-	if err != nil {
-		return nil, fmt.Errorf("error on get session: %w", err)
-	}
-	userState, err := fetchUserState(ctx, s.pool, req.AppName, req.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("error on get session: %w", err)
 	}
 	val := &pgxLocalSession{
 		appName:   req.AppName,
@@ -727,79 +754,89 @@ func (s *pgxSessionService) List(ctx context.Context, req *session.ListRequest) 
 	if req.AppName == "" {
 		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
-	q := `SELECT app_name, user_id, id, state, update_time FROM sessions WHERE app_name=$1`
-	args := []any{req.AppName}
-	if req.UserID != "" {
-		q += ` AND user_id=$2`
-		args = append(args, req.UserID)
-	}
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("database error while fetching session: %w", err)
-	}
 	type sessRow struct {
 		app, user, id string
 		state         map[string]any
 		updated       time.Time
 	}
-	var found []sessRow
-	for rows.Next() {
-		var r sessRow
-		var stateSrc any
-		if err := rows.Scan(&r.app, &r.user, &r.id, &stateSrc, &r.updated); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("database error while fetching session: %w", err)
+	var (
+		found      []sessRow
+		appState   map[string]any
+		userStates map[string]map[string]any
+	)
+	err := s.withTenantTx(ctx, req.AppName, func(tx pgx.Tx) error {
+		q := `SELECT app_name, user_id, id, state, update_time FROM sessions WHERE app_name=$1`
+		args := []any{req.AppName}
+		if req.UserID != "" {
+			q += ` AND user_id=$2`
+			args = append(args, req.UserID)
 		}
-		st, err := decodeStateMap(stateSrc)
+		rows, err := tx.Query(ctx, q, args...)
 		if err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("failed to map storage object for session %s: %w", r.id, err)
+			return fmt.Errorf("database error while fetching session: %w", err)
 		}
-		r.state = st
-		found = append(found, r)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("database error while fetching session: %w", err)
-	}
-	rows.Close()
-
-	appState, err := fetchAppState(ctx, s.pool, req.AppName)
-	if err != nil {
-		return nil, fmt.Errorf("error on list sessions: %w", err)
-	}
-	userStates := map[string]map[string]any{}
-	if req.UserID != "" {
-		us, err := fetchUserState(ctx, s.pool, req.AppName, req.UserID)
-		if err != nil {
-			return nil, fmt.Errorf("error on list sessions: %w", err)
-		}
-		userStates[req.UserID] = us
-	} else {
-		ur, err := s.pool.Query(ctx,
-			`SELECT user_id, state FROM user_states WHERE app_name=$1`, req.AppName)
-		if err != nil {
-			return nil, fmt.Errorf("error on list sessions: %w", err)
-		}
-		for ur.Next() {
-			var uid string
-			var src any
-			if err := ur.Scan(&uid, &src); err != nil {
-				ur.Close()
-				return nil, fmt.Errorf("error on list sessions: %w", err)
+		for rows.Next() {
+			var r sessRow
+			var stateSrc any
+			if err := rows.Scan(&r.app, &r.user, &r.id, &stateSrc, &r.updated); err != nil {
+				rows.Close()
+				return fmt.Errorf("database error while fetching session: %w", err)
 			}
-			st, err := decodeStateMap(src)
+			st, err := decodeStateMap(stateSrc)
 			if err != nil {
-				ur.Close()
-				return nil, fmt.Errorf("error on list sessions: %w", err)
+				rows.Close()
+				return fmt.Errorf("failed to map storage object for session %s: %w", r.id, err)
 			}
-			userStates[uid] = st
+			r.state = st
+			found = append(found, r)
 		}
-		if err := ur.Err(); err != nil {
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("database error while fetching session: %w", err)
+		}
+		rows.Close()
+
+		appState, _, err = fetchAppStateTx(ctx, tx, req.AppName)
+		if err != nil {
+			return fmt.Errorf("error on list sessions: %w", err)
+		}
+		userStates = map[string]map[string]any{}
+		if req.UserID != "" {
+			us, _, err := fetchUserStateTx(ctx, tx, req.AppName, req.UserID)
+			if err != nil {
+				return fmt.Errorf("error on list sessions: %w", err)
+			}
+			userStates[req.UserID] = us
+		} else {
+			ur, err := tx.Query(ctx,
+				`SELECT user_id, state FROM user_states WHERE app_name=$1`, req.AppName)
+			if err != nil {
+				return fmt.Errorf("error on list sessions: %w", err)
+			}
+			for ur.Next() {
+				var uid string
+				var src any
+				if err := ur.Scan(&uid, &src); err != nil {
+					ur.Close()
+					return fmt.Errorf("error on list sessions: %w", err)
+				}
+				st, err := decodeStateMap(src)
+				if err != nil {
+					ur.Close()
+					return fmt.Errorf("error on list sessions: %w", err)
+				}
+				userStates[uid] = st
+			}
+			if err := ur.Err(); err != nil {
+				ur.Close()
+				return fmt.Errorf("error on list sessions: %w", err)
+			}
 			ur.Close()
-			return nil, fmt.Errorf("error on list sessions: %w", err)
 		}
-		ur.Close()
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]session.Session, 0, len(found))
@@ -824,26 +861,14 @@ func (s *pgxSessionService) Delete(ctx context.Context, req *session.DeleteReque
 		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q",
 			req.AppName, req.UserID, req.SessionID)
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
+	return s.withTenantTx(ctx, req.AppName, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM sessions WHERE app_name=$1 AND user_id=$2 AND id=$3`,
+			req.AppName, req.UserID, req.SessionID); err != nil {
+			return fmt.Errorf("database error during session deletion: %w", err)
 		}
-	}()
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM sessions WHERE app_name=$1 AND user_id=$2 AND id=$3`,
-		req.AppName, req.UserID, req.SessionID); err != nil {
-		return fmt.Errorf("database error during session deletion: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		return nil
+	})
 }
 
 func (s *pgxSessionService) AppendEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
@@ -879,100 +904,90 @@ func (s *pgxSessionService) AppendEvent(ctx context.Context, curSession session.
 }
 
 func (s *pgxSessionService) applyEvent(ctx context.Context, sess *pgxLocalSession, event *session.Event) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
-		}
-	}()
-
-	var storedUpdate time.Time
-	var storedStateSrc []byte
-	err = tx.QueryRow(ctx,
-		`SELECT state, update_time FROM sessions WHERE app_name=$1 AND user_id=$2 AND id=$3`,
-		sess.AppName(), sess.UserID(), sess.ID()).Scan(&storedStateSrc, &storedUpdate)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
-		}
-		return fmt.Errorf("failed to get session: %w", err)
-	}
-
-	sess.mu.RLock()
-	sessionUS := sess.updatedAt.UnixMicro()
-	sess.mu.RUnlock()
-	if storedUpdate.UnixMicro() > sessionUS {
-		return fmt.Errorf(
-			"stale session error: last update time from request (%s) is older than in database (%s)",
-			time.UnixMicro(sessionUS).Format(time.RFC3339Nano),
-			storedUpdate.Format(time.RFC3339Nano))
-	}
-
-	appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
-	// Fetch-then-merge only when there is something to merge: a typical
-	// event carries no app:/user: delta, so the old unconditional
-	// fetches wasted 2 of ~7 round trips per event, every event.
-	if len(appDelta) > 0 {
-		appState, _, err := fetchAppStateTx(ctx, tx, sess.AppName())
+	err := s.withTenantTx(ctx, sess.AppName(), func(tx pgx.Tx) error {
+		var storedUpdate time.Time
+		var storedStateSrc []byte
+		err := tx.QueryRow(ctx,
+			`SELECT state, update_time FROM sessions WHERE app_name=$1 AND user_id=$2 AND id=$3`,
+			sess.AppName(), sess.UserID(), sess.ID()).Scan(&storedStateSrc, &storedUpdate)
 		if err != nil {
-			return err
-		}
-		maps.Copy(appState, appDelta)
-		if err := upsertAppStateTx(ctx, tx, sess.AppName(), appState, event.Timestamp); err != nil {
-			return fmt.Errorf("failed to save app state: %w", err)
-		}
-	}
-	if len(userDelta) > 0 {
-		userState, _, err := fetchUserStateTx(ctx, tx, sess.AppName(), sess.UserID())
-		if err != nil {
-			return err
-		}
-		maps.Copy(userState, userDelta)
-		if err := upsertUserStateTx(ctx, tx, sess.AppName(), sess.UserID(), userState, event.Timestamp); err != nil {
-			return fmt.Errorf("failed to save user state: %w", err)
-		}
-	}
-	if len(sessionDelta) > 0 {
-		merged, err := decodeStateMap(storedStateSrc)
-		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
+			}
 			return fmt.Errorf("failed to get session: %w", err)
 		}
-		maps.Copy(merged, sessionDelta)
-		sessionJSON, err := encodeStateMap(merged)
+
+		sess.mu.RLock()
+		sessionUS := sess.updatedAt.UnixMicro()
+		sess.mu.RUnlock()
+		if storedUpdate.UnixMicro() > sessionUS {
+			return fmt.Errorf(
+				"stale session error: last update time from request (%s) is older than in database (%s)",
+				time.UnixMicro(sessionUS).Format(time.RFC3339Nano),
+				storedUpdate.Format(time.RFC3339Nano))
+		}
+
+		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+		// Fetch-then-merge only when there is something to merge: a typical
+		// event carries no app:/user: delta, so the old unconditional
+		// fetches wasted 2 of ~7 round trips per event, every event.
+		if len(appDelta) > 0 {
+			appState, _, err := fetchAppStateTx(ctx, tx, sess.AppName())
+			if err != nil {
+				return err
+			}
+			maps.Copy(appState, appDelta)
+			if err := upsertAppStateTx(ctx, tx, sess.AppName(), appState, event.Timestamp); err != nil {
+				return fmt.Errorf("failed to save app state: %w", err)
+			}
+		}
+		if len(userDelta) > 0 {
+			userState, _, err := fetchUserStateTx(ctx, tx, sess.AppName(), sess.UserID())
+			if err != nil {
+				return err
+			}
+			maps.Copy(userState, userDelta)
+			if err := upsertUserStateTx(ctx, tx, sess.AppName(), sess.UserID(), userState, event.Timestamp); err != nil {
+				return fmt.Errorf("failed to save user state: %w", err)
+			}
+		}
+		if len(sessionDelta) > 0 {
+			merged, err := decodeStateMap(storedStateSrc)
+			if err != nil {
+				return fmt.Errorf("failed to get session: %w", err)
+			}
+			maps.Copy(merged, sessionDelta)
+			sessionJSON, err := encodeStateMap(merged)
+			if err != nil {
+				return fmt.Errorf("failed to save session state: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE sessions SET state=$1::jsonb, update_time=$2 WHERE app_name=$3 AND user_id=$4 AND id=$5`,
+				sessionJSON, event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
+				return fmt.Errorf("failed to save session state: %w", err)
+			}
+		} else if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET update_time=$1 WHERE app_name=$2 AND user_id=$3 AND id=$4`,
+			event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
+			// No session delta: refresh the timestamp without rewriting
+			// the state jsonb. The old path re-decoded, re-encoded, and
+			// rewrote the whole state on every event — a full row version
+			// plus index churn for a value that did not change.
+			return fmt.Errorf("failed to save session state: %w", err)
+		}
+
+		vals, err := eventToRow(sess, event)
 		if err != nil {
-			return fmt.Errorf("failed to save session state: %w", err)
+			return fmt.Errorf("failed to map event to storage model: %w", err)
 		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE sessions SET state=$1::jsonb, update_time=$2 WHERE app_name=$3 AND user_id=$4 AND id=$5`,
-			sessionJSON, event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
-			return fmt.Errorf("failed to save session state: %w", err)
+		if _, err := tx.Exec(ctx, eventInsertSQL, vals...); err != nil {
+			return fmt.Errorf("failed to save event: %w", err)
 		}
-	} else if _, err := tx.Exec(ctx,
-		`UPDATE sessions SET update_time=$1 WHERE app_name=$2 AND user_id=$3 AND id=$4`,
-		event.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
-		// No session delta: refresh the timestamp without rewriting
-		// the state jsonb. The old path re-decoded, re-encoded, and
-		// rewrote the whole state on every event — a full row version
-		// plus index churn for a value that did not change.
-		return fmt.Errorf("failed to save session state: %w", err)
-	}
-
-	vals, err := eventToRow(sess, event)
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("failed to map event to storage model: %w", err)
-	}
-	if _, err := tx.Exec(ctx, eventInsertSQL, vals...); err != nil {
-		return fmt.Errorf("failed to save event: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	committed = true
 	sess.mu.Lock()
 	sess.updatedAt = event.Timestamp
 	sess.mu.Unlock()
@@ -980,11 +995,6 @@ func (s *pgxSessionService) applyEvent(ctx context.Context, sess *pgxLocalSessio
 }
 
 // --- state row helpers ---
-
-func fetchAppState(ctx context.Context, db pgxQuerier, appName string) (map[string]any, error) {
-	st, _, err := fetchAppStateTx(ctx, db, appName)
-	return st, err
-}
 
 type pgxQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -1009,11 +1019,6 @@ func fetchAppStateTx(ctx context.Context, q pgxQuerier, appName string) (map[str
 		return nil, time.Time{}, err
 	}
 	return st, ut, nil
-}
-
-func fetchUserState(ctx context.Context, db pgxQuerier, appName, userID string) (map[string]any, error) {
-	st, _, err := fetchUserStateTx(ctx, db, appName, userID)
-	return st, err
 }
 
 func fetchUserStateTx(ctx context.Context, q pgxQuerier, appName, userID string) (map[string]any, time.Time, error) {
