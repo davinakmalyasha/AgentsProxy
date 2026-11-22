@@ -1,7 +1,7 @@
 # Architecture hardening — November 2026
 
-Status: **in progress**. This document is the single tracker for the
-four-audit review (routing/layering, database/RLS, auth/isolation,
+Status: **P0/P1 implemented and verified; residual items are marked**. This
+document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
 docs/ops/CI). An item is only marked `[x]` when the code is merged and
 the named verification passes.
 
@@ -102,11 +102,11 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
   without `BYPASSRLS` (Supabase's `postgres` cannot alter that attribute,
   so this is checked at use rather than in a migration).
 
-- [~] **P1-6 Docker/release build.**
+- [x] **P1-6 Docker/release build.**
   `.dockerignore` excludes `*.md`, but `projectembed.go` embeds
   `projects/*/agent/agent.md` and skills. `make docker` and
   `release.yml` cannot build. Fix `.dockerignore` and add a Docker build
-  to CI.
+  to CI. The CI Docker job passed (run 45075744093).
 
 - [x] **P1-7 Production config guards.**
   `DB_POOL_MIN=0` is rejected and silently becomes 2; Vercel-only
@@ -148,14 +148,18 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
 - [x] Centrum `next`/`eslint-config-next` → 16.4.6; Dependabot #16 closed.
   `npm audit --omit=dev` is clean, `npm run check` is 14 files/159 tests, and
   `npm run build` passes.
-- [ ] Backup RPO: PITR if budget allows, else a reliable 2-hour scheduler.
-  Restore correctness is fixed; the RPO decision still belongs to the
-  operator.
-- [~] DFD: `api.dfdagency.com` plus one shared origin config. The two
-  hardcoded copies now import `client/api-origin.mjs`; the production pin and
-  preview fail-closed behavior are unchanged. Adding the custom domain is a
-  DNS decision.
-- [ ] GitHub Team + second reviewer, or documented accepted risk.
+- [~] Backup RPO: the logical dump remains 6-hourly (RPO up to 6h).
+  Restore correctness is fixed and the drill is green. PITR or a reliable
+  2-hour scheduler is a budget/scheduler decision; GitHub's schedule is
+  best-effort, so do not claim a tighter RPO without it.
+- [~] DFD origin: the two hardcoded copies now import
+  `client/api-origin.mjs`; the production pin and preview fail-closed
+  behavior are unchanged. Adding `api.dfdagency.com` is a DNS decision.
+- [-] GitHub reviewer: accepted risk for now. The repository is private on
+  Free and has one maintainer; the enforced controls are the three required
+  checks, strict branch updates, and `enforce_admins`. A required reviewer
+  needs GitHub Team plus a second trusted person, otherwise it locks out the
+  only maintainer.
 
 These are tracked in `RUNBOOK.md` and are not blockers for the
 architecture work above.
@@ -181,6 +185,15 @@ architecture work above.
 - `bash scripts/lint-tests.sh` — pass.
 - `bash scripts/lint-migration.sh` — `migrations additive-clean (95 files checked)`.
 - Final full local suite: `go test -p 1 ./... -count=1` — `exit=0`.
+- Production backup run 45078864220: dump + restore-smoke green.
+- Production `db-migrate` run 45079048441: applied `082` and `084`; ledger
+  check clean. `schema-check` run 45079228695 and `smoke` run 45079229484
+  passed.
+- Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
+  `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
+  DFD frontends healthy.
+- Staging after `082`/`084`: `migrations clean`; preview `46a0f4c` healthy
+  with the same 404/200 route contract.
 
 ## Accepted residual / follow-up
 
