@@ -31,10 +31,13 @@ else fails boot. The two safety invariants are enforced in
 * Production boots with `DATABASE_URL` as `app_runtime`; a superuser or
   `BYPASSRLS` role fails the boot. The admin pool stays separate.
 * Project schemas must match `project_*`; the database check constraint
-  enforces the namespace, `clients.project_key` has a partial unique index
-  for race-safe provisioning, and admin provisioning plus `migrate check`
-  enforce one client per project schema. `public` is only for the legacy
-  platform tenant row (dfd-agency).
+  enforces the namespace, and the partial unique index
+  `clients_project_schema_key` allows exactly one client per project schema.
+  Admin provisioning plus `migrate check` enforce the same invariant.
+  `public` is only for the legacy platform tenant row (dfd-agency).
+* Integration tests must give every tenant its own cloned schema
+  (`internal/dbtest` / `testutil.CloneTenantSchema`). Feature tests may not
+  hardcode `project_centrum`; `scripts/lint-tests.sh` fails CI on a regression.
 * Vercel Preview must not carry production secrets. A preview backend is
   expected to fail closed rather than touch production.
 * Production and staging run PostgreSQL 17; CI and compose use

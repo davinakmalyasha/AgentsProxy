@@ -31,10 +31,9 @@ type projectMigrationDoc struct {
 	Slug   string `json:"slug"`
 	Schema string `json:"schema"`
 	// AutoGrant controls the blanket app_runtime DML grant applied after
-	// a project's migrations. It defaults to true for new projects. The
-	// legacy Centrum project sets it false because its tables already
-	// carry deliberate grants (sports_sessions is SELECT-only so the
-	// definer functions remain the only write path).
+	// a project's migrations. It defaults to true for new projects.
+	// Centrum sets it false so a future table does not silently gain
+	// runtime DML; its grants are deliberate.
 	AutoGrant *bool `json:"auto_grant"`
 }
 
@@ -290,9 +289,8 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 	if schema != "public" {
 		// Existing objects and future objects both need the runtime grant.
 		// Default privileges are scoped to the migration runner's role.
-		// A project with auto_grant=false owns its grants: Centrum's
-		// sports_sessions must stay SELECT-only so the definer session
-		// functions cannot be bypassed by a direct INSERT/UPDATE/DELETE.
+		// A project with auto_grant=false owns its grants. Centrum keeps
+		// this flag so a future table does not silently gain runtime DML.
 		if autoGrant {
 			stmts := []string{
 				`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ` + ident + ` TO app_runtime`,

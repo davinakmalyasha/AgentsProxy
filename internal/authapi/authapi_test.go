@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 )
+
+var authTestSchema string
 
 func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	t.Helper()
@@ -25,7 +29,7 @@ func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	if dsn == "" || adminDSN == "" {
 		t.Skip("TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	admin, err := db.NewPool(ctx, adminDSN)
 	if err != nil {
@@ -37,41 +41,35 @@ func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
 	if err := db.MigrateAll(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	// Ensure grants for the runtime role (idempotent).
-	//
-	// sports_users still gets full DML, but sports_sessions gets SELECT
-	// ONLY. Migration 032 revokes the session DML on purpose: the runtime
-	// reaches sessions through private.create_session / session_user /
-	// delete_session / touch_session, which derive tenant_id server-side.
-	// Re-granting INSERT here would silently reopen the hole that
-	// migration closed, so this is the test that would catch that.
-	for _, g := range []string{
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON project_centrum.sports_users TO app_runtime`,
-		`GRANT SELECT ON project_centrum.sports_sessions TO app_runtime`,
-	} {
-		if _, err := admin.Exec(ctx, g); err != nil {
-			t.Fatal(err)
-		}
+	// Every test tenant owns a cloned schema. The platform session
+	// directory is public; project users and business rows live in the
+	// clone, and the auth functions resolve it from clients.db_schema.
+	schema := dbtest.SharedSchema(t, ctx, admin, "project_centrum", "auth-t")
+	if err := dbtest.ResetSchema(ctx, admin, schema); err != nil {
+		t.Fatal(err)
 	}
-	// Cleanup + seed an owner user for tenant 'auth-t'.
-	for _, stmt := range []string{
-		`DELETE FROM project_centrum.sports_sessions WHERE user_id IN (SELECT id FROM project_centrum.sports_users WHERE tenant_id='auth-t')`,
-		`DELETE FROM project_centrum.sports_users WHERE tenant_id='auth-t'`,
-		`DELETE FROM clients WHERE tenant_id='auth-t'`,
-	} {
-		if _, err := admin.Exec(ctx, stmt); err != nil {
-			t.Fatal(err)
-		}
+	authTestSchema = schema
+	if _, err := admin.Exec(ctx, `DELETE FROM public.staff_sessions WHERE tenant_id='auth-t'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `DELETE FROM clients WHERE tenant_id='auth-t'`); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ('auth-t','auth-t','hash-auth-t',1000,'active','sports',ARRAY['records'],'project_centrum')`); err != nil {
+		 VALUES ('auth-t','auth-t','hash-auth-t',1000,'active','sports',ARRAY['records'],$1)`, schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, fmt.Sprintf(
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO app_runtime`,
+		dbtest.Table(schema, "sports_users"))); err != nil {
 		t.Fatal(err)
 	}
 	hash, _ := HashPassword("sekret123")
-	if _, err := admin.Exec(ctx,
-		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name)
-		 VALUES ('auth-t','owner@centrum.test',$1,'owner','Budi')`, hash); err != nil {
+	if _, err := admin.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, email, password_hash, role, full_name)
+		 VALUES ('auth-t','owner@centrum.test',$1,'owner','Budi')`,
+		dbtest.Table(schema, "sports_users")), hash); err != nil {
 		t.Fatal(err)
 	}
 
@@ -250,7 +248,7 @@ func TestRegisterKeepsPhone(t *testing.T) {
 
 	var stored string
 	if err := pool.QueryRow(ctx,
-		`SELECT phone FROM project_centrum.sports_users WHERE email='wa@centrum.test'`).Scan(&stored); err != nil {
+		`SELECT phone FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE email='wa@centrum.test'`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored != "628123456789" {
@@ -320,8 +318,8 @@ func TestSessionExpiry(t *testing.T) {
 	// both the revoked app grant and the RLS policy.
 	raw, hash, _ := GenerateSessionToken()
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO project_centrum.sports_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, id, $1, now() - interval '1 hour' FROM project_centrum.sports_users WHERE tenant_id='auth-t'`,
+		`INSERT INTO public.staff_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, id, $1, now() - interval '1 hour' FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t'`,
 		hash); err != nil {
 		t.Fatal(err)
 	}
@@ -340,8 +338,8 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 	defer cancel()
 	raw, hash, _ := GenerateSessionToken()
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO project_centrum.sports_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, id, $1, now() + interval '1 hour' FROM project_centrum.sports_users WHERE tenant_id='auth-t'`,
+		`INSERT INTO public.staff_sessions (tenant_id, user_id, token_hash, expires_at)
+		 SELECT tenant_id, id, $1, now() + interval '1 hour' FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t'`,
 		hash); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +349,7 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var first time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM project_centrum.sports_sessions WHERE token_hash=$1`, hash).Scan(&first); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&first); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,7 +359,7 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var second time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM project_centrum.sports_sessions WHERE token_hash=$1`, hash).Scan(&second); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&second); err != nil {
 		t.Fatal(err)
 	}
 	if !second.Equal(first) {
@@ -370,14 +368,14 @@ func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
 
 	// Backdate last_seen_at > 1 min → next call bumps it.
 	if _, err := admin.Exec(ctx,
-		`UPDATE project_centrum.sports_sessions SET last_seen_at = now() - interval '2 minutes' WHERE token_hash=$1`, hash); err != nil {
+		`UPDATE public.staff_sessions SET last_seen_at = now() - interval '2 minutes' WHERE token_hash=$1`, hash); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.UserByToken(ctx, raw); err != nil {
 		t.Fatal(err)
 	}
 	var third time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM project_centrum.sports_sessions WHERE token_hash=$1`, hash).Scan(&third); err != nil {
+	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&third); err != nil {
 		t.Fatal(err)
 	}
 	if !third.After(first) {
@@ -397,26 +395,25 @@ func TestSessionTenantIsolation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// tenant_id exists and is NOT NULL.
+	// tenant_id exists and is NOT NULL on the platform directory.
 	var nullable string
 	if err := admin.QueryRow(ctx,
 		`SELECT is_nullable FROM information_schema.columns
-		  WHERE table_schema='project_centrum' AND table_name='sports_sessions' AND column_name='tenant_id'`).Scan(&nullable); err != nil {
+		  WHERE table_schema='public' AND table_name='staff_sessions' AND column_name='tenant_id'`).Scan(&nullable); err != nil {
 		t.Fatal(err)
 	}
 	if nullable != "NO" {
-		t.Errorf("sports_sessions.tenant_id is nullable=%q, want NOT NULL", nullable)
+		t.Errorf("staff_sessions.tenant_id is nullable=%q, want NOT NULL", nullable)
 	}
 
-	// The old open policy must be gone; only the tenant policy remains.
-	var open int
-	if err := admin.QueryRow(ctx,
-		`SELECT count(*) FROM pg_policies
-		  WHERE schemaname='project_centrum' AND tablename='sports_sessions' AND policyname='sports_sessions_open'`).Scan(&open); err != nil {
+	// The legacy project-scoped session table is gone after the contract
+	// migration; there is one directory, and it is platform-owned.
+	var legacy *string
+	if err := admin.QueryRow(ctx, `SELECT to_regclass('project_centrum.sports_sessions')::text`).Scan(&legacy); err != nil {
 		t.Fatal(err)
 	}
-	if open != 0 {
-		t.Error("sports_sessions_open (USING true) still present; cross-tenant session read is possible")
+	if legacy != nil {
+		t.Errorf("legacy project_centrum.sports_sessions still exists: %s", *legacy)
 	}
 
 	// create_session stamps the tenant from the user, so a session
@@ -424,7 +421,7 @@ func TestSessionTenantIsolation(t *testing.T) {
 	// one through the definer itself: the harness wipes auth-t rows on
 	// every invocation, so no leftover session can be assumed — and
 	// going through create_session is the stronger assertion anyway,
-	// because it proves the tenant comes from project_centrum.sports_users server-side.
+	// because it proves the tenant comes from sports_users server-side.
 	//
 	// Two statements, not a CTE+JOIN: this mirrors exactly how
 	// production calls it (authapi login: SELECT the function, use the
@@ -434,11 +431,11 @@ func TestSessionTenantIsolation(t *testing.T) {
 	// demonstrably lands — so the test uses the production shape.
 	var uid string
 	if err := admin.QueryRow(ctx,
-		`SELECT id::text FROM project_centrum.sports_users WHERE tenant_id='auth-t' LIMIT 1`).Scan(&uid); err != nil {
+		`SELECT id::text FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t' LIMIT 1`).Scan(&uid); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx,
-		`DELETE FROM project_centrum.sports_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
+		`DELETE FROM public.staff_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
 		t.Fatal(err)
 	}
 	var sid string
@@ -452,14 +449,14 @@ func TestSessionTenantIsolation(t *testing.T) {
 	}
 	var got string
 	if err := admin.QueryRow(ctx,
-		`SELECT tenant_id FROM project_centrum.sports_sessions WHERE id = $1::uuid`, sid).Scan(&got); err != nil {
+		`SELECT tenant_id FROM public.staff_sessions WHERE id = $1::uuid`, sid).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != "auth-t" {
 		t.Errorf("session tenant_id=%q, want auth-t", got)
 	}
 	if _, err := admin.Exec(ctx,
-		`DELETE FROM project_centrum.sports_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
+		`DELETE FROM public.staff_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -477,11 +474,11 @@ func TestSessionDMLRevokedFromRuntime(t *testing.T) {
 	for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
 		var hasPriv bool
 		if err := admin.QueryRow(ctx,
-			`SELECT has_table_privilege('app_runtime', 'project_centrum.sports_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
+			`SELECT has_table_privilege('app_runtime', 'public.staff_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
 			t.Fatal(err)
 		}
 		if hasPriv {
-			t.Errorf("app_runtime still holds %s on project_centrum.sports_sessions; the definer boundary is bypassable", priv)
+			t.Errorf("app_runtime still holds %s on public.staff_sessions; the definer boundary is bypassable", priv)
 		}
 	}
 

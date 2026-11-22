@@ -26,10 +26,10 @@ Rules:
   `project.json` and put tables in `migrations/`. The schema must match
   `^project_[a-z0-9_]{1,55}$`; `public` and platform schemas such as `auth`
   or `private` are rejected by config, the admin API, and the database.
-  Admin provisioning and `migrate check` enforce one client per project
-  schema; `clients.project_key` is the partial unique owner key, so concurrent
-  admin calls cannot claim the same schema. The runtime sets `search_path`
-  from `clients.db_schema`.
+  A partial unique index on `clients.db_schema` allows exactly one client per
+  project schema; admin provisioning turns the race into a 409 and
+  `migrate check` verifies the index. The runtime sets `search_path` from
+  `clients.db_schema`.
 - **Centrum is the route-transition exception.** Its business tables live in
   `project_centrum` (moved by its `0001` project migration). Its frontend now
   uses `/v1/p/centrum/...`; both registries stay populated so
@@ -37,9 +37,14 @@ Rules:
   legacy registration after the stability window. Every project, including
   Centrum, uses its own schema; `public` is platform-only.
 - **`auto_grant` defaults to true.** New projects get the blanket
-  `app_runtime` DML grant after migrations. Centrum sets it false because its
-  grants are deliberate: `sports_sessions` stays SELECT-only for the runtime
-  role, so the definer session functions remain the only write path.
+  `app_runtime` DML grant after migrations. Centrum sets it false so a future
+  table does not silently gain runtime DML; each grant is deliberate.
+- **Every test tenant gets its own cloned schema.** Feature tests use
+  `testutil.CloneTenantSchema`, which clones tables, FKs, triggers, RLS,
+  policies, and grants from `project_centrum`. A test must not query
+  `project_centrum` directly. Staff sessions are the one platform fixture:
+  `SeedStaffSession` writes the user into the clone and the session into
+  `public.staff_sessions`.
 - **New project APIs are mounted at `/v1/p/<slug>/...`.** Two projects may
   both own a feature named `bookings` without colliding.
 - **Add a project folder, then run `go generate ./...`.** The generated

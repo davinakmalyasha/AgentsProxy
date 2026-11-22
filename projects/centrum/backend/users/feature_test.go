@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -31,6 +31,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -44,7 +46,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -52,26 +54,17 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('usr-a','usr-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_users WHERE tenant_id IN ('usr-a','usr-b');
-			 DELETE FROM clients WHERE tenant_id IN ('usr-a','usr-b');`); err != nil {
-			return err
-		}
-		for _, c := range [][]string{
-			{"usr-a", "usr-a", "tok-usr-a"},
-			{"usr-b", "usr-b", "tok-usr-b"},
-		} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "users"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "usr-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "usr-b")
+	for _, c := range []struct{ schema, name, tenant, token string }{
+		{schemaA, "usr-a", "usr-a", "tok-usr-a"},
+		{schemaB, "usr-b", "usr-b", "tok-usr-b"},
+	} {
+		seedClient(t, ctx, adminPool, c.schema, c.name, c.tenant, c.token, 1000000, "active", "records", "users")
 	}
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
@@ -91,7 +84,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -107,23 +100,25 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	_, err := tx.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	)
-	return err
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func seedUser(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant, email, role, name, phone string) string {
+func seedUser(t *testing.T, ctx context.Context, admin *pgxpool.Pool, schema, tenant, email, role, name, phone string) string {
 	t.Helper()
 	var id string
-	if err := admin.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name, phone)
+	if err := admin.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, email, password_hash, role, full_name, phone)
 		 VALUES ($1,$2,'test-hash',$3,$4,NULLIF($5,'')) RETURNING id::text`,
+		testutil.Table(schema, "sports_users")),
 		tenant, email, role, name, phone).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +171,8 @@ func TestUsers_GetOneReturnsFullProfile(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	id := seedUser(t, ctx, h.adminPool, "usr-a", "owner@a.test", "owner", "Owner A", "08150001")
-	phoneless := seedUser(t, ctx, h.adminPool, "usr-a", "staff@a.test", "pegawai", "Staff A", "")
+	id := seedUser(t, ctx, h.adminPool, h.schemaA, "usr-a", "owner@a.test", "owner", "Owner A", "08150001")
+	phoneless := seedUser(t, ctx, h.adminPool, h.schemaA, "usr-a", "staff@a.test", "pegawai", "Staff A", "")
 
 	resp := doReq(t, h.router, "GET", "/users/"+id, "tok-usr-a", "")
 	if resp.StatusCode != 200 {
@@ -215,7 +210,7 @@ func TestUsers_ListAndIsolation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	seedUser(t, ctx, h.adminPool, "usr-a", "owner@a.test", "owner", "Owner A", "")
+	seedUser(t, ctx, h.adminPool, h.schemaA, "usr-a", "owner@a.test", "owner", "Owner A", "")
 
 	resp := doReq(t, h.router, "GET", "/users", "tok-usr-a", "")
 	if resp.StatusCode != 200 {

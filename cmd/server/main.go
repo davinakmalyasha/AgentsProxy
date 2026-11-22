@@ -384,7 +384,7 @@ func main() {
 			runJanitor := func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer ccancel()
-				if _, err := adminPool.Exec(cctx, `DELETE FROM project_centrum.sports_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
+				if _, err := adminPool.Exec(cctx, `DELETE FROM public.staff_sessions WHERE expires_at < now() - interval '7 days'`); err != nil {
 					slog.Warn("janitor sessions", "err", err)
 				}
 				if _, err := adminPool.Exec(cctx, `DELETE FROM agent_reminders WHERE status='sent' AND created_at < now() - interval '90 days'`); err != nil {

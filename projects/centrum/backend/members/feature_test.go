@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -31,6 +30,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -44,7 +45,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -52,21 +53,15 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('mem-a','mem-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_members WHERE tenant_id IN ('mem-a','mem-b');
-			 DELETE FROM clients WHERE tenant_id IN ('mem-a','mem-b');`); err != nil {
-			return err
-		}
-		seedClientTx(t, ctx, tx, "mem-a", "mem-a", "tok-mem-a", 1000000, "active", "records", "members")
-		seedClientTx(t, ctx, tx, "mem-b", "mem-b", "tok-mem-b", 1000000, "active", "records", "members")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "mem-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "mem-b")
+	seedClient(t, ctx, adminPool, schemaA, "mem-a", "mem-a", "tok-mem-a", 1000000, "active", "records", "members")
+	seedClient(t, ctx, adminPool, schemaB, "mem-b", "mem-b", "tok-mem-b", 1000000, "active", "records", "members")
+	adminA := testutil.SchemaPool(t, ctx, adminDSN, schemaA)
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
@@ -85,7 +80,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminA, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -101,26 +96,13 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
-	t.Helper()
-	hash := auth.HashToken(token)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +221,7 @@ func TestMembers_TopupIdempotency(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_centrum.sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -283,7 +265,7 @@ func TestMembers_TopupIdempotencyScopedToMember(t *testing.T) {
 	}
 	var n int
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_centrum.sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM sports_member_topups WHERE tenant_id='mem-a'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -321,7 +303,7 @@ func TestMembers_TombstoneDelete(t *testing.T) {
 	var bal float64
 	var delAt time.Time
 	if err := h.adminPool.QueryRow(ctx,
-		`SELECT balance, deleted_at FROM project_centrum.sports_members WHERE id=$1::uuid`, id).Scan(&bal, &delAt); err != nil {
+		`SELECT balance, deleted_at FROM sports_members WHERE id=$1::uuid`, id).Scan(&bal, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if bal != 50000 || delAt.IsZero() {

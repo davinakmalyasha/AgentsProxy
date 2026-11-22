@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -31,6 +30,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -44,7 +45,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -52,21 +53,14 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('inv-a','inv-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_inventory WHERE tenant_id IN ('inv-a','inv-b');
-			 DELETE FROM clients WHERE tenant_id IN ('inv-a','inv-b');`); err != nil {
-			return err
-		}
-		seedClientTx(t, ctx, tx, "inv-a", "inv-a", "tok-inv-a", 1000000, "active", "records", "inventory")
-		seedClientTx(t, ctx, tx, "inv-b", "inv-b", "tok-inv-b", 1000000, "active", "records", "inventory")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "inv-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "inv-b")
+	seedClient(t, ctx, adminPool, schemaA, "inv-a", "inv-a", "tok-inv-a", 1000000, "active", "records", "inventory")
+	seedClient(t, ctx, adminPool, schemaB, "inv-b", "inv-b", "tok-inv-b", 1000000, "active", "records", "inventory")
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
@@ -85,7 +79,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -101,26 +95,13 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
-	t.Helper()
-	hash := auth.HashToken(token)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/article"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/booking"
@@ -33,11 +35,12 @@ import (
 )
 
 type harness struct {
-	router   http.Handler
-	pool     *pgxpool.Pool
-	redis    *redis.Client
-	mockLLM  *httptest.Server
-	adminKey string
+	router      http.Handler
+	pool        *pgxpool.Pool
+	redis       *redis.Client
+	mockLLM     *httptest.Server
+	adminKey    string
+	alphaSchema string
 }
 
 func mustReq(t *testing.T, req *http.Request) *http.Response {
@@ -72,7 +75,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	migPool, err := db.NewPool(ctx, adminDSN)
@@ -132,8 +135,12 @@ func setup(t *testing.T) *harness {
 		})
 	}))
 
-	seedClient(t, ctx, pool, "alpha", "alpha", "tok-alpha", 100000, "active")
-	seedClient(t, ctx, pool, "bravo", "bravo", "tok-bravo", 100000, "paused")
+	alphaSchema := dbtest.SharedSchema(t, ctx, pool, "project_centrum", "alpha")
+	if err := dbtest.ResetSchema(ctx, pool, alphaSchema); err != nil {
+		t.Fatal(err)
+	}
+	seedClient(t, ctx, pool, alphaSchema, "alpha", "alpha", "tok-alpha", 100000, "active")
+	seedClient(t, ctx, pool, "public", "bravo", "bravo", "tok-bravo", 100000, "paused")
 
 	adminKey := "admin-test-key-12345"
 	cli := &cache.Client{DB: pool, RDB: rdb}
@@ -162,12 +169,12 @@ func setup(t *testing.T) *harness {
 		Auth:    &authapi.Auth{Pool: pool, RDB: rdb},
 		Version: "test",
 	})
-	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey}
+	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey, alphaSchema: alphaSchema}
 	t.Cleanup(h.close)
 	return h
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string) {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	// Default to the full Phase 3 fnb feature set so existing
@@ -175,9 +182,9 @@ func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, ten
 	vertical := "fnb"
 	features := []string{"records", "menu", "booking", "review", "article", "promo"}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		name, tenant, hash, quota, status, vertical, features,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		name, tenant, hash, quota, status, vertical, features, schema,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -391,14 +398,14 @@ func seedStaffUser(t *testing.T, h *harness) string {
 	ctx := context.Background()
 	bcryptHash := "$2a$10$C6UzMDM.H6dfI/f/IKcEeO7CZp1DlVwH7nK2IYwQmYkYQ9Xk2bXkK" // placeholder, never verified in tests
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_users (tenant_id, email, password_hash, role, full_name)
+		`INSERT INTO `+dbtest.Table(h.alphaSchema, "sports_users")+` (tenant_id, email, password_hash, role, full_name)
 		 VALUES ('alpha','owner@test.dev',$1,'owner','Owner Test')
 		 ON CONFLICT (tenant_id, email) DO NOTHING`, bcryptHash); err != nil {
 		t.Fatal(err)
 	}
 	var uid string
 	if err := h.pool.QueryRow(ctx,
-		`SELECT id::text FROM project_centrum.sports_users WHERE tenant_id='alpha' AND email='owner@test.dev'`).Scan(&uid); err != nil {
+		`SELECT id::text FROM `+dbtest.Table(h.alphaSchema, "sports_users")+` WHERE tenant_id='alpha' AND email='owner@test.dev'`).Scan(&uid); err != nil {
 		t.Fatal(err)
 	}
 	raw, hash, err := authapi.GenerateSessionToken()
@@ -408,8 +415,8 @@ func seedStaffUser(t *testing.T, h *harness) string {
 	// tenant_id is NOT NULL as of migration 032, so name it. This runs on
 	// the test's superuser pool; the runtime role cannot insert here at all.
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, $1, $2, now() + interval '1 hour' FROM project_centrum.sports_users WHERE id = $1`,
+		`INSERT INTO public.staff_sessions (tenant_id, user_id, token_hash, expires_at)
+		 VALUES ('alpha', $1, $2, now() + interval '1 hour')`,
 		uid, hash); err != nil {
 		t.Fatal(err)
 	}
@@ -855,6 +862,48 @@ func TestAdmin_CreateEnforcesProjectSchemaBoundary(t *testing.T) {
 			t.Fatalf("schema %q status=%d body=%s, want 400", schema, resp.StatusCode, raw)
 		}
 		resp.Body.Close()
+	}
+}
+
+// TestAdmin_CreateProjectSchemaRace proves the unique index, not just the
+// friendly pre-check: two concurrent creates for the same schema must yield
+// exactly one 201 and one 409.
+func TestAdmin_CreateProjectSchemaRace(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	cleanup := func() {
+		ctx := context.Background()
+		_, _ = h.pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id LIKE 'race-%'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	create := func(tenant string) int {
+		body := `{"name":"` + tenant + `","tenant_id":"` + tenant + `","vertical":"sports","schema":"project_race_test"}`
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		resp := mustReq(t, req)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	start := make(chan struct{})
+	results := make([]int, 2)
+	var wg sync.WaitGroup
+	for i, tenant := range []string{"race-a", "race-b"} {
+		wg.Add(1)
+		go func(i int, tenant string) {
+			defer wg.Done()
+			<-start
+			results[i] = create(tenant)
+		}(i, tenant)
+	}
+	close(start)
+	wg.Wait()
+	if !((results[0] == 201 && results[1] == 409) || (results[0] == 409 && results[1] == 201)) {
+		t.Fatalf("race results=%v, want one 201 and one 409", results)
 	}
 }
 

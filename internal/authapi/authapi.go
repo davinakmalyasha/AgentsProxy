@@ -261,12 +261,12 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "token gen")
 		return
 	}
-	// Session creation goes through a SECURITY DEFINER function
-	// (migration 032). The runtime role no longer holds INSERT on
-	// sports_sessions, and the function derives tenant_id from
-	// sports_users server-side rather than trusting the caller - which
-	// is what removes the ability to mint a session for a user in an
-	// arbitrary tenant.
+	// Session creation goes through a SECURITY DEFINER function. The
+	// runtime role has no direct DML on public.staff_sessions, and the
+	// function derives tenant_id from the project's sports_users
+	// server-side rather than trusting the caller - which is what
+	// removes the ability to mint a session for a user in an arbitrary
+	// tenant.
 	var sessionID *string
 	if err := a.Pool.QueryRow(r.Context(),
 		`SELECT private.create_session($1::uuid, $2, now() + $3::interval)::text`,
@@ -292,8 +292,8 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 	tok := sessionToken(r)
 	if tok != "" {
-		// Definer function, not a direct DELETE: the runtime role lost
-		// DML on sports_sessions in migration 032.
+		// Definer function, not a direct DELETE: the runtime role has no
+		// direct DML on public.staff_sessions.
 		_, _ = a.Pool.Exec(r.Context(),
 			`SELECT private.delete_session($1)`, HashToken(tok))
 		// Evict the cached session so logout is immediate, not 60s.
@@ -321,11 +321,10 @@ func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
 
 // UserByToken resolves a session token to a user, checking expiry.
 //
-// Reads through private.session_user (migration 032). sports_sessions
-// is now tenant-scoped by RLS and this lookup runs with no
-// app.tenant_id set, so a direct read would match nothing. The function
-// is SECURITY DEFINER and returns only these columns, which also
-// keeps password_hash out of reach of a runtime query.
+// Reads through private.session_user, which resolves the platform session
+// row and then the tenant's project schema. The function is SECURITY
+// DEFINER and returns only these columns, which also keeps password_hash
+// out of reach of a runtime query.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	hash := HashToken(tok)
 	if a.RDB != nil {

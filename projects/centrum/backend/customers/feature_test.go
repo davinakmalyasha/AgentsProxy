@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -30,6 +30,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -43,7 +45,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -51,23 +53,17 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('cu-a','cu-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_customers WHERE tenant_id IN ('cu-a','cu-b');
-			 DELETE FROM clients WHERE tenant_id IN ('cu-a','cu-b');`); err != nil {
-			return err
-		}
-		for _, c := range [][]string{{"cu-a", "cu-a", "tok-cu-a"}, {"cu-b", "cu-b", "tok-cu-b"}} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "customers"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "cu-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "cu-b")
+	for _, c := range []struct{ schema, name, tenant, token string }{
+		{schemaA, "cu-a", "cu-a", "tok-cu-a"},
+		{schemaB, "cu-b", "cu-b", "tok-cu-b"},
+	} {
+		seedClient(t, ctx, adminPool, c.schema, c.name, c.tenant, c.token, 1000000, "active", "records", "customers")
 	}
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
@@ -87,7 +83,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -103,15 +99,16 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	_, err := tx.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	)
-	return err
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
@@ -193,14 +190,16 @@ func TestCustomers_VisitsCounted(t *testing.T) {
 	doReq(t, h.router, "POST", "/customers", "tok-cu-a", `{"name":"Alice","phone":"+6282222"}`).Body.Close()
 	// Seed a facility + a confirmed booking named Alice.
 	var facID string
-	if err := h.adminPool.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type) VALUES ('cu-a','Court 1','badminton') RETURNING id::text`,
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, type) VALUES ('cu-a','Court 1','badminton') RETURNING id::text`,
+		testutil.Table(h.schemaA, "sports_facilities")),
 	).Scan(&facID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status)
-		 VALUES ('cu-a',$1::uuid,'2026-09-20','10:00','11:00','Alice','confirmed')`, facID); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, date, start_time, end_time, customer_name, status)
+		 VALUES ('cu-a',$1::uuid,'2026-09-20','10:00','11:00','Alice','confirmed')`,
+		testutil.Table(h.schemaA, "sports_bookings")), facID); err != nil {
 		t.Fatal(err)
 	}
 	resp := doReq(t, h.router, "GET", "/customers", "tok-cu-a", "")
@@ -284,8 +283,9 @@ func TestCustomers_TombstoneDelete(t *testing.T) {
 	// exactly as the payments tombstone stores it.
 	var delBy string
 	var delAt time.Time
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM project_centrum.sports_customers WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT deleted_by, deleted_at FROM %s WHERE id=$1::uuid`,
+		testutil.Table(h.schemaA, "sports_customers")), id).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {

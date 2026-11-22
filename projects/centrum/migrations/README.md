@@ -16,8 +16,15 @@ Project migrations:
   that the project router mounts.
 - `0003_force_rls_kantin.sql` — add the missing `FORCE ROW LEVEL SECURITY`
   to the three kantin tables.
+- `0004_schema_relative_auth.sql` — resolve the tenant schema from
+  `clients.db_schema` in the auth, money-summary, retention, and trigger
+  functions; sessions move to `public.staff_sessions`.
+- `0005_drop_legacy_sessions.sql` — contract step: drop the old
+  project-scoped session table after the binary uses the platform directory.
+- `0006_grant_money_reader_clients.sql` — let the money definer resolve
+  `clients.db_schema`.
 
 New migrations for Centrum go here. Because `project.json` sets
 `"auto_grant": false`, a new table must grant `app_runtime` explicitly:
-Centrum's original grants are deliberate, especially `sports_sessions`,
-which stays SELECT-only for the runtime role.
+Centrum's original grants are deliberate. Staff sessions are platform state
+in `public.staff_sessions`; project users remain in this schema.

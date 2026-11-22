@@ -121,6 +121,21 @@ func InspectMigrationsFS(ctx context.Context, pool *Pool, fsys fs.FS) (*Migratio
 	}
 
 	if hasClients {
+		var uniqueSchema bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM pg_index i
+			    JOIN pg_class c ON c.oid = i.indexrelid
+			    JOIN pg_namespace n ON n.oid = c.relnamespace
+			   WHERE n.nspname = 'public'
+			     AND c.relname = 'clients_project_schema_key'
+			     AND i.indisunique)`).Scan(&uniqueSchema); err != nil {
+			return nil, fmt.Errorf("inspect clients.db_schema uniqueness: %w", err)
+		}
+		if !uniqueSchema {
+			status.Issues = append(status.Issues,
+				"clients.db_schema is not unique; apply migration 079_unique_db_schema.sql")
+		}
 		rows, err := tx.Query(ctx, `SELECT tenant_id, db_schema FROM public.clients`)
 		if err != nil {
 			return nil, fmt.Errorf("read client schemas: %w", err)
@@ -145,9 +160,9 @@ func InspectMigrationsFS(ctx context.Context, pool *Pool, fsys fs.FS) (*Migratio
 	for _, p := range plans {
 		declaredSchemas[p.Schema] = true
 	}
-	// One project schema, one client. Provisioning checks this on write; the
-	// read-only report catches historical or hand-edited drift (and test
-	// databases that intentionally seed multiple tenants in one schema).
+	// One project schema, one client. The database enforces this with the
+	// partial unique index; the read-only report catches drift on databases
+	// that predate 079 or had the index removed by hand.
 	schemaOwners := map[string][]string{}
 	for tenant, schema := range status.ClientSchemas {
 		if strings.HasPrefix(schema, "project_") {

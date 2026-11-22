@@ -13,6 +13,7 @@ import (
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
@@ -70,10 +71,16 @@ func TestReportJobs_BuildAndDownload(t *testing.T) {
 		cpool.Exec(cctx, `DELETE FROM report_objects WHERE tenant_id = $1`, tenant)
 		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
 	})
+	schema := dbtest.SharedSchema(t, ctx, admin, "project_centrum", tenant)
+	if err := dbtest.ResetSchema(ctx, admin, schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `DELETE FROM clients WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := admin.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, db_schema)
-		 VALUES ('rjt', $1, 'rj-test-hash', 1000000, 'active', 'project_centrum')
-		 ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
+		 VALUES ('rjt', $1, 'rj-test-hash', 1000000, 'active', $2)`, tenant, schema); err != nil {
 		t.Fatal(err)
 	}
 
