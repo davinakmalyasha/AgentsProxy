@@ -131,7 +131,7 @@ func TestMigrateProjectsFS_RefusesSchemaChange(t *testing.T) {
 
 // TestMigrateProjectsFS_AutoGrantFalse pins the legacy-project escape hatch:
 // a project that owns its grants must not receive the runner's blanket DML
-// grant. Centrum relies on this for sports_sessions (SELECT-only runtime).
+// grant. Centrum relies on this so new tables keep deliberate grants.
 func TestMigrateProjectsFS_AutoGrantFalse(t *testing.T) {
 	dsn := migrateDSN()
 	if dsn == "" {

@@ -27,7 +27,7 @@ type IdentityDeps struct {
 }
 
 // WithIdentity resolves the request principal:
-//  1. X-Session-Token → staff user (owner/pegawai) via sports_sessions
+//  1. X-Session-Token → staff user (owner/pegawai) via public.staff_sessions
 //  2. fallback X-Client-Token → client (full access) via the cache
 //
 // Public reads (GET /availability, /facilities, /pricing) are allowed

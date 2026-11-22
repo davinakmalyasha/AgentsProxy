@@ -2,9 +2,12 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 )
 
 // TestNormalizePhone pins migration 065 at both layers: the pure
@@ -18,7 +21,7 @@ func TestNormalizePhone(t *testing.T) {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	pool, err := NewPool(ctx, adminDSN)
@@ -56,36 +59,43 @@ func TestNormalizePhone(t *testing.T) {
 		t.Errorf("normalize_phone(NULL) = %v, want NULL", *nullOut)
 	}
 
-	// Triggers canonicalize on write for every writer.
+	// Triggers canonicalize on write for every writer. The tenant owns a
+	// cloned schema so the test proves the trigger follows TG_TABLE_SCHEMA.
 	const tenant = "phone65-test"
+	schema := dbtest.SharedSchema(t, ctx, pool, "project_centrum", tenant)
+	if err := dbtest.ResetSchema(ctx, pool, schema); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cpool, err := NewPool(cctx, adminDSN)
 		if err != nil {
 			return
 		}
 		defer cpool.Close()
-		cpool.Exec(cctx, `DELETE FROM project_centrum.sports_bookings WHERE tenant_id = $1`, tenant)
-		cpool.Exec(cctx, `DELETE FROM project_centrum.sports_customers WHERE tenant_id = $1`, tenant)
 		cpool.Exec(cctx, `DELETE FROM clients WHERE tenant_id = $1`, tenant)
 	})
+	if _, err := pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status)
-		 VALUES ('ph65', $1, 'ph65-hash', 1000000, 'active')
-		 ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, db_schema)
+		 VALUES ('ph65', $1, 'ph65-hash', 1000000, 'active', $2)`, tenant, schema); err != nil {
 		t.Fatal(err)
 	}
 
 	var customerID string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_customers (tenant_id, name, phone)
-		 VALUES ($1, 'Budi', '0812-3456-7890') RETURNING id::text`, tenant).Scan(&customerID); err != nil {
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, phone)
+		 VALUES ($1, 'Budi', '0812-3456-7890') RETURNING id::text`,
+		dbtest.Table(schema, "sports_customers")), tenant).Scan(&customerID); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
-	if err := pool.QueryRow(ctx,
-		`SELECT phone FROM project_centrum.sports_customers WHERE id = $1::uuid`, customerID).Scan(&stored); err != nil {
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT phone FROM %s WHERE id = $1::uuid`,
+		dbtest.Table(schema, "sports_customers")), customerID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored != "+6281234567890" {
@@ -93,9 +103,10 @@ func TestNormalizePhone(t *testing.T) {
 	}
 
 	// Mixed-format duplicate must trip the existing unique constraint.
-	_, err = pool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_customers (tenant_id, name, phone)
-		 VALUES ($1, 'Budi 2', '6281234567890')`, tenant)
+	_, err = pool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, phone)
+		 VALUES ($1, 'Budi 2', '6281234567890')`,
+		dbtest.Table(schema, "sports_customers")), tenant)
 	if err == nil {
 		t.Error("mixed-format duplicate customer accepted, want unique violation")
 	}
@@ -103,16 +114,18 @@ func TestNormalizePhone(t *testing.T) {
 	// Bookings normalize the denormalized copy too (the legacy join is
 	// string equality against customers.phone).
 	var facilityID string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour)
-		 VALUES ($1, 'Court 65', 'badminton', 50000) RETURNING id::text`, tenant).Scan(&facilityID); err != nil {
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, type, price_per_hour)
+		 VALUES ($1, 'Court 65', 'badminton', 50000) RETURNING id::text`,
+		dbtest.Table(schema, "sports_facilities")), tenant).Scan(&facilityID); err != nil {
 		t.Fatal(err)
 	}
 	var bookingPhone string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, price)
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, date, start_time, end_time, customer_name, customer_phone, price)
 		 VALUES ($1, $2::uuid, '2026-10-20', '18:00', '19:00', 'Budi', '+62 812 3456 7890', 50000)
-		 RETURNING customer_phone`, tenant, facilityID).Scan(&bookingPhone); err != nil {
+		 RETURNING customer_phone`,
+		dbtest.Table(schema, "sports_bookings")), tenant, facilityID).Scan(&bookingPhone); err != nil {
 		t.Fatal(err)
 	}
 	if bookingPhone != "+6281234567890" {

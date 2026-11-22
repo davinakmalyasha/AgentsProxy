@@ -173,9 +173,9 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "schema must match project_<slug> (max 63 characters)")
 		return
 	}
-	// One project schema, one client. The check is application-level because
-	// the tenant tables remain RLS-scoped and the feature tests intentionally
-	// seed multiple tenants inside one schema.
+	// One project schema, one client. The partial unique index is the final
+	// guard; this lookup turns the common case into a useful 409 before the
+	// insert rather than a generic constraint error.
 	var schemaOwner string
 	switch err := a.Pool.QueryRow(r.Context(),
 		`SELECT tenant_id FROM public.clients
@@ -207,9 +207,9 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = a.Pool.QueryRow(r.Context(),
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema, project_key)
-		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8) RETURNING id::text`,
-		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema, req.Schema,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7) RETURNING id::text`,
+		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema,
 	).Scan(&id)
 	if err != nil {
 		if pgerr.IsUniqueViolation(err) {

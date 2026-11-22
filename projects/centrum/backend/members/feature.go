@@ -320,18 +320,23 @@ func (h *handler) topup(w http.ResponseWriter, r *http.Request) {
 				return qerr
 			}
 		}
-		if _, err := tx.Exec(r.Context(),
-			`INSERT INTO sports_member_topups (tenant_id, member_id, amount, idempotency_key)
-			 VALUES ($1,$2::uuid,$3,NULLIF($4,''))`,
-			idn.TenantID(), id, req.Amount, idemKey); err != nil {
-			return err
-		}
+		// Update first: an id that does not belong to this tenant must be
+		// a clean 404, not the FK violation the ledger insert would raise.
+		// The row lock also makes the ledger write safe against a
+		// concurrent member delete.
 		err := tx.QueryRow(r.Context(),
 			`UPDATE sports_members SET balance = balance + $1, updated_at = now()
 			  WHERE id = $2::uuid AND tenant_id = $3 AND deleted_at IS NULL
 			  RETURNING balance`,
 			req.Amount, id, idn.TenantID(),
 		).Scan(&newBalance)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(),
+			`INSERT INTO sports_member_topups (tenant_id, member_id, amount, idempotency_key)
+			 VALUES ($1,$2::uuid,$3,NULLIF($4,''))`,
+			idn.TenantID(), id, req.Amount, idemKey)
 		return err
 	})
 	if err != nil {
