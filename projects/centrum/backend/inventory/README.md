@@ -36,12 +36,12 @@ CREATE TABLE sports_inventory (
 ## Endpoints
 
 ```
-POST   /v1/sports/inventory                create (name required, quantity >= 0)
-GET    /v1/sports/inventory                list (with low_stock flag)
-GET    /v1/sports/inventory/{id}           get one
-PATCH  /v1/sports/inventory/{id}           update name/sku/price/threshold/status
-DELETE /v1/sports/inventory/{id}           hard delete
-POST   /v1/sports/inventory/{id}/adjust    {delta} — positive=restock, negative=sale
+POST   /v1/p/centrum/inventory                create (name required, quantity >= 0)
+GET    /v1/p/centrum/inventory                list (with low_stock flag)
+GET    /v1/p/centrum/inventory/{id}           get one
+PATCH  /v1/p/centrum/inventory/{id}           update name/sku/price/threshold/status
+DELETE /v1/p/centrum/inventory/{id}           hard delete
+POST   /v1/p/centrum/inventory/{id}/adjust    {delta} — positive=restock, negative=sale
                                            (409 "insufficient stock" if it'd go negative)
 ```
 

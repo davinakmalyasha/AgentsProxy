@@ -37,11 +37,11 @@ CREATE TABLE sports_facilities (
 ## Endpoints
 
 ```
-POST   /v1/sports/facilities            create (name required, type allow-list, open<close)
-GET    /v1/sports/facilities            list (ordered by name)
-GET    /v1/sports/facilities/{id}       get one
-PATCH  /v1/sports/facilities/{id}       update any field
-DELETE /v1/sports/facilities/{id}       hard delete (fails 500 if bookings reference it)
+POST   /v1/p/centrum/facilities            create (name required, type allow-list, open<close)
+GET    /v1/p/centrum/facilities            list (ordered by name)
+GET    /v1/p/centrum/facilities/{id}       get one
+PATCH  /v1/p/centrum/facilities/{id}       update any field
+DELETE /v1/p/centrum/facilities/{id}       hard delete (fails 500 if bookings reference it)
 ```
 
 ## Tenants using it
