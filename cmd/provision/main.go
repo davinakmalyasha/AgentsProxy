@@ -134,6 +134,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "provision: --owner-email requires --owner-password-stdin or --generate-owner-password")
 		return 2
 	}
+	if o.platform && o.ownerEmail != "" {
+		_, _ = fmt.Fprintln(stderr, "provision: a platform tenant has no project staff provider; omit --owner-email")
+		return 2
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
