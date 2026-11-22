@@ -5,9 +5,8 @@ platform chain created them in `public`; `0001_move_to_project_schema.sql`
 is the one-time move that relocates them and rewrites the definer functions
 that referenced `public.sports_*`.
 
-Centrum's frontend now uses `/v1/p/centrum/*`; `/v1/sports/*` remains a
-one-release rollback alias. The project folder and schema are the real
-boundary.
+Centrum's frontend uses `/v1/p/centrum/*`. The project folder and schema are
+the real boundary; there is no project-owned legacy route alias.
 
 Project migrations:
 - `0001_move_to_project_schema.sql` — move tables out of `public`, rewrite

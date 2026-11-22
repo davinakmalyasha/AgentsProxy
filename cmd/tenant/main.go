@@ -133,12 +133,8 @@ func runCreate(args []string, stdout, stderr io.Writer) int {
 	origins := &csvFlag{}
 	fs.Var(origins, "origin", "frontend origin (repeatable)")
 	platform := fs.Bool("platform", false, "create a platform tenant in public with no projects/<slug> folder")
-	allowMissing := fs.Bool("allow-missing-project", false, "deprecated; use --platform")
 	if err := fs.Parse(args); err != nil {
 		return 2
-	}
-	if *allowMissing {
-		*platform = true
 	}
 	if fs.NArg() != 0 {
 		_, _ = fmt.Fprintf(stderr, "tenant create: unexpected argument %q\n", fs.Arg(0))

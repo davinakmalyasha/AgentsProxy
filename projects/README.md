@@ -30,14 +30,12 @@ Rules:
   project schema; admin provisioning turns the race into a 409 and
   `migrate check` verifies the index. The runtime sets `search_path` from
   `clients.db_schema`.
-- **Centrum is the route-transition exception.** Its business tables live in
-  `project_centrum` (moved by its `0001` project migration). Its frontend now
-  uses `/v1/p/centrum/...`; both registries stay populated so
-  `/v1/sports/...` remains a rollback surface for one release, controlled by
-  `LEGACY_PROJECT_ROUTES`. After the frontend has moved, set it false in
-  staging then production, verify the alias is 404, and remove the dual
-  registration. Every project, including Centrum, uses its own schema;
-  `public` is platform-only.
+- **Centrum is a normal project now.** Its business tables live in
+  `project_centrum` (moved by its `0001` project migration), and its frontend
+  uses `/v1/p/centrum/...`. Project features are registered only in the
+  project registry, so no project tenant creates a `/v1/{vertical}` alias.
+  Every project, including Centrum, uses its own schema; `public` is
+  platform-only.
 - **`features` is the project's default entitlement.** List the feature names
   a new tenant should start with (including `records`). Admin/provision use the
   list as the default `clients.features` for a new tenant; every name must also

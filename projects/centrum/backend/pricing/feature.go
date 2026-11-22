@@ -37,7 +37,7 @@ const SchemaVersion = 1
 func init() { Register() }
 
 func Register() {
-	features.RegisterLegacyProject("centrum", "sports", features.Feature{
+	features.RegisterProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table
 		VerticalSlugs: []string{"sports"},

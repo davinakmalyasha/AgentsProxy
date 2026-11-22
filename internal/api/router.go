@@ -130,10 +130,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/push/subscriptions", pushH.Unsubscribe)
 		}
 
-		// Per-vertical feature platform. Only verticals with live tenants
-		// mount (plus any vertical with registered custom features);
-		// the rest serve nothing today. Zero live tenants — a fresh
-		// database — mounts everything, exactly as before.
+		// Per-vertical feature platform for platform tenants only. A project
+		// tenant is mounted exclusively under /v1/p/<slug>; it never creates
+		// a /v1/{vertical} alias. No live platform vertical means this
+		// surface is empty, which is the intended state for a project-only
+		// deployment.
 		bDeps := features.BuilderDeps{
 			Pool:               d.Pool,
 			Cache:              d.Cache,
@@ -141,10 +142,7 @@ func NewRouter(d Deps) http.Handler {
 			Redis:              d.Redis,
 			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
 		}
-		live := features.LiveVerticals(context.Background(), d.Pool)
-		if !features.LegacyProjectRoutes() {
-			live = features.LivePlatformVerticals(context.Background(), d.Pool)
-		}
+		live := features.LivePlatformVerticals(context.Background(), d.Pool)
 		for _, v := range features.VerticalsToMount(live) {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
@@ -152,8 +150,7 @@ func NewRouter(d Deps) http.Handler {
 
 		// Project-scoped APIs for every project. Each project owns its
 		// handlers and its schema; /v1/p/<slug>/... cannot reach another
-		// project's router or data. Centrum dual-registers its features
-		// so /v1/sports/* keeps working during the frontend cutover.
+		// project's router or data.
 		projectCfgs, badProjects := agentconfig.LoadCollect()
 		for slug, err := range badProjects {
 			slog.Warn("project config unavailable for project routes", "project", slug, "err", err)

@@ -7,15 +7,12 @@ import (
 	"testing"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
-	"github.com/davinakmalyasha/agents-proxy/internal/features"
 )
 
-// TestLegacyProjectRoutesOff pins the retirement switch: a project-owned
-// vertical is not mounted under /v1/{vertical} when the flag is off, while the
-// project-scoped router keeps working.
-func TestLegacyProjectRoutesOff(t *testing.T) {
-	features.SetLegacyProjectRoutes(false)
-	defer features.SetLegacyProjectRoutes(true)
+// TestProjectTenantHasNoLegacyAlias pins the final route split: a project
+// tenant is reachable only under /v1/p/<slug>. /v1/{vertical} is reserved for
+// platform tenants and must not expose a project's handlers or schema.
+func TestProjectTenantHasNoLegacyAlias(t *testing.T) {
 	h := setup(t)
 	srv := httptest.NewServer(h.router)
 	defer srv.Close()

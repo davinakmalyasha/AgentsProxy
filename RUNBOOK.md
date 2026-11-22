@@ -327,8 +327,8 @@ create `tenant_records` in the project schema. If it has a custom agent, add
 compiled project registry must also know each name.
 
 A project's business tables live in its own schema; its frontend uses
-`/v1/p/<slug>/...`. Centrum's frontend is cut over; both that prefix and the
-legacy `/v1/sports/...` alias are mounted while the rollback surface remains.
+`/v1/p/<slug>/...`. `/v1/{vertical}` is platform-only. Centrum's frontend is
+on `/v1/p/centrum/...`, and the old `/v1/sports/...` alias is gone.
 
 ---
 
@@ -420,11 +420,12 @@ binary first, then, in a later contract migration:
    retired with `DROP OWNED BY money_reader` + `DROP ROLE money_reader`.
 3. `migrate check` must stay clean; the daily `schema-check` is the proof.
 
-**Route rollback window.** After the Centrum frontend has used
-`/v1/p/centrum/...` for a full release, set `LEGACY_PROJECT_ROUTES=false` in
-staging first, then production. Verify `/v1/sports/facilities` is 404 and
-`/v1/p/centrum/facilities` is 200. Then remove the flag, the
-`RegisterLegacyProject` dual registration, and the frontend rollback switch.
+**Route contract.** The project-owned vertical alias is retired. Centrum is
+reachable only under `/v1/p/centrum/...`; `/v1/{vertical}` mounts platform
+tenants only. The `LEGACY_PROJECT_ROUTES` flag, `RegisterLegacyProject`, and
+the frontend `NEXT_PUBLIC_PROXY_PREFIX` rollback switch are removed. Verify
+`/v1/sports/facilities` is 404 and `/v1/p/centrum/facilities` is 200 after a
+deploy.
 
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
