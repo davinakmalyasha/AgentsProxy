@@ -404,23 +404,32 @@ The staff-auth ownership release is additive first:
 2. Deploy the binary. `internal/authapi` now uses the provider registry; the
    Centrum provider reads `sports_users` through `tenantdb` with RLS. Login no
    longer scans every project.
-3. After the stability window, apply a contract migration that drops
-   `private.login_user`, `private.create_session`, `private.session_user`,
-   revokes `auth_definer`'s `project_centrum.sports_users` grant, and revokes
-   the `clients.db_schema` column grant. Keep `clients (tenant_id, status)`:
-   `staff_session_create` still validates that the tenant is active. Do this
-   only when no pre-081 binary can still serve traffic.
+3. After the stability window, apply Centrum `0010_contract_legacy_auth.sql`.
+   It drops the three old functions, revokes `auth_definer`'s
+   `project_centrum` access, and grants only `clients (tenant_id, status)`.
+   Keep those two columns: `staff_session_create` still validates that the
+   tenant is active. Do this only when no pre-081 binary can still serve
+   traffic.
 
 The project-data contract follows the same pattern. Centrum `0007`/`0008`
 move staff payments and the money summary into the project schema; deploy the
-binary first, then, in a later contract migration:
+binary first, then apply:
 
-1. Copy any rows written to `public.agent_staff_payments` after `0007` into
-   `project_centrum.sports_staff_payments` (covers writes from an old instance
-   during the deploy window), then drop the public table.
-2. Drop `private.range_summary`; `money_reader` then owns nothing and can be
-   retired with `DROP OWNED BY money_reader` + `DROP ROLE money_reader`.
+1. `0009_contract_staff_payments.sql` copies any rows written to
+   `public.agent_staff_payments` after `0007` into
+   `project_centrum.sports_staff_payments`, verifies none are missing, then
+   drops the public table.
+2. `0011_contract_range_summary.sql` drops `private.range_summary`; it then
+   retires `money_reader` with `DROP OWNED BY money_reader` +
+   `DROP ROLE money_reader`, guarded so an unexpected owned object aborts the
+   migration instead of being silently dropped.
 3. `migrate check` must stay clean; the daily `schema-check` is the proof.
+
+The contract migrations are deliberately at the end of Centrum's project
+chain, not in the platform chain. `MigrateAll` applies platform migrations
+first, and Centrum `0004`/`0006` recreate the legacy auth functions, grants,
+and role. Cleanup has to run after `0008` so a fresh database reaches the same
+final state as an upgraded one.
 
 **Route rollback window.** After the Centrum frontend has used
 `/v1/p/centrum/...` for a full release, set `LEGACY_PROJECT_ROUTES=false` in

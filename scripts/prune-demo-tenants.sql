@@ -68,7 +68,6 @@ FROM (
   UNION ALL SELECT 'sports_kantin_sales', tenant_id FROM project_centrum.sports_kantin_sales
   UNION ALL SELECT 'agent_reminders', tenant_id FROM public.agent_reminders
   UNION ALL SELECT 'sports_staff_payments', tenant_id FROM project_centrum.sports_staff_payments
-  UNION ALL SELECT 'agent_staff_payments', tenant_id FROM public.agent_staff_payments
   UNION ALL SELECT 'notify_jobs', tenant_id FROM public.notify_jobs
 ) t
 WHERE t.tenant_id NOT IN ('centrum', 'dfd-agency');

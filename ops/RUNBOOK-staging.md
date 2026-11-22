@@ -44,9 +44,10 @@ and project ref do not belong together.
 
 ## 2. Apply the embedded migration chain
 
-The migration chain creates `app_runtime`, `auth_definer`, `money_reader`,
-`backup_reader`, and `delivery_caller`. Until it runs, `ALTER ROLE
-app_runtime` fails with `role "app_runtime" does not exist`.
+The migration chain creates `app_runtime`, `auth_definer`, `backup_reader`,
+and `delivery_caller`. It also creates `money_reader` for the historical money
+definer and then retires it in Centrum's contract migrations. Until the chain
+runs, `ALTER ROLE app_runtime` fails with `role "app_runtime" does not exist`.
 
 Copy `.env.staging.example` to `.env.staging` (gitignored), fill the staging
 admin DSN, then:
@@ -68,11 +69,12 @@ password. The same pattern applies to `backup_reader` and `delivery_caller`
 if you test backup/delivery on staging.
 
 This creates the platform tables, `app_runtime`, `auth_definer`,
-`money_reader`, `backup_reader`, `project_centrum`, `public.staff_sessions`,
-and applies Centrum's project migrations (`0001` schema move, `0002` records,
-`0003` FORCE RLS, `0004` schema-relative auth, `0005` legacy-session drop,
-`0006` money-reader schema grant, `0007` staff-payments move, `0008`
-project money summary) plus platform `081_staff_sessions_generic.sql`. Verify:
+`backup_reader`, `project_centrum`, `public.staff_sessions`, and applies
+Centrum's project migrations (`0001` schema move, `0002` records, `0003` FORCE
+RLS, `0004` schema-relative auth, `0005` legacy-session drop, `0006`
+money-reader schema grant, `0007` staff-payments move, `0008` project money
+summary, `0009` payroll contract, `0010` legacy-auth contract, `0011`
+range-summary contract) plus platform `081_staff_sessions_generic.sql`. Verify:
 
 ```sql
 select count(*) from pg_namespace where nspname = 'project_centrum';
