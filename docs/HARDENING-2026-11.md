@@ -148,14 +148,18 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
 - [x] Centrum `next`/`eslint-config-next` → 16.4.6; Dependabot #16 closed.
   `npm audit --omit=dev` is clean, `npm run check` is 14 files/159 tests, and
   `npm run build` passes.
-- [ ] Backup RPO: PITR if budget allows, else a reliable 2-hour scheduler.
-  Restore correctness is fixed; the RPO decision still belongs to the
-  operator.
-- [~] DFD: `api.dfdagency.com` plus one shared origin config. The two
-  hardcoded copies now import `client/api-origin.mjs`; the production pin and
-  preview fail-closed behavior are unchanged. Adding the custom domain is a
-  DNS decision.
-- [ ] GitHub Team + second reviewer, or documented accepted risk.
+- [~] Backup RPO: the logical dump remains 6-hourly (RPO up to 6h).
+  Restore correctness is fixed and the drill is green. PITR or a reliable
+  2-hour scheduler is a budget/scheduler decision; GitHub's schedule is
+  best-effort, so do not claim a tighter RPO without it.
+- [~] DFD origin: the two hardcoded copies now import
+  `client/api-origin.mjs`; the production pin and preview fail-closed
+  behavior are unchanged. Adding `api.dfdagency.com` is a DNS decision.
+- [-] GitHub reviewer: accepted risk for now. The repository is private on
+  Free and has one maintainer; the enforced controls are the three required
+  checks, strict branch updates, and `enforce_admins`. A required reviewer
+  needs GitHub Team plus a second trusted person, otherwise it locks out the
+  only maintainer.
 
 These are tracked in `RUNBOOK.md` and are not blockers for the
 architecture work above.
