@@ -96,11 +96,40 @@ func TestDefiners_AsAppRuntime(t *testing.T) {
 		t.Errorf("month_tokens unknown = %d, want 0", total)
 	}
 
-	// INSERT still allowed (usage_write_runtime kept).
-	if _, err := runtimePool.Exec(ctx,
+	// INSERT for the authenticated client is allowed; the policy binds the
+	// row to app.client_id.
+	tx, err := runtimePool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.client_id', $1, true)`, clientID); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind)
 		 VALUES ($1::uuid, 1, 1, 0, 'm', 'chat')`, clientID); err != nil {
-		t.Errorf("INSERT on usage as app_runtime should work: %v", err)
+		_ = tx.Rollback(ctx)
+		t.Errorf("INSERT on usage for the authenticated client should work: %v", err)
+	} else if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A write for another client under the same GUC must be denied.
+	tx, err = runtimePool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.client_id', $1, true)`, clientID); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind)
+		 VALUES ($1::uuid, 1, 1, 0, 'm', 'chat')`, clientB)
+	_ = tx.Rollback(ctx)
+	if err == nil {
+		t.Error("app_runtime inserted usage for another client; policy did not bind app.client_id")
 	}
 
 	// Report manifest round-trip through the definers.

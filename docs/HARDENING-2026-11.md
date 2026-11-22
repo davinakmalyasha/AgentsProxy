@@ -71,13 +71,13 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
   schema in the project router. Run the runtime-role check in staging
   too.
 
-- [~] **P1-2 RLS regressions and honesty.**
-  `063` re-adds the blanket `usage_read_runtime` policy that `053`
-  deliberately dropped; `usage` INSERT is `WITH CHECK (true)`; ADK
-  session tables use `USING (true)` with no tenant predicate. Fix: drop
-  the usage read policy, scope the write, and tenant-scope the ADK
-  tables or document the application-enforced boundary explicitly.
-  Document RLS as defense-in-depth, not the sole boundary.
+- [x] **P1-2 RLS regressions and honesty.**
+  `063` re-added the blanket `usage_read_runtime` policy that `053`
+  deliberately dropped; `usage` INSERT was `WITH CHECK (true)`; ADK
+  session tables used `USING (true)` with no tenant predicate. Fix:
+  drop the usage read policy, bind the usage insert to `app.client_id`
+  (086), and tenant-scope the ADK tables on `app_name = app.tenant_id`
+  (085). The session service sets the GUC in every transaction.
 
 - [x] **P1-3 One project manifest.**
   `agentconfig`, `db/project_migrations.go`, and `cmd/genprojects` apply
@@ -197,11 +197,6 @@ architecture work above.
 
 ## Accepted residual / follow-up
 
-- **ADK session tables** (`sessions/events/app_states/user_states`) still use
-  `USING (true)`; `pgx_sessions.go` filters `app_name` in every query. This is
-  application-enforced. A tenant_id column + restrictive policy is a
-  security-pass migration, not an architectural prerequisite for the route
-  and auth fixes above. Documented in `ARCHITECTURE.md`.
 - **Docker build** is fixed in `.dockerignore` and added to CI, but Docker is
   not installed on this workstation; the CI job is the verification gate.
 - **Login rate limit / lockout, push SSRF allowlist, admin audit trail,
@@ -225,10 +220,15 @@ architecture work above.
 | P0-5 | `scripts/test-local.sh`, `internal/testsafety/guard.go`, `internal/db/guard_test.go`, `internal/api/api_test.go`, `internal/dbtest/clone_test.go`, `projects/centrum/backend/testutil/testutil.go` |
 | P0-6 | `.github/workflows/backup.yml`, `schema-check.yml` |
 | P1-1 | `internal/tenantdb/tenantdb.go`, `internal/features/shared/records/{handlers,feature_adapter,identity}.go`, `internal/features/project_builder.go` |
-| P1-2 | `internal/db/migrations/084_drop_usage_read_policy.sql`, `internal/db/rls_enable_test.go`, `ARCHITECTURE.md` |
+| P1-2 | `internal/db/migrations/{084_drop_usage_read_policy,085_adk_sessions_tenant_rls,086_usage_client_scope}.sql`, `internal/adkrunner/pgx_sessions.go`, `internal/usage/store.go`, `internal/db/{adk_rls_test,rls_enable_test,definers_test}.go`, `ARCHITECTURE.md` |
 | P1-3 | `internal/agentconfig/{config,load}.go`, `internal/features/registry.go`, `internal/db/project_migrations.go`, `cmd/migrate/main.go` |
 | P1-4 | `internal/api/agent_chat.go` |
 | P1-5 | `internal/db/{migrate,migration_status,project_migrations}.go`, `ops/backup.sh` |
 | P1-6 | `.dockerignore`, `.github/workflows/ci.yml` |
 | P1-7 | `internal/config/{config,database,server}.go`, `cmd/server/main.go`, `.env.staging.example` |
 | P1-8 | `cmd/provision/main.go`, `cmd/migrate/main.go`, `.github/workflows/db-migrate.yml` |
+- P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
+  GUC sees only its app, cross-tenant insert rejected) and
+  `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with
+  `app.client_id`) pass.
+- Final P1-2 full suite: `go test -p 1 ./... -count=1` — `exit=0`.

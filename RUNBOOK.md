@@ -397,6 +397,13 @@ update both workflows.
 schema. Additive, backward-compatible migrations may ship with their code,
 but the binary must never require a column the database does not have yet.
 
+**Exception — fail-closed RLS policies (085/086).** These migrations make
+ADK sessions and usage inserts require `app.tenant_id` / `app.client_id`.
+The old binary does not set those GUCs, so deploy the new binary first, wait
+for `/healthz` to report the new version, then run `db-migrate apply`. The
+new binary works under the old permissive policies during that window; the
+reverse order would break live traffic.
+
 The schema-clone/auth release follows the expand/contract order:
 
 1. Apply `077`–`079` and Centrum `0004`/`0006`. The auth functions keep the

@@ -127,10 +127,27 @@ func TestClientsUsageRLSEnabled(t *testing.T) {
 	if n != 1 {
 		t.Errorf("app_runtime sees %d client rows, want 1 (policy should be permissive)", n)
 	}
-	if _, err := runtimePool.Exec(ctx,
+	var clientID string
+	if err := adminPool.QueryRow(ctx,
+		`SELECT id::text FROM clients WHERE tenant_id = $1`, tenant).Scan(&clientID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := runtimePool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.client_id', $1, true)`, clientID); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind)
-		 SELECT id, 1, 1, 0, 'test-model', 'chat' FROM clients WHERE tenant_id = $1`, tenant); err != nil {
+		 VALUES ($1::uuid, 1, 1, 0, 'test-model', 'chat')`, clientID); err != nil {
+		_ = tx.Rollback(ctx)
 		t.Fatalf("app_runtime INSERT usage under RLS: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 	// No SELECT policy means RLS filters every row, including the row just
 	// inserted. The quota path uses private.month_tokens instead.
