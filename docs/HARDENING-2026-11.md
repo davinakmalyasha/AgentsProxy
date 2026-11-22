@@ -187,13 +187,18 @@ architecture work above.
 - Final full local suite: `go test -p 1 ./... -count=1` — `exit=0`.
 - Production backup run 45078864220: dump + restore-smoke green.
 - Production `db-migrate` run 45079048441: applied `082` and `084`; ledger
-  check clean. `schema-check` run 45079228695 and `smoke` run 45079229484
-  passed.
+  check clean. Follow-up run 45084687570 applied `085` and `086` after the
+  new binary was live. `schema-check` run 45084851243 and `smoke` run
+  45084851034 passed.
+- Production ADK smoke after `085`: `POST /v1/agent/client-chat` returned a
+  reply (the session service set `app.tenant_id` and the scoped policies
+  allowed the write/read).
 - Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
   `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
   DFD frontends healthy.
-- Staging after `082`/`084`: `migrations clean`; preview `46a0f4c` healthy
-  with the same 404/200 route contract.
+- Staging after `085`/`086`: `migrations clean`; preview `1e531cc` healthy
+  with the same 404/200 route contract; the four ADK policies and the usage
+  insert policy match the production definitions.
 
 ## Accepted residual / follow-up
 
