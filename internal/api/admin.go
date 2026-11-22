@@ -18,16 +18,20 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
+	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
+	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
 )
 
 type Admin struct {
-	Pool  *pgxpool.Pool
-	Cache *cache.Client
+	Pool     *pgxpool.Pool
+	Cache    *cache.Client
+	Projects ProjectCatalog
+	Auth     *authapi.Auth
 }
 
 var projectSchemaRe = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
@@ -108,6 +112,57 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// A projects/<slug>/ folder is what makes a tenant a project. Without
+	// one the tenant is a platform tenant and lives in public; it must not
+	// claim a project_* schema, because that schema has no project tables.
+	var project *agentconfig.Project
+	if a.Projects != nil {
+		p, err := a.Projects.Get(req.TenantID)
+		switch {
+		case err == nil:
+			if err := agentconfig.Validate(p, agentconfig.DefaultBudget()); err != nil {
+				slog.Error("admin project config", "tenant", req.TenantID, "err", err)
+				writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+				return
+			}
+			project = p
+		case errors.Is(err, ErrProjectNotFound):
+			// Platform tenant: no custom code, no project schema.
+		default:
+			slog.Error("admin project config", "tenant", req.TenantID, "err", err)
+			writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+			return
+		}
+	}
+	if project != nil {
+		if req.Schema != "" && req.Schema != project.Schema {
+			writeJSONError(w, http.StatusBadRequest, "schema does not match project.json")
+			return
+		}
+		req.Schema = project.Schema
+		if req.Vertical == "" {
+			req.Vertical = project.Vertical
+		}
+		if req.Vertical != project.Vertical {
+			writeJSONError(w, http.StatusBadRequest, "vertical does not match project.json")
+			return
+		}
+	} else {
+		if req.Schema == "" {
+			req.Schema = "public"
+		}
+		if req.Schema != "public" {
+			writeJSONError(w, http.StatusBadRequest,
+				"no projects/"+req.TenantID+" folder; a project schema requires one (use schema=public for a platform tenant)")
+			return
+		}
+	}
+	if req.Schema != "public" && !projectSchemaRe.MatchString(req.Schema) {
+		writeJSONError(w, http.StatusBadRequest, "schema must match project_<slug> (max 63 characters)")
+		return
+	}
+
 	// Default vertical.
 	if req.Vertical == "" {
 		req.Vertical = "fnb"
@@ -116,30 +171,34 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "unknown vertical: "+req.Vertical)
 		return
 	}
-	// Default features = DefaultSetFor(vertical), plus the project's own
-	// registered features. A new project's custom features are part of its
-	// identity, not an opt-in the operator has to remember.
+
+	// Default features: project.json is the project's declared default set;
+	// otherwise the vertical default plus every compiled project feature. A
+	// caller may pass a subset, but every name must be known and allowed.
 	if len(req.Features) == 0 {
-		req.Features = features.DefaultSetFor(req.Vertical)
-		for _, f := range features.ProjectFeatures(req.TenantID) {
-			if features.ProjectFeatureAllowed(req.TenantID, f.Name, req.Vertical) &&
-				!containsString(req.Features, f.Name) {
-				req.Features = append(req.Features, f.Name)
-			}
-		}
-	} else {
-		// Validate every requested feature is known + allowed for the vertical.
-		for _, f := range req.Features {
-			if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(req.TenantID, f) {
-				writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
-				return
-			}
-			if !featureAllowedForClient(req.TenantID, req.Vertical, f) {
-				writeJSONError(w, http.StatusBadRequest, "feature "+f+" not allowed for vertical "+req.Vertical)
-				return
+		if project != nil && len(project.Features) > 0 {
+			req.Features = append([]string(nil), project.Features...)
+		} else {
+			req.Features = features.DefaultSetFor(req.Vertical)
+			for _, f := range features.ProjectFeatures(req.TenantID) {
+				if features.ProjectFeatureAllowed(req.TenantID, f.Name, req.Vertical) &&
+					!containsString(req.Features, f.Name) {
+					req.Features = append(req.Features, f.Name)
+				}
 			}
 		}
 	}
+	for _, f := range req.Features {
+		if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(req.TenantID, f) {
+			writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
+			return
+		}
+		if !featureAllowedForClient(req.TenantID, req.Vertical, f) {
+			writeJSONError(w, http.StatusBadRequest, "feature "+f+" not allowed for vertical "+req.Vertical)
+			return
+		}
+	}
+
 	if req.MonthlyQuotaTokens == 0 {
 		req.MonthlyQuotaTokens = 500000
 	}
@@ -147,50 +206,47 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// A project owns its business tables in its own schema. The schema
-	// namespace is project_*; "public" is reserved for the legacy platform
-	// tenant (dfd-agency), which owns no project folder. If the tenant has a
-	// project folder, its project.json is authoritative, so provisioning
-	// cannot silently put the row in a different schema.
-	if dir, err := agentconfig.DirForSlug(req.TenantID); err == nil {
-		p, err := agentconfig.LoadSingle(dir)
+
+	// DDL belongs to the deploy step. A project client can only be created
+	// after migrate apply has created its schema and recorded every project
+	// migration; otherwise the tenant is born pointing at an empty schema.
+	if project != nil {
+		ready, err := a.Projects.Ready(r.Context(), project)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+			slog.Error("admin project readiness", "tenant", req.TenantID, "err", err)
+			writeJSONError(w, http.StatusConflict,
+				"project schema is not provisionable; run migrate apply and migrate check")
 			return
 		}
-		if p.Schema != "" {
-			if req.Schema != "" && req.Schema != p.Schema {
-				writeJSONError(w, http.StatusBadRequest, "schema does not match project.json")
-				return
-			}
-			req.Schema = p.Schema
+		if !ready {
+			writeJSONError(w, http.StatusConflict,
+				"project schema is not migrated; run migrate apply first")
+			return
 		}
 	}
-	if req.Schema == "" {
-		req.Schema = "project_" + strings.ReplaceAll(req.TenantID, "-", "_")
-	}
-	if !projectSchemaRe.MatchString(req.Schema) {
-		writeJSONError(w, http.StatusBadRequest, "schema must match project_<slug> (max 63 characters)")
-		return
-	}
+
 	// One project schema, one client. The partial unique index is the final
 	// guard; this lookup turns the common case into a useful 409 before the
-	// insert rather than a generic constraint error.
-	var schemaOwner string
-	switch err := a.Pool.QueryRow(r.Context(),
-		`SELECT tenant_id FROM public.clients
-		  WHERE db_schema = $1 AND db_schema LIKE 'project\_%'`, req.Schema).Scan(&schemaOwner); {
-	case err == nil:
-		writeJSONError(w, http.StatusConflict, "schema already belongs to tenant "+schemaOwner)
-		return
-	case errors.Is(err, pgx.ErrNoRows):
-		// Available.
-	default:
-		writeJSONError(w, http.StatusInternalServerError, "internal")
-		return
+	// insert rather than a generic constraint error. Platform tenants share
+	// public, so the check is project-only.
+	if req.Schema != "public" {
+		var schemaOwner string
+		switch err := a.Pool.QueryRow(r.Context(),
+			`SELECT tenant_id FROM public.clients
+			  WHERE db_schema = $1 AND db_schema LIKE 'project\_%'`, req.Schema).Scan(&schemaOwner); {
+		case err == nil:
+			writeJSONError(w, http.StatusConflict, "schema already belongs to tenant "+schemaOwner)
+			return
+		case errors.Is(err, pgx.ErrNoRows):
+			// Available.
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
-	// Validate origins before creating anything: a bad origin must
-	// fail the whole provisioning call, not half of it.
+
+	// Validate origins before creating anything: a bad origin must fail the
+	// whole provisioning call, not half of it.
 	validOrigins := make([]string, 0, len(req.Origins))
 	for _, raw := range req.Origins {
 		o, err := middleware.ValidateOrigin(raw)
@@ -205,8 +261,16 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "token gen")
 		return
 	}
+
+	tx, err := a.Pool.Begin(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
 	var id string
-	err = a.Pool.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
 		 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7) RETURNING id::text`,
 		req.Name, req.TenantID, hash, req.MonthlyQuotaTokens, req.Vertical, req.Features, req.Schema,
@@ -219,24 +283,22 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// Create the project schema now so search_path never points at a
-	// non-existent schema. Project migrations add the tables later.
-	if req.Schema != "public" {
-		ident := pgx.Identifier{req.Schema}.Sanitize()
-		if _, err := a.Pool.Exec(r.Context(), `CREATE SCHEMA IF NOT EXISTS `+ident); err != nil {
-			_, _ = a.Pool.Exec(r.Context(), `DELETE FROM clients WHERE id = $1::uuid`, id)
-			slog.Error("admin schema provisioning failed", "tenant", req.TenantID, "schema", req.Schema, "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "schema provisioning failed")
-			return
-		}
-		if _, err := a.Pool.Exec(r.Context(), `GRANT USAGE ON SCHEMA `+ident+` TO app_runtime`); err != nil {
-			_, _ = a.Pool.Exec(r.Context(), `DELETE FROM clients WHERE id = $1::uuid`, id)
-			_, _ = a.Pool.Exec(r.Context(), `DROP SCHEMA IF EXISTS `+ident+` CASCADE`)
-			slog.Error("admin schema grant failed", "tenant", req.TenantID, "schema", req.Schema, "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "schema provisioning failed")
+	for _, o := range validOrigins {
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO frontend_origins (tenant_id, origin, label, created_by)
+			 VALUES ($1, $2, 'provisioning', 'provisioning')
+			 ON CONFLICT (tenant_id, origin) DO NOTHING`,
+			req.TenantID, o); err != nil {
+			slog.Error("admin origins provisioning failed", "tenant", req.TenantID, "origin", o, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "origin provisioning failed")
 			return
 		}
 	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, createClientResp{
 		ID:                 id,
 		Name:               req.Name,
@@ -247,24 +309,97 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 		Features:           req.Features,
 		Schema:             req.Schema,
 	})
-	// Register validated origins (created_by marks the provisioning path).
-	// Best-effort after the client exists: the tenant is usable without
-	// them (env allowlist still merges), and a failed insert here must
-	// not roll back provisioning — the admin origins endpoint retries it.
-	for _, o := range validOrigins {
-		if _, err := a.Pool.Exec(r.Context(),
-			`INSERT INTO frontend_origins (tenant_id, origin, label, created_by)
-			 VALUES ($1, $2, 'provisioning', 'provisioning')
-			 ON CONFLICT (tenant_id, origin) DO NOTHING`,
-			req.TenantID, o); err != nil {
-			slog.Warn("admin origins provisioning failed", "tenant", req.TenantID, "origin", o, "err", err)
-		}
-	}
 	// A fresh tenant must resolve immediately: clear any negative
 	// tenant-known entry so public reads don't 404 it for 30s.
 	if err := records.EvictTenantKnown(r.Context(), cache.RDBOf(a.Cache), req.TenantID); err != nil {
 		slog.Warn("admin tenant evict failed", "tenant", req.TenantID, "err", err)
 	}
+}
+
+type seedOwnerReq struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	FullName string `json:"full_name"`
+	Phone    string `json:"phone"`
+	Role     string `json:"role"` // owner (default) | pegawai
+}
+
+// SeedOwner bootstraps the first staff user for an existing client. It is
+// admin-key protected, so it does not need an owner session. The project's
+// auth provider decides which table the row belongs to; a platform tenant
+// with no provider returns 400 rather than silently writing nowhere.
+func (a *Admin) SeedOwner(w http.ResponseWriter, r *http.Request) {
+	if a.Auth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "staff auth is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var tenantID, status string
+	if err := a.Pool.QueryRow(r.Context(),
+		`SELECT tenant_id, status FROM clients WHERE id = $1::uuid`, id).
+		Scan(&tenantID, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if status != "active" {
+		writeJSONError(w, http.StatusConflict, "client is "+status)
+		return
+	}
+	var req seedOwnerReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.FullName = strings.TrimSpace(req.FullName)
+	if !strings.Contains(req.Email, "@") {
+		writeJSONError(w, http.StatusBadRequest, "email invalid")
+		return
+	}
+	if len(req.Password) < 8 {
+		writeJSONError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	role := req.Role
+	if role == "" {
+		role = clientctx.RoleOwner
+	}
+	if role != clientctx.RoleOwner && role != clientctx.RoleStaff {
+		writeJSONError(w, http.StatusBadRequest, "role must be owner or pegawai")
+		return
+	}
+	hash, err := authapi.HashPassword(req.Password)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	u, err := a.Auth.RegisterUser(r.Context(), tenantID, authapi.RegisterInput{
+		Email:        req.Email,
+		PasswordHash: hash,
+		Role:         role,
+		FullName:     req.FullName,
+		Phone:        req.Phone,
+	})
+	switch {
+	case errors.Is(err, authapi.ErrEmailTaken):
+		writeJSONError(w, http.StatusConflict, "email already registered")
+		return
+	case errors.Is(err, authapi.ErrInvalidRole):
+		writeJSONError(w, http.StatusBadRequest, "role must be owner or pegawai")
+		return
+	case errors.Is(err, authapi.ErrInvalidCredentials):
+		writeJSONError(w, http.StatusBadRequest, "staff auth is not configured for this tenant")
+		return
+	case err != nil:
+		slog.Error("admin seed owner", "tenant", tenantID, "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"user": u})
 }
 
 func (a *Admin) List(w http.ResponseWriter, r *http.Request) {

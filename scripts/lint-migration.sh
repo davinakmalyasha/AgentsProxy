@@ -9,9 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
-for f in internal/db/migrations/*.sql; do
+for f in internal/db/migrations/*.sql projects/*/migrations/*.sql; do
   case "$f" in
-    *042_drop_telegram.sql|*071_drop_invite_columns.sql|*080_drop_project_key.sql) continue ;;
+    *042_drop_telegram.sql|*071_drop_invite_columns.sql|*080_drop_project_key.sql|*0005_drop_legacy_sessions.sql) continue ;;
   esac
   # Strip -- comments so documented words ("never DROP COLUMN") don't trip it.
   body=$(grep -v '^[[:space:]]*--' "$f" || true)
@@ -25,4 +25,5 @@ for f in internal/db/migrations/*.sql; do
   done
 done
 if [ "$fail" = 1 ]; then exit 1; fi
-echo "migrations additive-clean ($(ls internal/db/migrations/*.sql | wc -l) files checked)"
+count=$(( $(ls internal/db/migrations/*.sql | wc -l) + $(ls projects/*/migrations/*.sql | wc -l) ))
+echo "migrations additive-clean ($count files checked)"

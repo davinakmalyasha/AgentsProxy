@@ -1,12 +1,6 @@
 package agentstools
 
-import (
-	"context"
-	"fmt"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-)
+import "time"
 
 // WibNow returns now in WIB (UTC+7, no DST). FixedZone avoids tzdata
 // dependency on Windows containers.
@@ -41,39 +35,4 @@ func DefaultMonthRange(from, to string) (string, string) {
 	first := now.Format("2006-01") + "-01"
 	next := now.AddDate(0, 1, 0).Format("2006-01-02")
 	return first, next
-}
-
-// Basis is one range's money, both ways.
-type Basis struct {
-	Cash   float64 // payments, method=cash
-	QRIS   float64 // payments, method=qris
-	Other  float64 // payments, any other method (transfer/card/...)
-	Booked float64 // COALESCE(override_price, price) over live bookings
-	Kantin float64 // canteen sales
-	Count  int     // payments counted
-}
-
-// Received is money actually taken: payments, plus canteen sales.
-func (b Basis) Received() float64 { return b.Cash + b.QRIS + b.Other + b.Kantin }
-
-// LoadBasis reads both bases for [from, to). Payment and expense dates are
-// timestamptz and are compared in WIB, matching how they are entered;
-// booking and expense dates are plain dates.
-//
-// One round trip via private.range_summary (migration 056); the three
-// per-table SELECTs it replaced are the function's subqueries verbatim.
-func LoadBasis(ctx context.Context, tx pgx.Tx, tenantID, from, to string) (Basis, error) {
-	s, err := LoadRangeSummary(ctx, tx, tenantID, from, to)
-	if err != nil {
-		return Basis{}, err
-	}
-	return s.Basis(), nil
-}
-
-// Describe renders the basis in one sentence so every tool phrases the
-// same two numbers the same way. Idr, not %.0f: one rounding rule
-// (half-up) everywhere instead of Go's half-to-even % formatting.
-func (b Basis) Describe() string {
-	return fmt.Sprintf("terima %s (cash %s, qris %s, kantin %s), teresan %s",
-		Idr(b.Received()), Idr(b.Cash), Idr(b.QRIS), Idr(b.Kantin), Idr(b.Booked))
 }

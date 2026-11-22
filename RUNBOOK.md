@@ -260,8 +260,9 @@ curl -s -X POST https://<host>/v1/admin/clients \
   -d '{"name":"warung-sari","tenant_id":"warung-sari","vertical":"fnb","schema":"project_warung_sari","monthly_quota_tokens":500000}'
 # -> returns {id, name, tenant_id, token, schema, monthly_quota_tokens}
 #    The token is shown ONCE. Save it now.
-#    schema is optional; it defaults to project_<tenant_id with hyphens as underscores>.
-#    Every project, including centrum, uses project_<slug>; public is platform-only.
+#    A project_* schema requires projects/<slug>/project.json and a clean
+#    project ledger (run migrate first). Omit schema for a platform tenant;
+#    it goes to public. Every project, including centrum, uses project_<slug>.
 
 # 2. Inject into the new frontend project:
 #    NEXT_PUBLIC_AGENTS_PROXY_URL=https://<host>
@@ -278,32 +279,52 @@ curl -X PATCH https://<host>/v1/admin/clients/<id> \
   -d '{"status":"paused"}'
 ```
 
-The same flow through the operator CLI (recommended: it refuses plain HTTP,
-checks `projects/<slug>/project.json`, and never prints the token twice):
+A project tenant is born in this order. The folder and its schema must exist
+before the client row does; the admin API never creates DDL.
 
 ```bash
+# 1. Add projects/<slug>/project.json and migrations/, deploy the build.
+# 2. Apply platform + project migrations (creates the schema and ledger).
+go run ./cmd/migrate
+
+# 3. One audited command: validate, create the client, seed the first owner.
 export AGENTS_PROXY_URL=https://<host>
 export ADMIN_API_KEY=...                    # from the password manager
+export DATABASE_ADMIN_URL=...               # only for the migrate step
 
-go run ./cmd/tenant create --slug warung-sari --name "Warung Sari" --vertical fnb
-# The CLI requires projects/warung-sari/project.json by default. A platform
-# row with no project folder is the exception, not the normal path:
-#   --allow-missing-project
+go run ./cmd/provision --slug warung-sari --name "Warung Sari" \
+  --owner-email owner@warung-sari.example --generate-owner-password
+```
+
+`cmd/provision` prints the client token and the generated owner password
+once. It pauses the client if owner seeding fails, so an active ownerless
+tenant is not left behind. A platform tenant (no project folder, shared
+`public` schema) uses `--platform`:
+
+```bash
+go run ./cmd/provision --platform --slug mail --name "Mail" \
+  --owner-email owner@mail.example --generate-owner-password
+```
+
+The lower-level path is still available:
+
+```bash
+go run ./cmd/tenant create --slug warung-sari --name "Warung Sari"
 go run ./cmd/tenant list
 go run ./cmd/tenant patch --tenant warung-sari --status paused
 go run ./cmd/tenant usage --tenant warung-sari
 ```
 
-The admin call creates the `clients` row and its project schema. If the
-project has `projects/<slug>/migrations/*.sql`, run the migration deploy step:
-
-```bash
-go run ./cmd/migrate   # platform + every project schema
-```
+The admin API rejects a `project_*` schema unless the folder exists, the
+folder's `project.json` matches the schema, and the project ledger is
+complete. `--platform` selects `public`; a project slug with a folder cannot
+be created as a platform tenant.
 
 If the project uses the generic records feature, its `0001_init.sql` must
 create `tenant_records` in the project schema. If it has a custom agent, add
 `projects/<slug>/agent/` and run `go generate ./...` before deploying.
+`project.json.features` is the default entitlement for a new tenant; the
+compiled project registry must also know each name.
 
 A project's business tables live in its own schema; its frontend uses
 `/v1/p/<slug>/...`. Centrum's frontend is cut over; both that prefix and the
@@ -385,6 +406,17 @@ The staff-auth ownership release is additive first:
    `private.login_user`, `private.create_session`, `private.session_user`, and
    revokes `auth_definer`'s `project_centrum.sports_users` grant. Do this only
    when no pre-081 binary can still serve traffic.
+
+The project-data contract follows the same pattern. Centrum `0007`/`0008`
+move staff payments and the money summary into the project schema; deploy the
+binary first, then drop `public.agent_staff_payments` and
+`private.range_summary` in a later contract migration.
+
+**Route rollback window.** After the Centrum frontend has used
+`/v1/p/centrum/...` for a full release, set `LEGACY_PROJECT_ROUTES=false` in
+staging first, then production. Verify `/v1/sports/facilities` is 404 and
+`/v1/p/centrum/facilities` is 200. Then remove the flag, the
+`RegisterLegacyProject` dual registration, and the frontend rollback switch.
 
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration

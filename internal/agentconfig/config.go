@@ -67,6 +67,15 @@ type Project struct {
 	// tables. Every project, including Centrum, uses "project_<slug>"; the
 	// runtime sets search_path from this value.
 	Schema string
+	// Features is the default entitlement for a new tenant of this project.
+	// It is a declaration, not the runtime gate: clients.features remains the
+	// per-tenant entitlement and may be a subset. The admin/provision paths
+	// validate every name against the compiled project registry.
+	Features []string
+	// Migrations is the number of SQL files under migrations/. Provisioning
+	// uses it to require the project ledger to be complete before the client
+	// row exists.
+	Migrations int
 	// SystemPrompt is the project-level persona and house rules, loaded
 	// from agent/agent.md.
 	SystemPrompt string
@@ -199,6 +208,21 @@ func Validate(p *Project, b Budget) error {
 		add("schema is required (use project_<slug>)")
 	} else if !schemaRe.MatchString(p.Schema) {
 		add("schema %q must match %s (project_<slug>, max 63 characters)", p.Schema, schemaRe.String())
+	}
+	seenFeature := map[string]bool{}
+	for _, f := range p.Features {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			add("features contains an empty name")
+			continue
+		}
+		if f != strings.ToLower(f) {
+			add("feature %q must be lowercase", f)
+		}
+		if seenFeature[f] {
+			add("feature %q is listed twice", f)
+		}
+		seenFeature[f] = true
 	}
 
 	for _, s := range p.Skills {

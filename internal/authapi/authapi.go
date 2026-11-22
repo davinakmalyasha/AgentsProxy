@@ -206,12 +206,7 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := a.providerFor(u.TenantID)
-	if p == nil {
-		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
-		return
-	}
-	created, err := p.Register(r.Context(), u.TenantID, RegisterInput{
+	created, err := a.RegisterUser(r.Context(), u.TenantID, RegisterInput{
 		Email:        req.Email,
 		PasswordHash: hash,
 		Role:         newRole,
@@ -233,7 +228,6 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	created.TenantID = u.TenantID
 	writeJSON(w, http.StatusCreated, map[string]any{"user": created})
 }
 
