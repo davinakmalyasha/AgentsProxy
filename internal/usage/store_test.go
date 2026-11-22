@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,44 @@ func TestRecord_SetsQuotaCacheTTL(t *testing.T) {
 	}
 	if ttl <= 0 || ttl > 32*24*time.Hour {
 		t.Errorf("ttl=%v want a bounded positive expiry", ttl)
+	}
+}
+
+func toRuntimeDSN(dsn string) string {
+	i := strings.Index(dsn, "://")
+	if i < 0 {
+		return dsn
+	}
+	rest := dsn[i+3:]
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return dsn
+	}
+	return dsn[:i+3] + "app_runtime" + rest[at:]
+}
+
+// TestRecord_UsesClientGUC proves the metering path works as app_runtime
+// with the scoped usage_write_runtime policy. Without app.client_id the
+// insert is rejected, so this fails if Record ever stops setting it.
+func TestRecord_UsesClientGUC(t *testing.T) {
+	ctx, admin, rdb := setup(t)
+	var id string
+	if err := admin.QueryRow(ctx, `SELECT id::text FROM clients WHERE tenant_id='u'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := db.NewPool(ctx, toRuntimeDSN(os.Getenv("TEST_DATABASE_URL")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := Record(ctx, runtime, rdb, id, "m", "chat", 10, 20); err != nil {
+		t.Fatalf("Record as app_runtime: %v", err)
+	}
+	var n int
+	if err := admin.QueryRow(ctx, `SELECT count(*) FROM usage WHERE client_id=$1 AND kind='chat'`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("usage rows=%d, want 1", n)
 	}
 }

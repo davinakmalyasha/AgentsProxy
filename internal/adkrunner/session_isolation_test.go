@@ -3,14 +3,11 @@ package adkrunner
 // Store-level tenant isolation for the pgx session service.
 //
 // app_name IS the tenant slug and every query in pgx_sessions.go filters on
-// it, but RLS on these tables is USING(true) (migration 041), so the
-// database does not enforce anything — a missing app_name filter in a new
-// query would silently read every tenant's sessions. DB-level enforcement
-// via a tx-scoped GUC was evaluated and rejected: the hot reads (Get/List
-// per agent turn) run pool-direct, and wrapping each in BEGIN + SET LOCAL +
-// COMMIT adds round trips on the exact path the perf pass just optimized.
-// This test is the enforcement instead: it fails if any store operation
-// ever leaks across app names.
+// it. Migration 085 also makes the table policies compare app_name with the
+// transaction-local app.tenant_id GUC, so the database enforces the same
+// boundary if a future query forgets a predicate. This test proves the
+// store never returns another app's session; the RLS policy is pinned by
+// TestADKSessionsTenantRLS in internal/db.
 import (
 	"context"
 	"os"

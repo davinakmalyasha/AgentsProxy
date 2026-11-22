@@ -61,8 +61,9 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   records/feature query also carries an explicit `tenant_id` predicate.
   RLS is defense-in-depth, not the sole boundary: `app_runtime` can set the
   tenant GUC and the table owner/definers bypass it. The route gate pins the
-  project URL to its derived schema, and `WithTx` fails closed for an unknown
-  tenant. Project tenants are reachable only under `/v1/p/<slug>/...`.
+  project URL to its derived schema, `WithTx` fails closed for an unknown
+  tenant, and the usage insert is bound to `app.client_id` (086). Project
+  tenants are reachable only under `/v1/p/<slug>/...`.
   `/v1/{vertical}` is reserved for platform tenants in `public`; a project
   tenant never creates a vertical alias. Centrum's frontend uses
   `/v1/p/centrum/...`, and the old `/v1/sports/...` surface was removed after
@@ -94,10 +95,11 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;
   no per-row tenant boundary (DFD is the only tenant). `app_runtime` is
   deliberately not granted agency DML (migration 082).
-* ADK conversations: `sessions/events/app_states/user_states` are filtered by
-  `app_name` in the session service. Their RLS policies are `USING (true)`
-  because the service does not set a per-query tenant GUC; treat this as an
-  application-enforced boundary until the tenant_id migration lands.
+* ADK conversations: `sessions/events/app_states/user_states` set
+  `app.tenant_id` in every session-service transaction (085). Their RLS
+  policies require `app_name = current_setting('app.tenant_id', true)`, so a
+  missing predicate reads zero rows instead of every tenant's transcript.
+  The admin pool still bypasses RLS for maintenance.
 * Rules: every query parameterized (`$1`); `service_role` never touches
   tenant tables; migrations are checksummed and advisory-locked. They follow
   expand/contract: additive changes first, destructive cleanup in a later
