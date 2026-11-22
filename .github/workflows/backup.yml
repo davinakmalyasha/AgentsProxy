@@ -27,10 +27,17 @@ concurrency:
 
 jobs:
   dump:
+    # A workflow_dispatch can name any branch. Production data is only ever
+    # dumped from main, and the environment is the second gate on the
+    # read-everything backup credential.
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Install PostgreSQL 17 client
         # Dearmor as the runner user: `sudo gpg` in a piped step tries to
@@ -66,6 +73,7 @@ jobs:
 
   restore-smoke:
     needs: dump
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -81,6 +89,10 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
       - uses: actions/download-artifact@v4
         with:
           name: db-backup
@@ -110,10 +122,9 @@ jobs:
           # schema — into public it would block the dump's DROP SCHEMA
           # public, and gist/text has exactly one opclass anywhere.
           psql "$DSN" -q -c 'CREATE SCHEMA IF NOT EXISTS ext; CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA ext'
-          # RLS policies name app_runtime (033/041-era TO clauses).
-          # Roles are cluster-level and owned by the bootstrap layer,
-          # not by the logical dump.
-          psql "$DSN" -q -c "DO \$\$ BEGIN CREATE ROLE app_runtime NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          # The dump carries ownership/ACLs, so every role it names must
+          # exist first. This is the same bootstrap the runbook uses.
+          psql "$DSN" -v ON_ERROR_STOP=1 -q -f scripts/restore-roles.sql
           # Prod also has pg_cron/pg_net (hosted-only extensions) that the
           # vanilla postgres:17 smoke image cannot install; the platform
           # layer restores those. This smoke proves schema + data:
@@ -121,7 +132,17 @@ jobs:
           mig=$(psql "$DSN" -tAc "select count(*) from schema_migrations where version like '%.sql'")
           echo "migrations recorded in dump: $mig"
           test "$mig" -ge 50
-          for t in clients tenant_records agent_reminders usage push_subscriptions; do
+          # Prove the restore is usable by the runtime role, not only by the
+          # restoring superuser. An empty BYPASSRLS-less dump must fail here.
+          n=$(psql "$DSN" -v ON_ERROR_STOP=1 -tAc "SET ROLE app_runtime; SELECT count(*) FROM clients" | tail -n 1)
+          echo "clients visible to app_runtime: $n"
+          test "$n" -gt 0
+          n=$(psql "$DSN" -v ON_ERROR_STOP=1 -tAc "SET ROLE app_runtime; SET app.tenant_id='centrum'; SELECT count(*) FROM project_centrum.sports_facilities" | tail -n 1)
+          echo "project facilities visible to app_runtime: $n"
+          test "$n" -gt 0
+          # Report the other high-value tables for the run log; the two
+          # assertions above are the release gate.
+          for t in tenant_records agent_reminders usage push_subscriptions; do
             n=$(psql "$DSN" -tAc "select count(*) from \"$t\"")
             echo "$t: $n rows"
           done

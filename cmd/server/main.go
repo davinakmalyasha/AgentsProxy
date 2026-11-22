@@ -57,6 +57,10 @@ func main() {
 	// died at config load with nothing prior. Effective env + allowlist
 	// (never secrets) prints on every boot so the next misconfiguration
 	// is diagnosable from the first log screen.
+	if err := cfg.ValidateServerSecrets(); err != nil {
+		slog.Error("config load", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("config loaded",
 		"env", cfg.Env,
 		"allowOrigins", cfg.AllowOrigins,
@@ -154,7 +158,7 @@ func main() {
 	// Production must not run tenant traffic as a role that can bypass
 	// RLS. This runs after migrations (so a virgin self-hosted database
 	// has app_runtime) but before Redis, the router, or any request.
-	if cfg.Env == "production" {
+	if cfg.Env == "production" || cfg.Env == "staging" {
 		role, err := db.VerifyRuntimeRole(bootCtx, pool)
 		if err != nil {
 			slog.Error("runtime role check", "err", err)
@@ -347,10 +351,9 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      authapi.New(pool, rdb),
+		Auth:      authapi.New(pool),
 		Version:   Version,
 		AdminPool: adminPool,
-		AdminKey:  cfg.AdminAPIKey,
 		Origins:   origins,
 	})
 

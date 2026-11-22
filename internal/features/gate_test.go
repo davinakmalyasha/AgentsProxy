@@ -139,3 +139,20 @@ func TestRequireTenantHealthy_NoIdentityPasses(t *testing.T) {
 		t.Errorf("code=%d called=%v want 200/true", rr.Code, called)
 	}
 }
+
+func TestRequireFeature_PublicRoleIsNotStaffBypass(t *testing.T) {
+	ResetForTest()
+	Register(Feature{Name: "x", Kind: "x"})
+	h := RequireFeature("x")(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
+	)
+	ctx := clientctx.With(context.Background(), &clientctx.Identity{
+		Role: clientctx.RolePublic, Tenant: "acme",
+	})
+	req := httptest.NewRequest("GET", "/x", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("public identity status=%d, want 403", rr.Code)
+	}
+}

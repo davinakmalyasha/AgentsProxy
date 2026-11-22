@@ -18,6 +18,7 @@ const (
 	RoleOwner  = "owner"
 	RoleStaff  = "pegawai"
 	RoleClient = "client" // full access via client token (API/agent)
+	RolePublic = "public" // unauthenticated landing read
 )
 
 // Identity is the resolved per-request principal.
@@ -25,8 +26,14 @@ type Identity struct {
 	Client *cache.ClientModel // set when authed via X-Client-Token
 	UserID string             // set when authed via X-Session-Token
 	Email  string
-	Role   string // owner | pegawai | client
+	Role   string // owner | pegawai | client | public
 	Tenant string
+	// DBSchema is the tenant's business schema at the time the identity was
+	// resolved: "public" for a platform tenant, "project_<slug>" for a
+	// project tenant. The platform and project route gates compare it with
+	// the surface being mounted; an identity that does not carry a schema
+	// must not pass either gate.
+	DBSchema string
 }
 
 // TenantID returns the tenant for the identity.
@@ -88,7 +95,12 @@ func From(ctx context.Context) *Identity {
 // WithClient keeps the legacy behavior: wraps a *cache.ClientModel as
 // a client-role Identity.
 func WithClient(ctx context.Context, m *cache.ClientModel) context.Context {
-	return With(ctx, &Identity{Client: m, Role: RoleClient})
+	return With(ctx, &Identity{
+		Client:   m,
+		Role:     RoleClient,
+		Tenant:   m.TenantID,
+		DBSchema: m.DBSchema,
+	})
 }
 
 // ClientFromContext returns the *cache.ClientModel for legacy callers

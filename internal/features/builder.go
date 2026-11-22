@@ -1,10 +1,8 @@
 package features
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,56 +40,16 @@ func IsAllowedVertical(v string) bool {
 	return agentconfig.IsAllowedVertical(v)
 }
 
-// VerticalsToMount resolves the platform-only mount list. Project tenants live
-// under /v1/p/<slug>/... and never create a /v1/{vertical} alias.
-//
-// A nil or empty lookup mounts nothing. Fail-closed is deliberate: a database
-// failure at boot must not resurrect a route surface that a project tenant
-// does not own. Platform handlers need the database anyway, so an outage is
-// already an outage; an accidental alias is the worse failure.
-func VerticalsToMount(live []string) []string {
-	seen := make(map[string]bool, len(live))
-	out := make([]string, 0, len(live))
-	for _, v := range live {
-		if IsAllowedVertical(v) && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	return out
+// ProjectSchema is the schema a project slug owns. It is deliberately
+// derived, not read from clients.db_schema, so the HTTP boundary and the
+// database boundary cannot drift apart.
+func ProjectSchema(slug string) string {
+	return agentconfig.SchemaForSlug(slug)
 }
 
-// LivePlatformVerticals returns the verticals that have at least one active
-// platform tenant (db_schema='public'). It returns a non-nil empty slice on
-// success with no platform tenants. A nil pool or query failure returns nil,
-// which VerticalsToMount treats as "mount nothing".
-func LivePlatformVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
-	if pool == nil {
-		return nil
-	}
-	qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rows, err := pool.Query(qctx,
-		`SELECT DISTINCT vertical FROM clients WHERE status='active' AND db_schema='public'`)
-	if err != nil {
-		return nil
-	}
-	out := make([]string, 0)
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			rows.Close()
-			return nil
-		}
-		if IsAllowedVertical(v) {
-			out = append(out, v)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-	return out
+// ValidProjectSlug reports whether a slug can be mounted as /v1/p/<slug>.
+func ValidProjectSlug(slug string) bool {
+	return agentconfig.SlugRe.MatchString(slug)
 }
 
 // BuildVerticalRouter returns a chi router for one vertical. The
@@ -115,6 +73,10 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 	} else {
 		r.Use(records.WithClientAuth(recDeps))
 	}
+	// Platform surface only. A project tenant is served exclusively under
+	// /v1/p/<slug>; this gate is what makes that true even when a platform
+	// tenant of the same vertical is live.
+	r.Use(RequirePlatformTenant)
 	// Quarantine fence: after identity (401 first, no oracle for
 	// unauthenticated callers), before rate-limit and feature gates (no
 	// quota burn, no 403 masking). Covers /records and every feature.

@@ -74,7 +74,9 @@ Centrum's project migrations (`0001` schema move, `0002` records, `0003` FORCE
 RLS, `0004` schema-relative auth, `0005` legacy-session drop, `0006`
 money-reader schema grant, `0007` staff-payments move, `0008` project money
 summary, `0009` payroll contract, `0010` legacy-auth contract, `0011`
-range-summary contract) plus platform `081_staff_sessions_generic.sql`. Verify:
+range-summary contract) plus platform `081_staff_sessions_generic.sql`,
+`082_revoke_agency_runtime_grants.sql`, `083_backup_reader_reconcile.sql`,
+and `084_drop_usage_read_policy.sql`. Verify:
 
 ```sql
 select count(*) from pg_namespace where nspname = 'project_centrum';

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -14,13 +13,28 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	projectembed "github.com/davinakmalyasha/agents-proxy"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
-
-var projectSchemaRe = regexp.MustCompile(`^project_[a-z0-9_]{1,55}$`)
 
 // MigrateAll applies the platform migrations, then every project's own
 // migrations. It is the deploy-step entry point (cmd/migrate and boot).
 func MigrateAll(ctx context.Context, pool *Pool) error {
+	// Serialize the whole deploy, not just each half. Migrate and
+	// MigrateProjects use their own transaction-scoped locks; without this
+	// outer session lock a project run can start while another deploy is
+	// halfway through platform DDL.
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, fmt.Sprintf(`SELECT pg_advisory_lock(%d)`, allMigrationLockID)); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(),
+			fmt.Sprintf(`SELECT pg_advisory_unlock(%d)`, allMigrationLockID))
+	}()
 	if err := Migrate(ctx, pool); err != nil {
 		return err
 	}
@@ -109,12 +123,15 @@ func loadProjectPlans(fsys fs.FS) ([]projectPlan, error) {
 		if slug != strings.ToLower(dir) {
 			return nil, fmt.Errorf("project folder %q declares slug %q; the folder name and slug must match", dir, slug)
 		}
+		if !agentconfig.SlugRe.MatchString(slug) {
+			return nil, fmt.Errorf("project %q: invalid slug %q", dir, slug)
+		}
 		schema := doc.Schema
 		if schema == "" {
-			schema = "project_" + strings.ReplaceAll(slug, "-", "_")
+			schema = agentconfig.SchemaForSlug(slug)
 		}
-		if !projectSchemaRe.MatchString(schema) {
-			return nil, fmt.Errorf("project %q: invalid schema %q (must match project_<slug>)", slug, schema)
+		if want := agentconfig.SchemaForSlug(slug); schema != want {
+			return nil, fmt.Errorf("project %q: schema %q must be %q; project schema is derived, not chosen", slug, schema, want)
 		}
 		if other, ok := seenSlug[slug]; ok {
 			return nil, fmt.Errorf("project %q: slug is also declared by projects/%s", slug, other)
@@ -283,6 +300,20 @@ func migrateOneProject(ctx context.Context, pool *Pool, slug, schema string, fil
 			 DO UPDATE SET checksum = EXCLUDED.checksum`,
 			slug, f.Name, f.Checksum); err != nil {
 			return fmt.Errorf("project %q: record %s: %w", slug, f.Name, err)
+		}
+	}
+	// A ledger row whose file disappeared is drift. The platform runner
+	// already refuses this; project apply must not silently keep going.
+	for version := range applied {
+		found := false
+		for _, f := range files {
+			if f.Name == version {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("project %q: migration %s is recorded but no file exists in this build; restore the file or add a repair migration", slug, version)
 		}
 	}
 

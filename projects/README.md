@@ -143,14 +143,17 @@ without a deliberate export/move procedure.
 4. Add `agent/agent.md`, `agent/skills/*.md`, `agent/mcp.json`, and optional
    `agent/tools/*.go`.
 5. Run `go generate ./...` and commit the generated imports.
-6. Deploy the build, then run `go run ./cmd/migrate`. It creates the project
-   schema and applies `migrations/` before any client row exists.
+6. Apply the migrations as a deploy step. Production uses the `db-migrate`
+   workflow; a local/staging database may use `go run ./cmd/migrate apply`.
+   It creates the project schema and applies `migrations/` before any client
+   row exists.
 7. Provision the client and first owner with
    `go run ./cmd/provision --slug <slug> --name "<name>" --owner-email ...`.
    The command validates `project.json`, requires the schema/ledger to be
    ready, prints the client token once, and pauses the client if owner seeding
-   fails. `go run ./cmd/tenant create` is the lower-level path. A platform
-   tenant with no folder uses `--platform` and schema `public`.
+   fails. It does not apply DDL by default; `--migrate` is a local/staging
+   convenience only. `go run ./cmd/tenant create` is the lower-level path. A
+   platform tenant with no folder uses `--platform` and schema `public`.
 8. Run `go run ./cmd/migrate check`. It reconciles the folder, schema, ledger,
    `clients.vertical`, `clients.features`, and the compiled feature registry.
 9. Deploy the frontend with its own `NEXT_PUBLIC_TENANT_ID` and the new

@@ -175,7 +175,18 @@ var (
 	modelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 	mcpNameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	headerNameRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+	// SlugRe is the one tenant/project identifier grammar. The feature
+	// registry and the records tenant helper use the same shape.
+	SlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	// FeatureNameRe is the path segment a project feature owns.
+	FeatureNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
+
+// SchemaForSlug is the only schema a project slug may own. Deriving it
+// instead of trusting project.json removes a class of URL-to-schema drift.
+func SchemaForSlug(slug string) string {
+	return "project_" + strings.ReplaceAll(strings.ToLower(strings.TrimSpace(slug)), "-", "_")
+}
 
 var mcpRoles = map[string]bool{
 	"owner":   true,
@@ -196,8 +207,8 @@ func Validate(p *Project, b Budget) error {
 
 	if strings.TrimSpace(p.Slug) == "" {
 		add("slug is required")
-	} else if p.Slug != strings.ToLower(p.Slug) || strings.ContainsAny(p.Slug, " /\\") {
-		add("slug %q must be lowercase and contain no spaces or path separators", p.Slug)
+	} else if !SlugRe.MatchString(p.Slug) {
+		add("slug %q must match %s (lowercase letters, digits, hyphens)", p.Slug, SlugRe.String())
 	}
 	if p.Vertical == "" {
 		add("vertical is required")
@@ -208,6 +219,8 @@ func Validate(p *Project, b Budget) error {
 		add("schema is required (use project_<slug>)")
 	} else if !schemaRe.MatchString(p.Schema) {
 		add("schema %q must match %s (project_<slug>, max 63 characters)", p.Schema, schemaRe.String())
+	} else if want := SchemaForSlug(p.Slug); p.Schema != want {
+		add("schema %q must be %q for slug %q; project schema is derived, not chosen", p.Schema, want, p.Slug)
 	}
 	seenFeature := map[string]bool{}
 	for _, f := range p.Features {
@@ -216,8 +229,8 @@ func Validate(p *Project, b Budget) error {
 			add("features contains an empty name")
 			continue
 		}
-		if f != strings.ToLower(f) {
-			add("feature %q must be lowercase", f)
+		if !FeatureNameRe.MatchString(f) {
+			add("feature %q must match %s", f, FeatureNameRe.String())
 		}
 		if seenFeature[f] {
 			add("feature %q is listed twice", f)

@@ -17,7 +17,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 )
@@ -25,17 +24,20 @@ import (
 // Auth is the platform staff-auth handler. Providers are constructed from the
 // project factories registered at init time; tests may add a fixture provider
 // with RegisterProvider.
+//
+// There is deliberately no cached User here. Role and is_active are
+// authorization state: a demoted or deactivated owner must lose authority on
+// the next request, not after a TTL. The session directory lookup plus one
+// project profile read is the price of that guarantee.
 type Auth struct {
 	Pool      *pgxpool.Pool
-	RDB       *redis.Client
 	Providers map[string]Provider
 }
 
 // New builds the handler and one provider per registered project.
-func New(pool *pgxpool.Pool, rdb *redis.Client) *Auth {
+func New(pool *pgxpool.Pool) *Auth {
 	return &Auth{
 		Pool:      pool,
-		RDB:       rdb,
 		Providers: newProviders(pool),
 	}
 }
@@ -129,10 +131,6 @@ func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 		// direct DML on public.staff_sessions.
 		_, _ = a.Pool.Exec(r.Context(),
 			`SELECT private.delete_session($1)`, HashToken(tok))
-		// Evict the cached session so logout is immediate, not 60s.
-		if a.RDB != nil {
-			_ = a.RDB.Del(r.Context(), sessKey(HashToken(tok))).Err()
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }

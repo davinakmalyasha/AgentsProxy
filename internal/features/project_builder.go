@@ -16,8 +16,8 @@ import (
 // two projects may both own a feature called "bookings" without sharing
 // handlers or tables. The project's business tables live in its own schema,
 // and records.WithTenantTx sets search_path from clients.db_schema.
-func BuildProjectRouter(project string, deps BuilderDeps, vertical string) http.Handler {
-	return buildProjectRouter(project, deps, vertical, true)
+func BuildProjectRouter(project, schema string, deps BuilderDeps, vertical string) http.Handler {
+	return buildProjectRouter(project, schema, deps, vertical, true)
 }
 
 // BuildProjectRouterForTest mounts a project's features without the
@@ -26,10 +26,13 @@ func BuildProjectRouter(project string, deps BuilderDeps, vertical string) http.
 // gates but cannot satisfy a fixed project slug. Production always calls
 // BuildProjectRouter; the project-slug check has its own API test.
 func BuildProjectRouterForTest(project string, deps BuilderDeps, vertical string) http.Handler {
-	return buildProjectRouter(project, deps, vertical, false)
+	return buildProjectRouter(project, ProjectSchema(project), deps, vertical, false)
 }
 
-func buildProjectRouter(project string, deps BuilderDeps, vertical string, requireProject bool) http.Handler {
+func buildProjectRouter(project, schema string, deps BuilderDeps, vertical string, requireProject bool) http.Handler {
+	if !IsAllowedVertical(vertical) {
+		panic("features.BuildProjectRouter: unknown vertical " + vertical)
+	}
 	recDeps := records.Deps{Pool: deps.Pool, Cache: deps.Cache}
 	r := chi.NewRouter()
 	if deps.Auth != nil {
@@ -39,7 +42,7 @@ func buildProjectRouter(project string, deps BuilderDeps, vertical string, requi
 	}
 	r.Use(RequireTenantHealthy)
 	if requireProject {
-		r.Use(RequireProject(project))
+		r.Use(RequireProject(project, schema))
 	}
 	if deps.Redis != nil && deps.RateLimitPerMinute > 0 {
 		r.Use(middleware.RateLimitClient(deps.Redis, deps.RateLimitPerMinute, "project:"+project))

@@ -46,13 +46,15 @@ else fails boot. The two safety invariants are enforced in
   `TEST_REDIS_URL` only. `make test` loads `.env.test` and refuses a remote
   host.
 
-## DDL law (additive only)
+## DDL law (expand/contract)
 
 Add: `ADD COLUMN NULL/default`, `CREATE INDEX`, new `CHECK NOT VALID` +
-`VALIDATE`. Never: `DROP`, `ALTER TYPE`, `RENAME` without a phased plan.
-Never edit an applied migration — add a new one. Naming: `sports_*` for
-vertical tables, agency tables keep their DFD names (migration 068).
-CI lints non-additive DDL; fresh-DB job proves the chain runs clean.
+`VALIDATE`. Destructive changes (`DROP`, `ALTER TYPE`, `RENAME`) are a later
+contract migration after the stability window, never in the same release that
+deploys the code depending on them. Never edit an applied migration — add a
+new one. Naming: `sports_*` for vertical tables, agency tables keep their DFD
+names (migration 068). CI lints non-additive DDL; the fresh-DB job proves the
+chain runs clean, and the contract tests pin the final state.
 
 ## Testing
 
