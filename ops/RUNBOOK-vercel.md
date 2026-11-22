@@ -117,7 +117,8 @@ Supabase-side delivery are required rather than optional.
 - GitHub scheduled runs can queue late (tens of minutes); that is normal
   and does not affect correctness.
 - Backup credential: migration 062 creates `backup_reader`
-  (`LOGIN BYPASSRLS` + `pg_read_all_data`). BYPASSRLS is load-bearing:
+  (`LOGIN BYPASSRLS` + `pg_read_all_data`). `ops/backup.sh` refuses to dump
+  if the connected role lacks `BYPASSRLS`. BYPASSRLS is load-bearing:
   every tenant table is FORCE RLS, and a NOBYPASSRLS reader would dump
   **empty tables**. The password lives only in the GitHub secret
   `BACKUP_DATABASE_URL` (pooler session mode, `sslmode=require`). Rotate
