@@ -17,6 +17,19 @@ import (
 // handlers or tables. The project's business tables live in its own schema,
 // and records.WithTenantTx sets search_path from clients.db_schema.
 func BuildProjectRouter(project string, deps BuilderDeps, vertical string) http.Handler {
+	return buildProjectRouter(project, deps, vertical, true)
+}
+
+// BuildProjectRouterForTest mounts a project's features without the
+// RequireProject identity gate. Feature packages test two isolated tenants
+// against cloned schemas, so they need the tenant transaction and feature
+// gates but cannot satisfy a fixed project slug. Production always calls
+// BuildProjectRouter; the project-slug check has its own API test.
+func BuildProjectRouterForTest(project string, deps BuilderDeps, vertical string) http.Handler {
+	return buildProjectRouter(project, deps, vertical, false)
+}
+
+func buildProjectRouter(project string, deps BuilderDeps, vertical string, requireProject bool) http.Handler {
 	recDeps := records.Deps{Pool: deps.Pool, Cache: deps.Cache}
 	r := chi.NewRouter()
 	if deps.Auth != nil {
@@ -25,7 +38,9 @@ func BuildProjectRouter(project string, deps BuilderDeps, vertical string) http.
 		r.Use(records.WithClientAuth(recDeps))
 	}
 	r.Use(RequireTenantHealthy)
-	r.Use(RequireProject(project))
+	if requireProject {
+		r.Use(RequireProject(project))
+	}
 	if deps.Redis != nil && deps.RateLimitPerMinute > 0 {
 		r.Use(middleware.RateLimitClient(deps.Redis, deps.RateLimitPerMinute, "project:"+project))
 	}
