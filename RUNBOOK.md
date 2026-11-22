@@ -371,6 +371,21 @@ The schema-clone/auth release follows the expand/contract order:
    and the legacy `project_centrum.sports_sessions` table. Do this only after
    the new binary is live.
 
+The staff-auth ownership release is additive first:
+
+1. Apply `081_staff_sessions_generic.sql`. It adds
+   `private.staff_session_create(tenant, user, hash, expiry)` and
+   `private.staff_session_resolve(hash)`. The old `login_user` /
+   `create_session` / `session_user` functions stay, so the previous binary
+   keeps working and live sessions survive.
+2. Deploy the binary. `internal/authapi` now uses the provider registry; the
+   Centrum provider reads `sports_users` through `tenantdb` with RLS. Login no
+   longer scans every project.
+3. After the stability window, apply a contract migration that drops
+   `private.login_user`, `private.create_session`, `private.session_user`, and
+   revokes `auth_definer`'s `project_centrum.sports_users` grant. Do this only
+   when no pre-081 binary can still serve traffic.
+
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
 instead. Platform rows are in `public.schema_migrations`; project rows are in

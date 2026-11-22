@@ -1,59 +1,43 @@
-// Package authapi is the staff authentication API: email+password
-// login with bcrypt, DB-backed sessions (sha256-hashed tokens),
-// logout, and a /me endpoint. This is the proxy's own identity
-// system — no Supabase Auth, no third party.
+// Package authapi is the platform staff-authentication shell: it owns the
+// session directory, token primitives, the /v1/auth routes, and the provider
+// registry. Project user tables and login rules live in project packages.
 //
-// DONE: Phase 7 (staff auth) / STANDARDS A, D, F
+// This package must never name a project table. It resolves a session to
+// (user_id, tenant_id), then asks the tenant's registered Provider for the
+// live profile. That is what makes staff auth repeatable for the next project
+// without editing platform code.
 package authapi
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 )
 
-// SessionTTL is how long a login lasts before re-auth.
-const SessionTTL = 30 * 24 * time.Hour
-
-// Auth is the staff-auth handler.
+// Auth is the platform staff-auth handler. Providers are constructed from the
+// project factories registered at init time; tests may add a fixture provider
+// with RegisterProvider.
 type Auth struct {
-	Pool *pgxpool.Pool
-	// RDB caches session lookups (sess:{hash}, 60s). Nil disables the
-	// cache; the DB path always works.
-	RDB *redis.Client
+	Pool      *pgxpool.Pool
+	RDB       *redis.Client
+	Providers map[string]Provider
 }
 
-// sessTTL bounds how long a revoked session stays usable after logout:
-// logout deletes the row AND evicts the key, so the TTL is only the
-// backstop for crashes between the two.
-const sessTTL = 60 * time.Second
-
-func sessKey(hash string) string { return "sess:" + hash }
-
-// User is the public user shape returned by login/me.
-type User struct {
-	ID       string `json:"id"`
-	TenantID string `json:"tenant_id"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
-	FullName string `json:"full_name"`
-	Phone    string `json:"phone,omitempty"`
+// New builds the handler and one provider per registered project.
+func New(pool *pgxpool.Pool, rdb *redis.Client) *Auth {
+	return &Auth{
+		Pool:      pool,
+		RDB:       rdb,
+		Providers: newProviders(pool),
+	}
 }
 
 // Routes returns the /v1/auth chi router (mounted under /v1/auth by
@@ -67,13 +51,112 @@ func (a *Auth) Routes() http.Handler {
 	return r
 }
 
-// register creates a staff account. Owner session ONLY — client tokens
-// can never mint users (a leaked API token must not become an interactive
-// owner login). First owner on a fresh tenant is bootstrapped via psql
-// against DATABASE_ADMIN_URL, never via API token.
+type loginReq struct {
+	TenantID string `json:"tenant_id"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
+	var req loginReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	req.TenantID = strings.ToLower(strings.TrimSpace(req.TenantID))
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.TenantID == "" || req.Email == "" || req.Password == "" {
+		writeErr(w, http.StatusBadRequest, "tenant_id, email, password required")
+		return
+	}
+
+	p := a.providerFor(req.TenantID)
+	if p == nil {
+		// Do not reveal whether the tenant exists.
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	creds, err := p.Authenticate(r.Context(), req.TenantID, req.Email)
+	if errors.Is(err, ErrInvalidCredentials) {
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	if err != nil {
+		slog.Error("login lookup", "tenant", req.TenantID, "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if !creds.Active || !VerifyPassword(creds.PasswordHash, req.Password) {
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
+	raw, tokenHash, err := GenerateSessionToken()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "token gen")
+		return
+	}
+	// The platform session directory has no project knowledge. The provider
+	// has just verified the user/password pair for this tenant; the definer
+	// writes the session row and validates that the tenant is active.
+	var sessionID *string
+	if err := a.Pool.QueryRow(r.Context(),
+		`SELECT private.staff_session_create($1, $2::uuid, $3, now() + $4::interval)::text`,
+		req.TenantID, creds.User.ID, tokenHash, SessionTTL.String(),
+	).Scan(&sessionID); err != nil {
+		slog.Error("login session insert", "tenant", req.TenantID, "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if sessionID == nil {
+		// The tenant paused between the password check and here.
+		writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
+	u := creds.User
+	u.TenantID = req.TenantID
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": raw,
+		"user":  u,
+	})
+}
+
+func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
+	tok := sessionToken(r)
+	if tok != "" {
+		// Definer function, not a direct DELETE: the runtime role has no
+		// direct DML on public.staff_sessions.
+		_, _ = a.Pool.Exec(r.Context(),
+			`SELECT private.delete_session($1)`, HashToken(tok))
+		// Evict the cached session so logout is immediate, not 60s.
+		if a.RDB != nil {
+			_ = a.RDB.Del(r.Context(), sessKey(HashToken(tok))).Err()
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+}
+
+// me resolves the session and returns the user.
+func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
+	tok := sessionToken(r)
+	if tok == "" {
+		writeErr(w, http.StatusUnauthorized, "missing session token")
+		return
+	}
+	u, err := a.UserByToken(r.Context(), tok)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": u})
+}
+
+// register creates a staff account. Owner session ONLY — client tokens can
+// never mint users (a leaked API token must not become an interactive owner
+// login). The first owner is seeded by provisioning, never via an API token.
 func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
-	// Resolve the caller's tenant from the owner session.
-	sess := strings.TrimSpace(r.Header.Get("X-Session-Token"))
+	sess := sessionToken(r)
 	if sess == "" {
 		writeErr(w, http.StatusUnauthorized, "owner session required")
 		return
@@ -83,11 +166,10 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
 		return
 	}
-	if u.Role != "owner" {
+	if u.Role != clientctx.RoleOwner {
 		writeErr(w, http.StatusForbidden, "owner only")
 		return
 	}
-	tenantID := u.TenantID
 
 	var req struct {
 		Email    string `json:"email"`
@@ -123,253 +205,45 @@ func (a *Auth) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The INSERT is tenant-scoped by RLS (WITH CHECK on
-	// app.tenant_id), so it must run inside a transaction with the
-	// GUC set — a bare Pool.QueryRow has no GUC and the policy
-	// rejects the row (500 on live runtime pool; superuser test
-	// pools bypass RLS which hid this). Cannot reuse
-	// records.WithTenantTx here: records imports authapi (cycle).
-	var id string
-	tx, err := a.Pool.Begin(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-	if _, err := tx.Exec(r.Context(), `
-		SELECT set_config('app.tenant_id', $1, true),
-		       set_config('search_path',
-		                  COALESCE((SELECT db_schema FROM public.clients WHERE tenant_id = $1), 'public'),
-		                  true)`, tenantID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	// Phone was bound into the request struct and then dropped on the floor:
-	// the INSERT below did not name a column for it, so an owner who filled in
-	// a staff member's WhatsApp number got a 201 back with no phone on the
-	// record and no indication that it had been ignored.
-	err = tx.QueryRow(r.Context(),
-		`INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, phone)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
-		tenantID, req.Email, hash, newRole, req.FullName, req.Phone).Scan(&id)
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeErr(w, http.StatusConflict, "email already registered")
-			return
-		}
-		slog.Error("register insert", "err", err)
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user": User{ID: id, TenantID: tenantID, Email: req.Email, Role: newRole, FullName: req.FullName, Phone: req.Phone},
-	})
-}
 
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
-
-// HashPassword bcrypt-hashes a password (cost 10 default).
-func HashPassword(pw string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
-	return string(b), err
-}
-
-// VerifyPassword checks a password against a bcrypt hash.
-func VerifyPassword(hash, pw string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
-}
-
-// GenerateSessionToken returns (raw, sha256Hex(raw)) like client tokens.
-func GenerateSessionToken() (string, string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", "", err
-	}
-	raw := hex.EncodeToString(b)
-	sum := sha256.Sum256([]byte(raw))
-	return raw, hex.EncodeToString(sum[:]), nil
-}
-
-// HashToken sha256-hashes a session token for lookup.
-func HashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-type loginReq struct {
-	TenantID string `json:"tenant_id"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
-	var req loginReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	req.TenantID = strings.TrimSpace(req.TenantID)
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	if req.TenantID == "" || req.Email == "" || req.Password == "" {
-		writeErr(w, http.StatusBadRequest, "tenant_id, email, password required")
-		return
-	}
-
-	var (
-		id       string
-		hash     string
-		role     string
-		fullName string
-		phone    string
-		active   bool
-	)
-	// Login lookup goes through private.login_user (migration 021, extended
-	// by 040), not a direct SELECT: sports_users is tenant-scoped by RLS and
-	// this query runs with no app.tenant_id set, so a direct read would match
-	// nothing. The function is SECURITY DEFINER and returns only the
-	// columns login needs, which also keeps password_hash out of reach of any
-	// other runtime query.
-	err := a.Pool.QueryRow(r.Context(),
-		`SELECT user_id::text, password_hash, role, full_name, phone, is_active
-		   FROM private.login_user($1, $2)`,
-		req.TenantID, req.Email,
-	).Scan(&id, &hash, &role, &fullName, &phone, &active)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Uniform error: don't reveal whether the user exists.
-		writeErr(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-	if err != nil {
-		slog.Error("login query", "err", err)
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if !active || !VerifyPassword(hash, req.Password) {
-		writeErr(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-
-	raw, tokenHash, err := GenerateSessionToken()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "token gen")
-		return
-	}
-	// Session creation goes through a SECURITY DEFINER function. The
-	// runtime role has no direct DML on public.staff_sessions, and the
-	// function derives tenant_id from the project's sports_users
-	// server-side rather than trusting the caller - which is what
-	// removes the ability to mint a session for a user in an arbitrary
-	// tenant.
-	var sessionID *string
-	if err := a.Pool.QueryRow(r.Context(),
-		`SELECT private.create_session($1::uuid, $2, now() + $3::interval)::text`,
-		id, tokenHash, SessionTTL.String(),
-	).Scan(&sessionID); err != nil {
-		slog.Error("login session insert", "err", err)
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if sessionID == nil {
-		// create_session returns NULL when the user is gone or inactive
-		// between the password check and here.
-		writeErr(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"token": raw,
-		"user":  User{ID: id, TenantID: req.TenantID, Email: req.Email, Role: role, FullName: fullName, Phone: phone},
-	})
-}
-
-func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
-	tok := sessionToken(r)
-	if tok != "" {
-		// Definer function, not a direct DELETE: the runtime role has no
-		// direct DML on public.staff_sessions.
-		_, _ = a.Pool.Exec(r.Context(),
-			`SELECT private.delete_session($1)`, HashToken(tok))
-		// Evict the cached session so logout is immediate, not 60s.
-		if a.RDB != nil {
-			_ = a.RDB.Del(r.Context(), sessKey(HashToken(tok))).Err()
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
-}
-
-// me resolves the session and returns the user.
-func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
-	tok := sessionToken(r)
-	if tok == "" {
-		writeErr(w, http.StatusUnauthorized, "missing session token")
-		return
-	}
-	u, err := a.UserByToken(r.Context(), tok)
-	if err != nil {
+	p := a.providerFor(u.TenantID)
+	if p == nil {
 		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": u})
-}
-
-// UserByToken resolves a session token to a user, checking expiry.
-//
-// Reads through private.session_user, which resolves the platform session
-// row and then the tenant's project schema. The function is SECURITY
-// DEFINER and returns only these columns, which also keeps password_hash
-// out of reach of a runtime query.
-func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
-	hash := HashToken(tok)
-	if a.RDB != nil {
-		if b, err := a.RDB.Get(ctx, sessKey(hash)).Bytes(); err == nil {
-			var u User
-			if err := json.Unmarshal(b, &u); err == nil {
-				// Cache hit skips the session_user SELECT; the
-				// throttled touch below still runs (usually a no-op).
-				_, _ = a.Pool.Exec(ctx,
-					`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
-				return &u, nil
-			}
-		}
+	created, err := p.Register(r.Context(), u.TenantID, RegisterInput{
+		Email:        req.Email,
+		PasswordHash: hash,
+		Role:         newRole,
+		FullName:     req.FullName,
+		Phone:        req.Phone,
+	})
+	switch {
+	case errors.Is(err, ErrEmailTaken):
+		writeErr(w, http.StatusConflict, "email already registered")
+		return
+	case errors.Is(err, ErrInvalidRole):
+		writeErr(w, http.StatusBadRequest, "role must be owner or pegawai")
+		return
+	case errors.Is(err, ErrInvalidCredentials):
+		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
+		return
+	case err != nil:
+		slog.Error("register insert", "tenant", u.TenantID, "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
 	}
-	var u User
-	err := a.Pool.QueryRow(ctx,
-		`SELECT user_id::text, tenant_id, email, role, full_name, phone
-		   FROM private.session_user($1)`,
-		hash,
-	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Role, &u.FullName, &u.Phone)
-	if err != nil {
-		return nil, err
-	}
-	// Bump last_seen but at most ~once a minute per session: a busy
-	// staff dashboard fires many authed requests and an unconditional
-	// UPDATE here would take a write lock on the session row every
-	// time. The threshold is passed into the function so the
-	// conditional is evaluated the same way it used to be in SQL.
-	_, _ = a.Pool.Exec(ctx,
-		`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
-	if a.RDB != nil {
-		if b, err := json.Marshal(&u); err == nil {
-			_ = a.RDB.Set(ctx, sessKey(hash), b, sessTTL).Err()
-		}
-	}
-	return &u, nil
+	created.TenantID = u.TenantID
+	writeJSON(w, http.StatusCreated, map[string]any{"user": created})
 }
 
 func sessionToken(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Session-Token"))
 }
 
-// writeJSON / writeErr use the same wire format as the rest of the
-// API ({"error": msg} for errors). Self-contained to avoid an import
-// cycle with internal/features/shared/records.
+// writeJSON / writeErr use the same wire format as the rest of the API
+// ({"error": msg} for errors). Self-contained to avoid an import cycle with
+// internal/features/shared/records.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

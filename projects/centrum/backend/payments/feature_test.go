@@ -20,7 +20,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
-	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
@@ -87,7 +86,7 @@ func setup(t *testing.T) *harness {
 	fr := features.BuildVerticalRouter(features.BuilderDeps{
 		Pool:  pool,
 		Cache: cli,
-		Auth:  &authapi.Auth{Pool: adminPool},
+		Auth:  testutil.NewAuth(adminPool, "pay-a", "pay-b"),
 	}, "sports")
 	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }

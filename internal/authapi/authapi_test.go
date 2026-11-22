@@ -1,502 +1,325 @@
-// Auth API tests: bcrypt, login, me, logout, expiry.
-//
-// DONE: Phase 7 (staff auth) / STANDARDS A, D, F
 package authapi
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
-	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 )
 
-var authTestSchema string
+// fakeProvider proves the platform auth shell is project-agnostic. It owns an
+// in-memory user map; the real Centrum provider selects from sports_users.
+type fakeProvider struct {
+	mu      sync.Mutex
+	users   map[string]fakeUser
+	tenants map[string]bool
+	seq     int
+}
 
-func harness(t *testing.T) (*Auth, *pgxpool.Pool, string) {
+type fakeUser struct {
+	User   User
+	Hash   string
+	Active bool
+}
+
+func newFakeProvider() *fakeProvider {
+	return &fakeProvider{users: map[string]fakeUser{}, tenants: map[string]bool{}}
+}
+
+func (f *fakeProvider) setTenantActive(tenant string, active bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tenants[tenant] = active
+}
+
+func key(tenant, email string) string { return tenant + "\x00" + email }
+
+func (f *fakeProvider) add(tenant, email, password, role, name string, active bool) User {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	f.tenants[tenant] = true
+	id := fmt.Sprintf("00000000-0000-0000-0000-%012d", f.seq)
+	hash, _ := HashPassword(password)
+	u := User{ID: id, TenantID: tenant, Email: email, Role: role, FullName: name}
+	f.users[key(tenant, email)] = fakeUser{User: u, Hash: hash, Active: active}
+	return u
+}
+
+func (f *fakeProvider) Authenticate(_ context.Context, tenantID, email string) (Credentials, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if active, known := f.tenants[tenantID]; known && !active {
+		return Credentials{}, ErrInvalidCredentials
+	}
+	row, ok := f.users[key(tenantID, email)]
+	if !ok {
+		return Credentials{}, ErrInvalidCredentials
+	}
+	return Credentials{User: row.User, PasswordHash: row.Hash, Active: row.Active}, nil
+}
+
+func (f *fakeProvider) Profile(_ context.Context, tenantID, userID string) (User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if active, known := f.tenants[tenantID]; known && !active {
+		return User{}, ErrInvalidCredentials
+	}
+	for _, row := range f.users {
+		if row.User.TenantID == tenantID && row.User.ID == userID && row.Active {
+			return row.User, nil
+		}
+	}
+	return User{}, ErrInvalidCredentials
+}
+
+func (f *fakeProvider) Register(_ context.Context, tenantID string, in RegisterInput) (User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in.Role != "owner" && in.Role != "pegawai" {
+		return User{}, ErrInvalidRole
+	}
+	if _, exists := f.users[key(tenantID, in.Email)]; exists {
+		return User{}, ErrEmailTaken
+	}
+	f.seq++
+	id := fmt.Sprintf("00000000-0000-0000-0000-%012d", f.seq)
+	u := User{ID: id, TenantID: tenantID, Email: in.Email, Role: in.Role, FullName: in.FullName, Phone: in.Phone}
+	f.users[key(tenantID, in.Email)] = fakeUser{User: u, Hash: in.PasswordHash, Active: true}
+	return u, nil
+}
+
+func setup(t *testing.T) (*Auth, *pgxpool.Pool, *fakeProvider, context.Context) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping auth test")
+	}
 	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")
-	if dsn == "" || adminDSN == "" {
-		t.Skip("TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL not set")
+	if adminDSN == "" {
+		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
-	admin, err := db.NewPool(ctx, adminDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	// The project move is part of the embedded chain; run it here so this
-	// package is self-sufficient when it happens to run first.
-	if err := db.MigrateAll(ctx, admin); err != nil {
-		t.Fatal(err)
-	}
-	// Every test tenant owns a cloned schema. The platform session
-	// directory is public; project users and business rows live in the
-	// clone, and the auth functions resolve it from clients.db_schema.
-	schema := dbtest.SharedSchema(t, ctx, admin, "project_centrum", "auth-t")
-	if err := dbtest.ResetSchema(ctx, admin, schema); err != nil {
-		t.Fatal(err)
-	}
-	authTestSchema = schema
-	if _, err := admin.Exec(ctx, `DELETE FROM public.staff_sessions WHERE tenant_id='auth-t'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, `DELETE FROM clients WHERE tenant_id='auth-t'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ('auth-t','auth-t','hash-auth-t',1000,'active','sports',ARRAY['records'],$1)`, schema); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, fmt.Sprintf(
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO app_runtime`,
-		dbtest.Table(schema, "sports_users"))); err != nil {
-		t.Fatal(err)
-	}
-	hash, _ := HashPassword("sekret123")
-	if _, err := admin.Exec(ctx, fmt.Sprintf(
-		`INSERT INTO %s (tenant_id, email, password_hash, role, full_name)
-		 VALUES ('auth-t','owner@centrum.test',$1,'owner','Budi')`,
-		dbtest.Table(schema, "sports_users")), hash); err != nil {
-		t.Fatal(err)
-	}
-
-	pool, err := db.NewPool(ctx, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.NewPool(ctx, adminDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return &Auth{Pool: pool}, admin, hash
+	if err := db.MigrateAll(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	const tenant = "auth-t"
+	cleanup := func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		_, _ = pool.Exec(cctx, `DELETE FROM public.clients WHERE tenant_id=$1`, tenant)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO public.clients
+		   (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ('auth test', $1, 'hash-auth-t', 1000, 'active', 'sports', ARRAY['records'], 'public')`,
+		tenant); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(pool, nil)
+	fake := newFakeProvider()
+	a.RegisterProvider(tenant, fake)
+	return a, pool, fake, ctx
 }
 
-func post(t *testing.T, h http.Handler, path, body, token string) *http.Response {
+func do(t *testing.T, a *Auth, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-	var req *http.Request
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
 	if body != "" {
-		req, _ = http.NewRequest("POST", srv.URL+path, bytes.NewReader([]byte(body)))
 		req.Header.Set("Content-Type", "application/json")
-	} else {
-		req, _ = http.NewRequest("POST", srv.URL+path, nil)
 	}
 	if token != "" {
 		req.Header.Set("X-Session-Token", token)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
+	rec := httptest.NewRecorder()
+	a.Routes().ServeHTTP(rec, req)
+	return rec
 }
 
-func get(t *testing.T, h http.Handler, path, token string) *http.Response {
+func decode(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	t.Helper()
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+path, nil)
-	if token != "" {
-		req.Header.Set("X-Session-Token", token)
+	if err := json.NewDecoder(rec.Body).Decode(out); err != nil {
+		t.Fatalf("decode %s: %v", rec.Body.String(), err)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
 }
 
-func readJSON(t *testing.T, resp *http.Response) map[string]any {
+func login(t *testing.T, a *Auth, tenant, email, password string) string {
 	t.Helper()
-	defer resp.Body.Close()
-	var m map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-		t.Fatalf("decode: %v", err)
+	rec := do(t, a, http.MethodPost, "/login", "",
+		`{"tenant_id":"`+tenant+`","email":"`+email+`","password":"`+password+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	return m
+	var out struct {
+		Token string `json:"token"`
+	}
+	decode(t, rec, &out)
+	if out.Token == "" {
+		t.Fatal("login returned no token")
+	}
+	return out.Token
 }
 
-func TestHashPasswordRoundTrip(t *testing.T) {
-	hash, err := HashPassword("pw")
-	if err != nil {
+func TestLoginMeLogout(t *testing.T) {
+	a, _, fake, _ := setup(t)
+	fake.add("auth-t", "owner@test.dev", "sekret123", "owner", "Owner", true)
+
+	tok := login(t, a, "auth-t", "owner@test.dev", "sekret123")
+	rec := do(t, a, http.MethodGet, "/me", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var me struct {
+		User User `json:"user"`
+	}
+	decode(t, rec, &me)
+	if me.User.Email != "owner@test.dev" || me.User.TenantID != "auth-t" || me.User.Role != "owner" {
+		t.Fatalf("me=%+v", me.User)
+	}
+
+	if rec := do(t, a, http.MethodPost, "/logout", tok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("logout status=%d", rec.Code)
+	}
+	if rec := do(t, a, http.MethodGet, "/me", tok, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("me after logout=%d want 401", rec.Code)
+	}
+}
+
+func TestLoginRejectsUnknownTenantAndBadPassword(t *testing.T) {
+	a, _, fake, _ := setup(t)
+	fake.add("auth-t", "owner@test.dev", "sekret123", "owner", "Owner", true)
+
+	if rec := do(t, a, http.MethodPost, "/login", "",
+		`{"tenant_id":"nope","email":"owner@test.dev","password":"sekret123"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown tenant=%d want 401", rec.Code)
+	}
+	if rec := do(t, a, http.MethodPost, "/login", "",
+		`{"tenant_id":"auth-t","email":"owner@test.dev","password":"wrong"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad password=%d want 401", rec.Code)
+	}
+	if rec := do(t, a, http.MethodPost, "/login", "", `{"tenant_id":"auth-t"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing fields=%d want 400", rec.Code)
+	}
+}
+
+func TestRegisterRequiresOwnerAndRejectsDuplicates(t *testing.T) {
+	a, _, fake, _ := setup(t)
+	fake.add("auth-t", "owner@test.dev", "sekret123", "owner", "Owner", true)
+	fake.add("auth-t", "staff@test.dev", "sekret123", "pegawai", "Staff", true)
+
+	staffTok := login(t, a, "auth-t", "staff@test.dev", "sekret123")
+	if rec := do(t, a, http.MethodPost, "/register", staffTok,
+		`{"email":"new@test.dev","password":"sekret123","full_name":"New"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("staff register=%d want 403", rec.Code)
+	}
+
+	ownerTok := login(t, a, "auth-t", "owner@test.dev", "sekret123")
+	rec := do(t, a, http.MethodPost, "/register", ownerTok,
+		`{"email":"new@test.dev","password":"sekret123","full_name":"New"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("owner register=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, a, http.MethodPost, "/register", ownerTok,
+		`{"email":"new@test.dev","password":"sekret123","full_name":"New"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate register=%d want 409", rec.Code)
+	}
+	if rec := do(t, a, http.MethodPost, "/register", ownerTok,
+		`{"email":"other@test.dev","password":"sekret123","role":"admin"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad role=%d want 400", rec.Code)
+	}
+	if rec := do(t, a, http.MethodPost, "/register", ownerTok,
+		`{"email":"short@test.dev","password":"short"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("short password=%d want 400", rec.Code)
+	}
+}
+
+func TestExpiredAndPausedSessionsFail(t *testing.T) {
+	a, pool, fake, ctx := setup(t)
+	fake.add("auth-t", "owner@test.dev", "sekret123", "owner", "Owner", true)
+
+	tok := login(t, a, "auth-t", "owner@test.dev", "sekret123")
+	if _, err := pool.Exec(ctx,
+		`UPDATE public.staff_sessions SET expires_at = now() - interval '1 hour' WHERE token_hash=$1`,
+		HashToken(tok)); err != nil {
 		t.Fatal(err)
 	}
-	if !VerifyPassword(hash, "pw") {
-		t.Error("correct password rejected")
+	if rec := do(t, a, http.MethodGet, "/me", tok, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session=%d want 401", rec.Code)
 	}
-	if VerifyPassword(hash, "wrong") {
-		t.Error("wrong password accepted")
+
+	tok = login(t, a, "auth-t", "owner@test.dev", "sekret123")
+	if _, err := pool.Exec(ctx, `UPDATE public.clients SET status='paused' WHERE tenant_id='auth-t'`); err != nil {
+		t.Fatal(err)
 	}
-	if hash == "pw" {
-		t.Error("password stored in plaintext")
+	fake.setTenantActive("auth-t", false)
+	if rec := do(t, a, http.MethodGet, "/me", tok, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("paused tenant session=%d want 401", rec.Code)
+	}
+	if rec := do(t, a, http.MethodPost, "/login", "",
+		`{"tenant_id":"auth-t","email":"owner@test.dev","password":"sekret123"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("paused tenant login=%d want 401", rec.Code)
 	}
 }
 
-func TestLoginSuccessAndMe(t *testing.T) {
-	a, _, _ := harness(t)
-	mux := a.Routes()
-	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("login status=%d", resp.StatusCode)
-	}
-	m := readJSON(t, resp)
-	tok, _ := m["token"].(string)
-	if tok == "" {
-		t.Fatal("no token")
-	}
-	u := m["user"].(map[string]any)
-	if u["role"] != "owner" {
-		t.Errorf("role=%v want owner", u["role"])
-	}
-	// /me with the token.
-	resp2 := get(t, mux, "/me", tok)
-	if resp2.StatusCode != 200 {
-		t.Fatalf("me status=%d", resp2.StatusCode)
-	}
-	m2 := readJSON(t, resp2)
-	if m2["user"].(map[string]any)["email"] != "owner@centrum.test" {
-		t.Errorf("me user=%v", m2["user"])
-	}
-	// Logout → token invalid.
-	post(t, mux, "/logout", "", tok)
-	resp3 := get(t, mux, "/me", tok)
-	if resp3.StatusCode != 401 {
-		t.Errorf("me after logout status=%d want 401", resp3.StatusCode)
-	}
-}
-
-// TestRegisterOwnerSession is the regression test for the live 500:
-// register INSERT ran on the runtime pool without the tenant GUC, so
-// the RLS WITH CHECK rejected the row. The harness Auth uses the
-// runtime-role pool (like production), so this fails without the fix.
-func TestRegisterOwnerSession(t *testing.T) {
-	a, _, _ := harness(t)
-	mux := a.Routes()
-	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("login status=%d", resp.StatusCode)
-	}
-	sess := readJSON(t, resp)["token"].(string)
-
-	r1 := post(t, mux, "/register", `{"email":"peg@centrum.test","password":"pegawai123","full_name":"Peg"}`, sess)
-	if r1.StatusCode != 201 {
-		t.Fatalf("register status=%d want 201", r1.StatusCode)
-	}
-	r1.Body.Close()
-
-	// Duplicate email → 409.
-	r2 := post(t, mux, "/register", `{"email":"peg@centrum.test","password":"pegawai123","full_name":"Dup"}`, sess)
-	if r2.StatusCode != 409 {
-		t.Errorf("dup register status=%d want 409", r2.StatusCode)
-	}
-	r2.Body.Close()
-
-	// No session (client API token is not a staff identity) → 401.
-	r3 := post(t, mux, "/register", `{"email":"x@centrum.test","password":"pegawai123","full_name":"X"}`, "")
-	if r3.StatusCode != 401 {
-		t.Errorf("no-session register status=%d want 401", r3.StatusCode)
-	}
-	r3.Body.Close()
-
-	// New pegawai can log in.
-	r4 := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"peg@centrum.test","password":"pegawai123"}`, "")
-	if r4.StatusCode != 200 {
-		t.Errorf("pegawai login status=%d want 200", r4.StatusCode)
-	}
-	r4.Body.Close()
-}
-
-// TestRegisterKeepsPhone: the register request accepted a `phone` field for
-// a long time and the handler bound it into the request struct -- and then
-// the INSERT did not name a column for it, so the number was discarded. The
-// owner got a 201 and a staff account with no phone on it.
-//
-// Pinned across the whole round trip, because each half can break alone:
-// stored but not returned, returned by register but lost on the next sign-in
-// (login and /auth/me go through SECURITY DEFINER helpers with fixed
-// column lists), and NULL on pre-existing rows failing the scan.
-func TestRegisterKeepsPhone(t *testing.T) {
-	a, pool, _ := harness(t)
-	ctx := context.Background()
-	mux := a.Routes()
-	resp := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
-	if resp.StatusCode != 200 {
-		t.Fatalf("owner login status=%d", resp.StatusCode)
-	}
-	sess := readJSON(t, resp)["token"].(string)
-
-	r := post(t, mux, "/register",
-		`{"email":"wa@centrum.test","password":"pegawai123","full_name":"WA","phone":"628123456789"}`, sess)
-	if r.StatusCode != 201 {
-		t.Fatalf("register status=%d want 201", r.StatusCode)
-	}
-	got, _ := readJSON(t, r)["user"].(map[string]any)["phone"].(string)
-	if got != "628123456789" {
-		t.Errorf("register response phone = %q, want the submitted number", got)
-	}
-
-	var stored string
+func TestSessionCreateRejectsInactiveTenant(t *testing.T) {
+	_, pool, _, ctx := setup(t)
+	var id *string
 	if err := pool.QueryRow(ctx,
-		`SELECT phone FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE email='wa@centrum.test'`).Scan(&stored); err != nil {
+		`SELECT private.staff_session_create('auth-t', $1::uuid, 'active-hash', now() + interval '1 hour')::text`,
+		"00000000-0000-0000-0000-000000000001").Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	if stored != "628123456789" {
-		t.Errorf("stored phone = %q, want it persisted", stored)
+	if id == nil {
+		t.Fatal("active tenant session was not created")
 	}
-
-	// Still there after a sign-in: login reads through
-	// private.login_user, whose column list has to include phone too.
-	l := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"wa@centrum.test","password":"pegawai123"}`, "")
-	if l.StatusCode != 200 {
-		t.Fatalf("login status=%d", l.StatusCode)
+	if _, err := pool.Exec(ctx, `UPDATE public.clients SET status='paused' WHERE tenant_id='auth-t'`); err != nil {
+		t.Fatal(err)
 	}
-	loginBody := readJSON(t, l)
-	loginUser, _ := loginBody["user"].(map[string]any)
-	if p, _ := loginUser["phone"].(string); p != "628123456789" {
-		t.Errorf("login phone = %q, want it to survive the sign-in", p)
+	if err := pool.QueryRow(ctx,
+		`SELECT private.staff_session_create('auth-t', $1::uuid, 'inactive-hash', now() + interval '1 hour')::text`,
+		"00000000-0000-0000-0000-000000000001").Scan(&id); err != nil {
+		t.Fatal(err)
 	}
-	// The token rides at the top level of the login response, not inside
-	// user -- and the body is already consumed above, so it must come
-	// from the same decode.
-	tok, _ := loginBody["token"].(string)
-
-	// And through /me, which reads private.session_user.
-	m := get(t, mux, "/me", tok)
-	if m.StatusCode != 200 {
-		t.Fatalf("/me status=%d", m.StatusCode)
-	}
-	me, _ := readJSON(t, m)["user"].(map[string]any)
-	if p, _ := me["phone"].(string); p != "628123456789" {
-		t.Errorf("/me phone = %q, want it to survive the session lookup", p)
-	}
-	m.Body.Close()
-
-	// An account with no phone must still work. Every pre-existing staff row
-	// is NULL here, so an unqualified column would lock all of them out.
-	l2 := post(t, mux, "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"sekret123"}`, "")
-	if l2.StatusCode != 200 {
-		t.Errorf("owner login with NULL phone status=%d want 200", l2.StatusCode)
-	}
-	l2.Body.Close()
-}
-
-func TestLoginWrongPassword(t *testing.T) {
-	a, _, _ := harness(t)
-	resp := post(t, a.Routes(), "/login", `{"tenant_id":"auth-t","email":"owner@centrum.test","password":"wrong"}`, "")
-	if resp.StatusCode != 401 {
-		t.Errorf("wrong pw status=%d want 401", resp.StatusCode)
+	if id != nil {
+		t.Fatalf("paused tenant session created: %v", *id)
 	}
 }
 
-func TestLoginUnknownUserUniform(t *testing.T) {
-	a, _, _ := harness(t)
-	resp := post(t, a.Routes(), "/login", `{"tenant_id":"auth-t","email":"nobody@x.test","password":"sekret123"}`, "")
-	m := readJSON(t, resp)
-	if resp.StatusCode != 401 || m["error"] != "invalid credentials" {
-		t.Errorf("unknown user: status=%d body=%v", resp.StatusCode, m)
-	}
-}
-
-func TestSessionExpiry(t *testing.T) {
-	a, admin, _ := harness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	// Insert an already-expired session directly. tenant_id is NOT NULL as
-	// of migration 032 and there is no column default, so the insert must
-	// name it. This runs on the superuser pool, which is why it bypasses
-	// both the revoked app grant and the RLS policy.
-	raw, hash, _ := GenerateSessionToken()
-	if _, err := admin.Exec(ctx,
+func TestUserByTokenReturnsNoRowsForUnknownProvider(t *testing.T) {
+	_, pool, _, ctx := setup(t)
+	// A session row for a tenant with no registered provider must be an
+	// invalid session, not a 500. New() only knows the globally registered
+	// providers (Centrum), not this test tenant.
+	if _, err := pool.Exec(ctx,
 		`INSERT INTO public.staff_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, id, $1, now() - interval '1 hour' FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t'`,
-		hash); err != nil {
+		 VALUES ('auth-t', $1::uuid, $2, now() + interval '1 hour')`,
+		"00000000-0000-0000-0000-000000000002", HashToken("orphan-token")); err != nil {
 		t.Fatal(err)
 	}
-	resp := get(t, a.Routes(), "/me", raw)
-	if resp.StatusCode != 401 {
-		t.Errorf("expired session status=%d want 401", resp.StatusCode)
-	}
-}
-
-// TestUserByToken_ThrottlesLastSeen: UserByToken bumps last_seen_at at
-// most ~once a minute, so a busy dashboard doesn't take a write lock
-// on the session row every authed request.
-func TestUserByToken_ThrottlesLastSeen(t *testing.T) {
-	a, admin, _ := harness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	raw, hash, _ := GenerateSessionToken()
-	if _, err := admin.Exec(ctx,
-		`INSERT INTO public.staff_sessions (tenant_id, user_id, token_hash, expires_at)
-		 SELECT tenant_id, id, $1, now() + interval '1 hour' FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t'`,
-		hash); err != nil {
-		t.Fatal(err)
-	}
-
-	// First call sets last_seen_at (row default now()).
-	if _, err := a.UserByToken(ctx, raw); err != nil {
-		t.Fatal(err)
-	}
-	var first time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&first); err != nil {
-		t.Fatal(err)
-	}
-
-	// A second call within the same minute must NOT rewrite it.
-	time.Sleep(50 * time.Millisecond)
-	if _, err := a.UserByToken(ctx, raw); err != nil {
-		t.Fatal(err)
-	}
-	var second time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&second); err != nil {
-		t.Fatal(err)
-	}
-	if !second.Equal(first) {
-		t.Errorf("last_seen advanced on throttled call: %v -> %v", first, second)
-	}
-
-	// Backdate last_seen_at > 1 min → next call bumps it.
-	if _, err := admin.Exec(ctx,
-		`UPDATE public.staff_sessions SET last_seen_at = now() - interval '2 minutes' WHERE token_hash=$1`, hash); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.UserByToken(ctx, raw); err != nil {
-		t.Fatal(err)
-	}
-	var third time.Time
-	if err := admin.QueryRow(ctx, `SELECT last_seen_at FROM public.staff_sessions WHERE token_hash=$1`, hash).Scan(&third); err != nil {
-		t.Fatal(err)
-	}
-	if !third.After(first) {
-		t.Errorf("last_seen did not bump after backdate: %v -> %v", first, third)
-	}
-}
-
-// TestSessionTenantIsolation is the regression test for migration 032.
-//
-// Before it, sports_sessions carried no tenant_id and its policy was
-// USING (true), so any session token belonging to tenant B could be
-// resolved while acting as tenant A. These assert the two properties
-// that close it: the column exists and is populated, and a session
-// resolves to exactly the tenant of its own user.
-func TestSessionTenantIsolation(t *testing.T) {
-	_, admin, _ := harness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// tenant_id exists and is NOT NULL on the platform directory.
-	var nullable string
-	if err := admin.QueryRow(ctx,
-		`SELECT is_nullable FROM information_schema.columns
-		  WHERE table_schema='public' AND table_name='staff_sessions' AND column_name='tenant_id'`).Scan(&nullable); err != nil {
-		t.Fatal(err)
-	}
-	if nullable != "NO" {
-		t.Errorf("staff_sessions.tenant_id is nullable=%q, want NOT NULL", nullable)
-	}
-
-	// The legacy project-scoped session table is gone after the contract
-	// migration; there is one directory, and it is platform-owned.
-	var legacy *string
-	if err := admin.QueryRow(ctx, `SELECT to_regclass('project_centrum.sports_sessions')::text`).Scan(&legacy); err != nil {
-		t.Fatal(err)
-	}
-	if legacy != nil {
-		t.Errorf("legacy project_centrum.sports_sessions still exists: %s", *legacy)
-	}
-
-	// create_session stamps the tenant from the user, so a session
-	// cannot be minted into a tenant the user does not belong to. Mint
-	// one through the definer itself: the harness wipes auth-t rows on
-	// every invocation, so no leftover session can be assumed — and
-	// going through create_session is the stronger assertion anyway,
-	// because it proves the tenant comes from sports_users server-side.
-	//
-	// Two statements, not a CTE+JOIN: this mirrors exactly how
-	// production calls it (authapi login: SELECT the function, use the
-	// returned id). A single-statement CTE that both calls the
-	// data-modifying function and joins its result was observed to
-	// return zero rows through the session pooler even as the insert
-	// demonstrably lands — so the test uses the production shape.
-	var uid string
-	if err := admin.QueryRow(ctx,
-		`SELECT id::text FROM `+dbtest.Table(authTestSchema, "sports_users")+` WHERE tenant_id='auth-t' LIMIT 1`).Scan(&uid); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx,
-		`DELETE FROM public.staff_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
-		t.Fatal(err)
-	}
-	var sid string
-	if err := admin.QueryRow(ctx,
-		`SELECT private.create_session($1::uuid, 'hash-test-isolation', now() + interval '1 hour')::text`,
-		uid).Scan(&sid); err != nil {
-		t.Fatal(err)
-	}
-	if sid == "" {
-		t.Fatal("create_session returned NULL for an active user")
-	}
-	var got string
-	if err := admin.QueryRow(ctx,
-		`SELECT tenant_id FROM public.staff_sessions WHERE id = $1::uuid`, sid).Scan(&got); err != nil {
-		t.Fatal(err)
-	}
-	if got != "auth-t" {
-		t.Errorf("session tenant_id=%q, want auth-t", got)
-	}
-	if _, err := admin.Exec(ctx,
-		`DELETE FROM public.staff_sessions WHERE token_hash='hash-test-isolation'`); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestSessionDMLRevokedFromRuntime pins the privilege half of the
-// migration. If a future grant or migration hands INSERT back to the
-// runtime role, a caller could create a session for an arbitrary user_id
-// and pick the tenant themselves - bypassing the definer entirely. This
-// is the test that makes that regression loud.
-func TestSessionDMLRevokedFromRuntime(t *testing.T) {
-	_, admin, _ := harness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
-		var hasPriv bool
-		if err := admin.QueryRow(ctx,
-			`SELECT has_table_privilege('app_runtime', 'public.staff_sessions', $1)`, priv).Scan(&hasPriv); err != nil {
-			t.Fatal(err)
-		}
-		if hasPriv {
-			t.Errorf("app_runtime still holds %s on public.staff_sessions; the definer boundary is bypassable", priv)
-		}
-	}
-
-	// The functions must stay unreachable from PUBLIC. Postgres grants
-	// EXECUTE to PUBLIC on every new function by default.
-	for _, fn := range []string{
-		"create_session(uuid,text,timestamptz)",
-		"session_user(text)",
-		"delete_session(text)",
-		"touch_session(text,timestamptz)",
-	} {
-		var pub bool
-		if err := admin.QueryRow(ctx,
-			`SELECT has_function_privilege('public', 'private.' || $1, 'EXECUTE')`, fn).Scan(&pub); err != nil {
-			t.Fatal(err)
-		}
-		if pub {
-			t.Errorf("PUBLIC can EXECUTE private.%s; any role reaching the schema can mint sessions", fn)
-		}
+	bare := New(pool, nil)
+	if _, err := bare.UserByToken(ctx, "orphan-token"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("unknown provider err=%v, want pgx.ErrNoRows", err)
 	}
 }

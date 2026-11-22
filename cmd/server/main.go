@@ -350,7 +350,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      &authapi.Auth{Pool: pool, RDB: rdb},
+		Auth:      authapi.New(pool, rdb),
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,
