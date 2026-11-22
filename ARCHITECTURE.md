@@ -68,8 +68,13 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   skipping every applied migration. `migrate check` also audits
   ENABLE+FORCE RLS on every table in every project schema.
   Staff sessions are platform auth state in `public.staff_sessions`; staff
-  users remain project data in each schema. The definer auth functions resolve
-  the user's schema from `clients.db_schema`.
+  users remain project data in each schema. `internal/authapi` owns the session
+  directory, token primitives, and the `/v1/auth` route shell, but knows no
+  project table. A project registers an `authapi.Provider`; Centrum's lives in
+  `projects/centrum/backend/auth` and reads `sports_users` inside
+  `tenantdb.WithActiveTx`, so RLS and the project schema apply exactly as they
+  do for every other feature. Adding staff auth to a project is a provider
+  package, not a platform function edit.
   Production runs PostgreSQL 17 (the CI and compose images match).
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/

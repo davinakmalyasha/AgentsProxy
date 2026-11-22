@@ -32,6 +32,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
+	centrumauth "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/auth"
 )
 
 type harness struct {
@@ -159,6 +160,8 @@ func setup(t *testing.T) *harness {
 		RateLimitPerMinute: 100000, // high so tests don't trip
 		AllowOrigins:       []string{"*"},
 	}
+	authH := authapi.New(pool, rdb)
+	authH.RegisterProvider("alpha", centrumauth.New(pool))
 	router := NewRouter(Deps{
 		Cfg:     cfg,
 		Pool:    pool,
@@ -166,7 +169,7 @@ func setup(t *testing.T) *harness {
 		Cache:   cli,
 		LLM:     llmCli,
 		ADK:     testADKRunner(t, pool, mockLLM.URL),
-		Auth:    &authapi.Auth{Pool: pool, RDB: rdb},
+		Auth:    authH,
 		Version: "test",
 	})
 	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey, alphaSchema: alphaSchema}

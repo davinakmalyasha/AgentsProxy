@@ -39,6 +39,12 @@ Rules:
 - **`auto_grant` defaults to true.** New projects get the blanket
   `app_runtime` DML grant after migrations. Centrum sets it false so a future
   table does not silently gain runtime DML; each grant is deliberate.
+- **Staff auth is split.** The platform owns `public.staff_sessions`, token
+  generation, password hashing, and the `/v1/auth` route shell. A project
+  that needs staff login adds `backend/auth/` and registers an
+  `authapi.Provider`; Centrum's provider reads `sports_users` inside
+  `tenantdb.WithActiveTx`, so RLS and the tenant schema apply. Platform
+  packages must not name a project user table.
 - **Every test tenant gets its own cloned schema.** Feature tests use
   `testutil.CloneTenantSchema`, which clones tables, FKs, triggers, RLS,
   policies, and grants from `project_centrum`. A test must not query

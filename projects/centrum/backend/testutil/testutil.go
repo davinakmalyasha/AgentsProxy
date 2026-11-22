@@ -11,6 +11,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,8 +20,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
+	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
+	centrumauth "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/auth"
 )
 
 // SourceSchema is the production Centrum schema every test clone is made
@@ -106,15 +109,56 @@ func SchemaPool(t *testing.T, ctx context.Context, dsn, schema string) *pgxpool.
 	return pool
 }
 
+// NewAuth builds the platform auth handler with Centrum's provider bound to
+// the supplied tenant ids. Feature tests that only need session identity pass
+// their own tenant ids; production builds the provider map from package init
+// registrations.
+func NewAuth(pool *pgxpool.Pool, tenants ...string) *authapi.Auth {
+	a := authapi.New(pool, nil)
+	if len(tenants) == 0 {
+		tenants = []string{"centrum"}
+	}
+	for _, tenant := range tenants {
+		a.RegisterProvider(tenant, centrumauth.New(pool))
+	}
+	return a
+}
+
+// RuntimePool connects as app_runtime so RLS is enforced. The test DSNs are
+// admin/trust connections; swapping the user keeps the auth-provider and
+// feature tests honest about the production role.
+func RuntimePool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func toRuntimeDSN(dsn string) string {
+	i := strings.Index(dsn, "://")
+	if i < 0 {
+		return dsn
+	}
+	rest := dsn[i+3:]
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return dsn
+	}
+	return dsn[:i+3] + "app_runtime" + rest[at:]
+}
+
 // Table returns a quoted schema.table reference for test SQL.
 func Table(schema, table string) string {
 	return dbtest.Table(schema, table)
 }
 
 // SeedStaffSession creates a staff user in the tenant's cloned schema and a
-// live X-Session-Token session in the platform directory. create_session
-// resolves the clone from clients.db_schema, so the lookup takes the exact
-// production path.
+// live X-Session-Token session in the platform directory. The generic session
+// function takes the tenant explicitly, so the lookup no longer scans every
+// project.
 func SeedStaffSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, tenantID, email, role, rawToken string) {
 	t.Helper()
 	var userID string
@@ -128,8 +172,8 @@ func SeedStaffSession(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sch
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx,
-		`SELECT private.create_session($1::uuid, $2, now() + interval '1 hour')`,
-		userID, auth.HashToken(rawToken)); err != nil {
+		`SELECT private.staff_session_create($1, $2::uuid, $3, now() + interval '1 hour')`,
+		tenantID, userID, auth.HashToken(rawToken)); err != nil {
 		t.Fatal(err)
 	}
 }
