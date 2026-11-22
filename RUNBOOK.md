@@ -140,6 +140,13 @@ does not roll the schema back; the previous binary must tolerate the newer
 schema (this is why additive migrations are mandatory). A destructive change
 needs a separate phased migration, not a revert.
 
+**Schema-clone contract:** after migrations 079/080 and Centrum 0005, the
+database no longer has `clients.project_key` or
+`project_centrum.sports_sessions`. Do not promote a binary older than the
+schema-clone release: it writes `project_key` on admin create and cleans the
+legacy session table. Roll back to a binary from this release line, or
+re-add the column temporarily with a deliberate compatibility migration.
+
 For data incidents: restore from `ops/backup.sh` output:
 ```bash
 gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADMIN_URL"
