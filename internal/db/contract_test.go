@@ -73,3 +73,44 @@ func TestContractLegacyObjectsAreGone(t *testing.T) {
 		t.Fatalf("app_runtime session privileges create=%v resolve=%v", runtimeCreate, runtimeResolve)
 	}
 }
+
+// TestAgencyTablesAreNotRuntimeAccessible pins the boundary between the
+// tenant runtime and the DFD agency plane. The agency router runs on the
+// admin pool; app_runtime must not be able to mint an API key, reset a
+// SUPERADMIN, or read the OTP/signup tables.
+func TestAgencyTablesAreNotRuntimeAccessible(t *testing.T) {
+	dsn := migrateDSN()
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set — skipping agency grant test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	pool, err := NewPool(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := MigrateAll(ctx, pool); err != nil {
+		t.Fatalf("MigrateAll: %v", err)
+	}
+
+	var usersSelect, usersInsert, keysSelect, otpSelect, signupSelect, clientsSelect, recordsInsert bool
+	if err := pool.QueryRow(ctx, `
+		SELECT has_table_privilege('app_runtime','public.users','SELECT'),
+		       has_table_privilege('app_runtime','public.users','INSERT'),
+		       has_table_privilege('app_runtime','public.api_keys','SELECT'),
+		       has_table_privilege('app_runtime','public.login_otps','SELECT'),
+		       has_table_privilege('app_runtime','public.signup_requests','SELECT'),
+		       has_table_privilege('app_runtime','public.clients','SELECT'),
+		       has_table_privilege('app_runtime','public.tenant_records','INSERT')
+	`).Scan(&usersSelect, &usersInsert, &keysSelect, &otpSelect, &signupSelect, &clientsSelect, &recordsInsert); err != nil {
+		t.Fatal(err)
+	}
+	if usersSelect || usersInsert || keysSelect || otpSelect || signupSelect {
+		t.Fatalf("app_runtime reaches agency tables: usersSelect=%v usersInsert=%v keys=%v otp=%v signup=%v",
+			usersSelect, usersInsert, keysSelect, otpSelect, signupSelect)
+	}
+	if !clientsSelect || !recordsInsert {
+		t.Fatalf("app_runtime lost its tenant grants: clients=%v recordsInsert=%v", clientsSelect, recordsInsert)
+	}
+}

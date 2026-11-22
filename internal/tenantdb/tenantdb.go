@@ -33,10 +33,10 @@ var (
 // WithTx opens a transaction, sets the per-statement GUC app.tenant_id, and
 // runs fn inside it. RLS policies use the GUC.
 //
-// The schema is resolved in the same statement as the GUC, so a tenant
-// transaction costs one round trip. An unknown tenant falls back to public,
-// matching the records adapter's historical behavior; auth uses WithActiveTx
-// instead because an unknown tenant must never fall back.
+// The schema is resolved from clients and the transaction fails closed for an
+// unknown tenant. There is no public fallback: a caller must name a tenant
+// that exists, and a platform tenant must be an explicit db_schema='public'
+// row.
 //
 // A deadlock is retried. It is a normal race, not a malformed request: two
 // staff booking the same slot at the same instant both insert, and because
@@ -46,8 +46,14 @@ var (
 // PostgreSQL aborts one (SQLSTATE 40P01). Retrying is safe: the aborted
 // transaction rolled back, so fn starts from nothing. Only 40P01 is retried.
 func WithTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
+	// Fail closed: an unknown tenant must not silently become a public
+	// transaction. Platform tenants are explicit rows with db_schema='public'.
+	schema, _, err := Lookup(ctx, pool, tenantID)
+	if err != nil {
+		return err
+	}
 	return retryDeadlock(ctx, func() error {
-		return withTxOnce(ctx, pool, tenantID, fn)
+		return withSchemaTxOnce(ctx, pool, tenantID, schema, fn)
 	})
 }
 
@@ -101,31 +107,6 @@ func retryDeadlock(ctx context.Context, run func() error) error {
 		case <-time.After(time.Duration(attempt) * 20 * time.Millisecond):
 		}
 	}
-}
-
-func withTxOnce(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer rollbackOnPanic(ctx, tx)
-	// clients is resolved before search_path changes; subsequent statements
-	// see only the project schema (or public for a platform tenant). For a
-	// project schema, an unqualified table that is missing must fail rather
-	// than silently fall back to a shared platform table.
-	if _, err := tx.Exec(ctx, `
-		SELECT set_config('app.tenant_id', $1, true),
-		       set_config('search_path', CASE WHEN s = 'public' THEN 'public' ELSE s END, true)
-		  FROM (SELECT COALESCE((SELECT db_schema FROM clients WHERE tenant_id = $1), 'public') AS s) q`,
-		tenantID); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf("set tenant context: %w", err)
-	}
-	if err := fn(tx); err != nil {
-		_ = tx.Rollback(ctx)
-		return err
-	}
-	return tx.Commit(ctx)
 }
 
 func withSchemaTxOnce(ctx context.Context, pool *pgxpool.Pool, tenantID, schema string, fn func(pgx.Tx) error) error {

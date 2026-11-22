@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# ops/backup.sh — pg_dump of the agents_proxy database.
-# NOTE: nothing schedules this yet — wire it to a cron / GitHub Actions
-# schedule before calling it "nightly".
+# ops/backup.sh — a portable pg_dump of the application schemas.
+#
+# The workflow in .github/workflows/backup.yml runs this every 6 hours and
+# restores the artifact into a scratch postgres:17 before it is accepted.
+# Nothing here is scheduled by itself.
+#
 # Usage:  ops/backup.sh                # uses DATABASE_URL_ADMIN from env
 #         DATABASE_URL_ADMIN=... ops/backup.sh
-# Restores: psql "$DATABASE_URL_ADMIN" < backups/agents_proxy-YYYY-MM-DDTHH-MM-SS.sql.gz
+# Restores:
+#   psql "$DATABASE_ADMIN_URL" -f scripts/restore-roles.sql
+#   gunzip -c backup.sql.gz | psql "$DATABASE_ADMIN_URL" -v ON_ERROR_STOP=1
 #
 # DONE: PRD §H (backup) / STANDARDS §H
 
@@ -14,20 +19,18 @@ ADMIN_URL="${DATABASE_URL_ADMIN:-${DATABASE_ADMIN_URL:-${DATABASE_URL:-postgres:
 OUT_DIR="${BACKUP_DIR:-./backups}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
 
+# The dump contains every tenant's data. Never leave it world-readable.
+umask 077
 mkdir -p "$OUT_DIR"
 ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 out="$OUT_DIR/agents_proxy-$ts.sql.gz"
+label="${ADMIN_URL##*@}"   # host/db, never the password
 
-echo "[backup] dumping $ADMIN_URL -> $out"
-# App schemas only: public (platform), private, project_centrum, and every
-# project_<slug> schema. The platform layers (auth/storage/vault/...) are
-# Supabase-managed and covered by the platform WAL-G backups; including
-# them breaks portable restores (hosted-only extensions, pg_cron config
-# table data, event triggers) and drags platform PII (auth password
-# hashes) into the artifact.
-#
-# Build the schema list dynamically: the query returns exactly the schemas
-# this dump owns, so an empty project set cannot make pg_dump fail.
+echo "[backup] dumping ${label%%\?*} -> $out"
+# App schemas only: public (platform + agency), private, and every
+# project_<slug> schema. Supabase-managed layers (auth/storage/vault/cron/
+# extensions) are covered by the platform's own backups; including them
+# breaks portable restores and drags platform PII into the artifact.
 mapfile -t schemas < <(psql "$ADMIN_URL" -Atc \
   "SELECT nspname FROM pg_namespace
     WHERE nspname IN ('public','private') OR nspname LIKE 'project\\_%' ESCAPE '\\'
@@ -40,7 +43,10 @@ schema_args=()
 for s in "${schemas[@]}"; do
   schema_args+=(--schema="$s")
 done
-pg_dump --no-owner --no-privileges --clean --if-exists \
+# Ownership and ACLs are part of the restore contract: definer functions
+# must stay owned by their least-privilege roles, and app_runtime must get
+# the grants the migrations created. The restore pre-creates the roles.
+pg_dump --clean --if-exists \
   "${schema_args[@]}" "$ADMIN_URL" | gzip -9 > "$out"
 ls -lh "$out"
 

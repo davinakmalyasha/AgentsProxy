@@ -220,3 +220,34 @@ func keys(m map[string]*Project) []string {
 	}
 	return out
 }
+
+func TestValidateEnforcesProjectIdentity(t *testing.T) {
+	base := Project{Slug: "acme", Vertical: "fnb", Schema: "project_acme"}
+	if err := Validate(&base, DefaultBudget()); err != nil {
+		t.Fatalf("valid project rejected: %v", err)
+	}
+
+	underscore := base
+	underscore.Slug = "a_b"
+	if err := Validate(&underscore, DefaultBudget()); err == nil {
+		t.Fatal("underscore slug accepted; route and schema grammar must match")
+	}
+
+	wrongSchema := base
+	wrongSchema.Schema = "project_other"
+	if err := Validate(&wrongSchema, DefaultBudget()); err == nil {
+		t.Fatal("schema not derived from slug accepted")
+	}
+
+	badFeature := base
+	badFeature.Features = []string{"bad/name"}
+	if err := Validate(&badFeature, DefaultBudget()); err == nil {
+		t.Fatal("path-like feature name accepted")
+	}
+}
+
+func TestSchemaForSlug(t *testing.T) {
+	if got := SchemaForSlug("warung-sari"); got != "project_warung_sari" {
+		t.Fatalf("SchemaForSlug = %q", got)
+	}
+}

@@ -20,6 +20,9 @@ type User struct {
 	Role     string `json:"role"`
 	FullName string `json:"full_name"`
 	Phone    string `json:"phone,omitempty"`
+	// DBSchema is the tenant's business schema, resolved by the project
+	// provider. Route gates compare it with the mounted surface.
+	DBSchema string `json:"db_schema,omitempty"`
 }
 
 // Credentials is what a provider returns from a login lookup. The platform

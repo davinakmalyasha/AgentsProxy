@@ -6,12 +6,14 @@ package features
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 )
 
 // Feature is the unit of capability a client may enable. A feature
@@ -149,7 +151,6 @@ var (
 	projectMu        sync.RWMutex
 	projectFeatures  = map[string]map[string]Feature{}
 	projectVerticals = map[string]string{}
-	projectSlugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
 
 // RegisterProject adds a feature owned by one project. The feature name is
@@ -160,29 +161,85 @@ func RegisterProject(project, vertical string, f Feature) {
 	if project == "" {
 		panic("features.RegisterProject: empty project")
 	}
-	if !projectSlugRe.MatchString(project) {
+	if !agentconfig.SlugRe.MatchString(project) {
 		panic("features.RegisterProject: invalid project slug " + project)
 	}
 	if name == "" {
 		panic("features.RegisterProject: empty feature name")
 	}
-	projectMu.Lock()
-	defer projectMu.Unlock()
-	if projectFeatures[project] == nil {
-		projectFeatures[project] = map[string]Feature{}
+	if !agentconfig.FeatureNameRe.MatchString(name) {
+		panic("features.RegisterProject: invalid feature name " + name)
 	}
-	if _, exists := projectFeatures[project][name]; exists {
-		panic("features.RegisterProject: duplicate feature " + project + "/" + name)
+	vertical = strings.ToLower(strings.TrimSpace(vertical))
+	if !agentconfig.IsAllowedVertical(vertical) {
+		panic("features.RegisterProject: unknown vertical " + vertical + " for project " + project)
+	}
+	for _, allowed := range f.VerticalSlugs {
+		if !agentconfig.IsAllowedVertical(allowed) {
+			panic("features.RegisterProject: unknown vertical " + allowed + " in " + project + "/" + name)
+		}
+	}
+	if len(f.VerticalSlugs) > 0 {
+		found := false
+		for _, allowed := range f.VerticalSlugs {
+			if allowed == vertical {
+				found = true
+				break
+			}
+		}
+		if !found {
+			panic("features.RegisterProject: " + project + "/" + name + " does not allow the project vertical " + vertical)
+		}
 	}
 	f.Name = name
 	f.Kind = strings.ToLower(strings.TrimSpace(f.Kind))
 	if len(f.VerticalSlugs) == 0 {
 		f.VerticalSlugs = nil
 	}
-	projectFeatures[project][name] = f
-	if vertical != "" {
-		projectVerticals[project] = strings.ToLower(strings.TrimSpace(vertical))
+	projectMu.Lock()
+	defer projectMu.Unlock()
+	if prior, exists := projectVerticals[project]; exists && prior != vertical {
+		panic("features.RegisterProject: project " + project + " already registered vertical " + prior + ", got " + vertical)
 	}
+	if projectFeatures[project] == nil {
+		projectFeatures[project] = map[string]Feature{}
+	}
+	if existing, exists := projectFeatures[project][name]; exists {
+		// Two init paths registering the exact same feature are harmless
+		// (and `go test -count=2` triggers it). A differing registration is
+		// still a boot error.
+		if sameFeature(existing, f) {
+			return
+		}
+		panic("features.RegisterProject: duplicate feature " + project + "/" + name)
+	}
+	projectVerticals[project] = vertical
+	projectFeatures[project][name] = f
+}
+
+func sameFeature(a, b Feature) bool {
+	if a.Name != b.Name || a.Kind != b.Kind || a.PublicRead != b.PublicRead ||
+		len(a.VerticalSlugs) != len(b.VerticalSlugs) {
+		return false
+	}
+	for i := range a.VerticalSlugs {
+		if a.VerticalSlugs[i] != b.VerticalSlugs[i] {
+			return false
+		}
+	}
+	return funcPointer(a.Routes) == funcPointer(b.Routes) &&
+		funcPointer(a.ValidatePayload) == funcPointer(b.ValidatePayload)
+}
+
+func funcPointer(v any) uintptr {
+	if v == nil {
+		return 0
+	}
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() || rv.IsNil() {
+		return 0
+	}
+	return rv.Pointer()
 }
 
 // ProjectFeatures returns a stable, sorted slice of one project's features.
@@ -199,7 +256,6 @@ func ProjectFeatures(project string) []Feature {
 	return out
 }
 
-// ProjectVertical returns the vertical registered for a project.
 // IsKnownProjectFeature reports whether name is registered for project.
 // "records" is implicit for every project, matching the global registry.
 func IsKnownProjectFeature(project, name string) bool {
@@ -233,6 +289,7 @@ func ProjectFeatureAllowed(project, name, vertical string) bool {
 	return projectFeatureAllowed(f, vertical)
 }
 
+// ProjectVertical returns the vertical registered for a project.
 func ProjectVertical(project string) string {
 	project = strings.ToLower(strings.TrimSpace(project))
 	projectMu.RLock()

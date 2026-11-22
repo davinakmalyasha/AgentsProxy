@@ -4,6 +4,9 @@ bin/
 .env
 .env.*
 *.log
-*.md
+**/*.md
+# projectembed.go embeds the declarative project tree, including agent.md
+# and skills/*.md. Keep those even though repository docs are excluded.
+!projects/**/*.md
 docs/
 .commandcode/

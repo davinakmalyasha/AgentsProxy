@@ -13,6 +13,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/auth"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 )
 
 func mustDSN() string {
@@ -29,6 +30,7 @@ func mustDSN() string {
 
 func freshPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set — skipping clone test")

@@ -1,12 +1,13 @@
 // Command provision is the single operator path for a new tenant.
 //
-// It validates projects/<slug>/project.json, applies the embedded migrations,
-// creates the client through the admin API, and optionally seeds the first
-// owner. The client token and generated owner password are printed once.
+// It validates projects/<slug>/project.json, creates the client through the
+// admin API, and optionally seeds the first owner. The client token and
+// generated owner password are printed once.
 //
-// A project tenant must already have its schema migrated; this command runs
-// the migrator first, so the admin API's readiness check is satisfied. A
-// platform tenant (--platform) goes to schema public and needs no folder.
+// A project tenant must already have its schema migrated; use `cmd/migrate`
+// or the db-migrate workflow first. `--migrate` is an explicit local/staging
+// convenience that runs the guarded migrator. A platform tenant (--platform)
+// goes to schema public and needs no folder.
 package main
 
 import (
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
@@ -49,11 +51,13 @@ const usage = `usage: provision --slug <slug> --name "<name>" [flags]
   --owner-email                  seed the first owner
   --owner-password-stdin         read the owner password from one stdin line
   --generate-owner-password      generate and print an owner password once
-  --skip-migrate                 assume migrations are already applied
+  --migrate                      apply migrations through the guarded CLI path
   --dry-run                      print the plan without changing anything
 
-DATABASE_ADMIN_URL (or DATABASE_URL) is required unless --dry-run or
---skip-migrate is set. Secrets are printed once and never echoed back.
+Production DDL normally runs through the db-migrate workflow. --migrate is
+for a local/staging database that has not been migrated yet; it validates
+ENV, ALLOW_REMOTE_DB, and EXPECTED_DB_REF before opening a connection.
+Secrets are printed once and never echoed back.
 `
 
 type options struct {
@@ -70,7 +74,7 @@ type options struct {
 	ownerEmail string
 	ownerStdin bool
 	ownerGen   bool
-	skipMig    bool
+	migrate    bool
 	dryRun     bool
 }
 
@@ -105,7 +109,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.ownerEmail, "owner-email", "", "first owner email")
 	fs.BoolVar(&o.ownerStdin, "owner-password-stdin", false, "read owner password from stdin")
 	fs.BoolVar(&o.ownerGen, "generate-owner-password", false, "generate an owner password")
-	fs.BoolVar(&o.skipMig, "skip-migrate", false, "assume migrations are applied")
+	fs.BoolVar(&o.migrate, "migrate", false, "apply migrations through the guarded CLI path")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "print the plan only")
 	fs.Usage = func() { _, _ = fmt.Fprint(stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -159,21 +163,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if o.ownerEmail != "" {
 			_, _ = fmt.Fprintf(stdout, "  owner:    %s\n", o.ownerEmail)
 		}
-		if !o.skipMig {
+		if o.migrate {
 			_, _ = fmt.Fprintln(stdout, "  migrate:  yes")
 		}
 		return 0
 	}
 
-	if !o.skipMig {
-		adminDSN := strings.TrimSpace(os.Getenv("DATABASE_ADMIN_URL"))
-		if adminDSN == "" {
-			adminDSN = strings.TrimSpace(os.Getenv("DATABASE_URL"))
-		}
-		if adminDSN == "" {
-			_, _ = fmt.Fprintln(stderr, "provision: DATABASE_ADMIN_URL or DATABASE_URL is required unless --skip-migrate")
+	if o.migrate {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("ENV")), "production") {
+			_, _ = fmt.Fprintln(stderr, "provision: --migrate is for local/staging; production DDL runs through the db-migrate workflow")
 			return 1
 		}
+		dbCfg, err := config.LoadDatabase()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "provision: %v\n", err)
+			return 1
+		}
+		adminDSN := dbCfg.DatabaseAdminURL
 		pool, err := db.NewPool(ctx, adminDSN)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "provision: connect database: %v\n", err)
@@ -327,15 +333,15 @@ func resolveTenant(o options, project *agentconfig.Project) (vertical, schema st
 
 func validateFeatures(slug, vertical string, feats []string) error {
 	for _, f := range feats {
-		if features.IsKnownFeature(f) {
-			if !features.AllowedForVertical(f, vertical) {
-				return fmt.Errorf("feature %q is not allowed for vertical %q", f, vertical)
-			}
-			continue
-		}
 		if features.IsKnownProjectFeature(slug, f) {
 			if !features.ProjectFeatureAllowed(slug, f, vertical) {
 				return fmt.Errorf("project feature %q is not allowed for vertical %q", f, vertical)
+			}
+			continue
+		}
+		if features.IsKnownFeature(f) {
+			if !features.AllowedForVertical(f, vertical) {
+				return fmt.Errorf("feature %q is not allowed for vertical %q", f, vertical)
 			}
 			continue
 		}

@@ -13,10 +13,12 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenantdb"
+	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 )
 
 func setup(t *testing.T) (context.Context, *pgxpool.Pool, string, string) {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set — skipping tenantdb test")
@@ -98,6 +100,9 @@ func TestLookupAndActiveTxFailClosed(t *testing.T) {
 	}
 	if err := tenantdb.WithActiveTx(ctx, pool, "missing-tenant", func(pgx.Tx) error { return nil }); !errors.Is(err, tenantdb.ErrUnknownTenant) {
 		t.Fatalf("unknown tenant tx err=%v", err)
+	}
+	if err := tenantdb.WithTx(ctx, pool, "missing-tenant", func(pgx.Tx) error { return nil }); !errors.Is(err, tenantdb.ErrUnknownTenant) {
+		t.Fatalf("WithTx unknown tenant err=%v, want ErrUnknownTenant (no public fallback)", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE public.clients SET status='paused' WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)

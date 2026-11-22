@@ -78,7 +78,7 @@ func TestTwoProjectSchemasAreIsolated(t *testing.T) {
 	cleanup := func() {
 		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS project_iso_a CASCADE;
 			DROP SCHEMA IF EXISTS project_iso_b CASCADE;
-			DELETE FROM public.project_migrations WHERE project_slug IN ('iso_a','iso_b');
+			DELETE FROM public.project_migrations WHERE project_slug IN ('iso-a','iso-b');
 			DELETE FROM public.clients WHERE tenant_id IN ('iso-a','iso-b')`)
 	}
 	cleanup()
@@ -102,16 +102,16 @@ func TestTwoProjectSchemasAreIsolated(t *testing.T) {
 			WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 	`
 	fsys := fstest.MapFS{
-		"projects/iso_a/project.json": &fstest.MapFile{Data: []byte(`{
-			"slug": "iso_a", "display": "Iso A", "vertical": "sports",
+		"projects/iso-a/project.json": &fstest.MapFile{Data: []byte(`{
+			"slug": "iso-a", "display": "Iso A", "vertical": "sports",
 			"schema": "project_iso_a"
 		}`)},
-		"projects/iso_a/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(recordsSQL)},
-		"projects/iso_b/project.json": &fstest.MapFile{Data: []byte(`{
-			"slug": "iso_b", "display": "Iso B", "vertical": "sports",
+		"projects/iso-a/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(recordsSQL)},
+		"projects/iso-b/project.json": &fstest.MapFile{Data: []byte(`{
+			"slug": "iso-b", "display": "Iso B", "vertical": "sports",
 			"schema": "project_iso_b"
 		}`)},
-		"projects/iso_b/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(recordsSQL)},
+		"projects/iso-b/migrations/0001_init.sql": &fstest.MapFile{Data: []byte(recordsSQL)},
 	}
 	if err := MigrateProjectsFS(ctx, pool, fsys); err != nil {
 		t.Fatalf("MigrateProjectsFS: %v", err)
@@ -200,12 +200,12 @@ func TestTwoProjectSchemasAreIsolated(t *testing.T) {
 	// The ledger recorded each version against its own schema.
 	var aSchema, bSchema string
 	if err := pool.QueryRow(ctx,
-		`SELECT db_schema FROM public.project_migrations WHERE project_slug='iso_a' AND version='0001_init.sql'`).
+		`SELECT db_schema FROM public.project_migrations WHERE project_slug='iso-a' AND version='0001_init.sql'`).
 		Scan(&aSchema); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx,
-		`SELECT db_schema FROM public.project_migrations WHERE project_slug='iso_b' AND version='0001_init.sql'`).
+		`SELECT db_schema FROM public.project_migrations WHERE project_slug='iso-b' AND version='0001_init.sql'`).
 		Scan(&bSchema); err != nil {
 		t.Fatal(err)
 	}

@@ -65,13 +65,6 @@ jobs:
           EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
           DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
           DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
-          # Production config validation rejects a wildcard origin. The
-          # value is unused by cmd/migrate but must be valid.
-          ALLOW_ORIGINS: https://dfdagency.vercel.app
-          # cmd/migrate never constructs an LLM or admin client; config
-          # only requires the names to be non-empty.
-          LLM_API_KEY: migrate-unused
-          ADMIN_API_KEY: migrate-unused
         run: |
           set -euo pipefail
           test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }

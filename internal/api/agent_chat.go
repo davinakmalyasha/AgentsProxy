@@ -52,7 +52,9 @@ func (h *AgentChat) acquireTurn() (release func(), ok bool) {
 type agentChatRequest struct {
 	Message  string `json:"message"`
 	TenantID string `json:"tenant_id"`
-	Vertical string `json:"vertical"`
+	// Vertical is deliberately not accepted from the caller. It is tenant
+	// metadata; a request must not be able to select another vertical's
+	// persona or tool scope.
 }
 
 type agentChatResponse struct {
@@ -95,13 +97,13 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Tenant arrives from user input: must be a real active client,
 	// never an arbitrary string (history keys, RLS context, tool reads).
-	known, terr := records.CheckTenantCached(r.Context(), h.RDB, h.Pool, tenant)
+	info, terr := records.CheckTenantInfoCached(r.Context(), h.RDB, h.Pool, tenant)
 	if terr != nil {
 		slog.Error("client chat tenant lookup failed", "tenant", tenant, "err", terr)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
 		return
 	}
-	if !known {
+	if !info.Active {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return
 	}
@@ -112,10 +114,7 @@ func (h *AgentChat) ClientChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "agent not enabled for this project")
 		return
 	}
-	vertical := req.Vertical
-	if vertical == "" {
-		vertical = "sports"
-	}
+	vertical := info.Vertical
 	// Per-IP identity for anon client (not shared "Client" user)
 	userName := "client:" + clientIP(r)
 	// "anon" toolset, NOT "client": this endpoint carries no credential,
@@ -258,10 +257,17 @@ func (h *AgentChat) Chat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "agent not enabled for this project")
 		return
 	}
-	vertical := req.Vertical
-	if vertical == "" {
-		vertical = "sports"
+	info, ierr := records.CheckTenantInfoCached(r.Context(), h.RDB, h.Pool, tenant)
+	if ierr != nil {
+		slog.Error("agent tenant lookup failed", "tenant", tenant, "err", ierr)
+		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
+		return
 	}
+	if !info.Active {
+		writeJSONError(w, http.StatusForbidden, "tenant is not active")
+		return
+	}
+	vertical := info.Vertical
 	// Cutover complete: the ADK loop, same tier for tools and persona
 	// (unlike ClientChat's anon/client split -- here the session token
 	// pins the tenant, so the role's own tool set is safe).

@@ -36,7 +36,7 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.MaxTokensPerReq != 2048 {
 		t.Errorf("MaxTokens default: %d", c.MaxTokensPerReq)
 	}
-	if c.RateLimitPerMinute != 180 {
+	if c.RateLimitPerMinute != 60 {
 		t.Errorf("RateLimit default: %d", c.RateLimitPerMinute)
 	}
 	if len(c.AllowOrigins) != 1 || c.AllowOrigins[0] != "*" {
@@ -321,6 +321,7 @@ func TestLoad_StagingRemoteNeedsExplicitOptIn(t *testing.T) {
 	}
 
 	t.Setenv("ALLOW_REMOTE_DB", "true")
+	t.Setenv("EXPECTED_DB_REF", "example")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("staging with opt-in should load: %v", err)

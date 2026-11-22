@@ -213,6 +213,13 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 				args = append(args, cur.ts, cur.id.String())
 				idx += 2
 			}
+			// Defense in depth: RLS already pins the tenant, but an explicit
+			// predicate means a BYPASSRLS role or a future policy mistake is
+			// still bounded by the authenticated client.
+			sb.WriteString(" AND tenant_id = $")
+			sb.WriteString(strconv.Itoa(idx))
+			args = append(args, cm.TenantID)
+			idx++
 			sb.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $")
 			sb.WriteString(strconv.Itoa(idx))
 			args = append(args, limit+1) // +1 over-fetch to detect has_more
@@ -288,11 +295,11 @@ func (h *Handler) getOne(vertical string) http.HandlerFunc {
 		var createdAt, updatedAt time.Time
 		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
 			sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
-			        FROM tenant_records WHERE id = $1::uuid AND vertical = $2`
+			        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`
 			if !includeDeleted {
 				sql += " AND status != 'deleted'"
 			}
-			row := tx.QueryRow(r.Context(), sql, id, vertical)
+			row := tx.QueryRow(r.Context(), sql, id, vertical, cm.TenantID)
 			return row.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
 		})
 		if err != nil {
@@ -357,9 +364,9 @@ func (h *Handler) patch(vertical string) http.HandlerFunc {
 			args = append(args, *req.Status)
 			idx++
 		}
-		args = append(args, id, vertical)
-		sql := fmt.Sprintf("UPDATE tenant_records SET %s WHERE id = $%d::uuid AND vertical = $%d",
-			strings.Join(set, ", "), idx, idx+1)
+		args = append(args, id, vertical, cm.TenantID)
+		sql := fmt.Sprintf("UPDATE tenant_records SET %s WHERE id = $%d::uuid AND vertical = $%d AND tenant_id = $%d",
+			strings.Join(set, ", "), idx, idx+1, idx+2)
 
 		var affected int64
 		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
@@ -393,8 +400,9 @@ func (h *Handler) del(vertical string) http.HandlerFunc {
 		var affected int64
 		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
 			tag, err := tx.Exec(r.Context(),
-				`UPDATE tenant_records SET status = 'deleted', updated_at = now() WHERE id = $1::uuid AND vertical = $2`,
-				id, vertical,
+				`UPDATE tenant_records SET status = 'deleted', updated_at = now()
+				  WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`,
+				id, vertical, cm.TenantID,
 			)
 			if err != nil {
 				return err

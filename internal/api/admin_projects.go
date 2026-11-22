@@ -55,6 +55,18 @@ func (c *embeddedProjectCatalog) Ready(ctx context.Context, p *agentconfig.Proje
 	if !schemaExists {
 		return false, nil
 	}
+	// A schema that was recreated empty is not provisionable. The ledger can
+	// still have rows from the old schema; require the records table the
+	// project router always mounts.
+	var hasRecords bool
+	if err := c.pool.QueryRow(ctx,
+		`SELECT to_regclass(format('%I.tenant_records', $1::text)) IS NOT NULL`, p.Schema).
+		Scan(&hasRecords); err != nil {
+		return false, fmt.Errorf("inspect project objects: %w", err)
+	}
+	if !hasRecords {
+		return false, nil
+	}
 	var applied, otherSchema int
 	if err := c.pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE db_schema = $2),

@@ -58,7 +58,6 @@ services:
       SENTRY_ENV: ${SENTRY_ENV:-production}
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}
       TRACES_SAMPLE_RATE: ${TRACES_SAMPLE_RATE:-0.1}
-      PROFILES_SAMPLE_RATE: ${PROFILES_SAMPLE_RATE:-0.1}
     ports:
       - "8080:8080"
     depends_on:

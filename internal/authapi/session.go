@@ -2,7 +2,6 @@ package authapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -15,13 +14,6 @@ import (
 
 // SessionTTL is how long a login lasts before re-auth.
 const SessionTTL = 30 * 24 * time.Hour
-
-// sessTTL bounds how long a revoked session stays usable after logout:
-// logout deletes the row AND evicts the key, so the TTL is only the
-// backstop for crashes between the two.
-const sessTTL = 60 * time.Second
-
-func sessKey(hash string) string { return "sess:" + hash }
 
 // HashPassword bcrypt-hashes a password (cost 10 default).
 func HashPassword(pw string) (string, error) {
@@ -92,18 +84,6 @@ func (a *Auth) RegisterUser(ctx context.Context, tenantID string, in RegisterInp
 // so the caller's existing 401/public-read fallback stays intact.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	hash := HashToken(tok)
-	if a.RDB != nil {
-		if b, err := a.RDB.Get(ctx, sessKey(hash)).Bytes(); err == nil {
-			var u User
-			if err := json.Unmarshal(b, &u); err == nil {
-				// Cache hit skips the staff_session_resolve SELECT;
-				// the throttled touch below still runs (usually a no-op).
-				_, _ = a.Pool.Exec(ctx,
-					`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
-				return &u, nil
-			}
-		}
-	}
 
 	var userID, tenantID string
 	err := a.Pool.QueryRow(ctx,
@@ -134,10 +114,5 @@ func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	// would take a write lock on the session row every time.
 	_, _ = a.Pool.Exec(ctx,
 		`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
-	if a.RDB != nil {
-		if b, err := json.Marshal(&u); err == nil {
-			_ = a.RDB.Set(ctx, sessKey(hash), b, sessTTL).Err()
-		}
-	}
 	return &u, nil
 }

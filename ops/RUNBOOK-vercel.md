@@ -129,6 +129,12 @@ Supabase-side delivery are required rather than optional.
   off (`pitr_enabled=false`); the four-times-daily dump is the independent,
   off-platform copy. RPO is up to 6 hours.
 - Verify: `gh run list --workflow backup.yml --limit 3`, then download
-  `db-backup` and restore into a scratch database
-  (`gunzip -c *.sql.gz | psql <scratch>`); the smoke job does exactly
-  this on every run, including a schema_migrations count and row probes.
+  `db-backup` and restore into a scratch database:
+  `psql <scratch> -f scripts/restore-roles.sql`, then
+  `gunzip -c *.sql.gz | psql <scratch> -v ON_ERROR_STOP=1`. The dump includes
+  ownership and ACLs; the roles must exist first. The smoke job does exactly
+  this on every run, connects as `app_runtime`, and asserts non-zero
+  `clients` and `project_centrum.sports_facilities` rows.
+- Scheduled workflows are best-effort. Observed backup runs have been less
+  frequent than the cron suggests; enable Supabase PITR or an external
+  scheduler if a sub-6-hour RPO is required.

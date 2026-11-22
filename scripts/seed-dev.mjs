@@ -7,10 +7,10 @@
 // clients table and every public read answers 400 "unknown tenant" until
 // one is created. This is the supported way to create it.
 //
-// Which tenant: the proxy hard-codes "centrum" as its fallback tenant in
-// four places (records/identity.go, api/agent_chat.go), and the Centrum
-// Badminton frontend sends tenant_id=centrum, so that is the default
-// here. Override with TENANT_ID / TENANT_NAME / TENANT_VERTICAL.
+// Which tenant: the Centrum Badminton frontend sends tenant_id=centrum, so
+// that is the default here. Override with
+// TENANT_ID / TENANT_NAME / TENANT_VERTICAL. Public reads require an explicit
+// tenant_id; there is no fallback tenant.
 //
 // vertical matters: admin.Create defaults it to "fnb" and derives the
 // feature set from it, so omitting it silently provisions a food-and-beverage
@@ -72,7 +72,8 @@ async function main() {
   console.log(`tenant "${TENANT}" ready (vertical: ${VERTICAL}):`);
   console.log(JSON.stringify(body, null, 2));
   console.log("\nSave the client token above for local testing (X-Client-Token).");
-  console.log("Then verify: curl -s \"$PROXY_URL/v1/sports/availability/?tenant_id=" + TENANT + "&type=" + VERTICAL + "\"");
+  const prefix = SCHEMA ? `/v1/p/${TENANT}` : `/v1/${VERTICAL}`;
+  console.log(`Then verify: curl -s "${PROXY}${prefix}/availability?tenant_id=${TENANT}&type=${VERTICAL}"`);
 }
 
 main().catch((e) => { console.error(e.message); process.exit(1); });

@@ -8,21 +8,23 @@ import (
 	"time"
 )
 
-func TestLoadProjectPlansRejectsDuplicateIdentity(t *testing.T) {
+func TestLoadProjectPlansRejectsManifestIdentity(t *testing.T) {
+	// Folder and slug are the same identity; a folder cannot claim another
+	// project's slug.
 	fsys := fstest.MapFS{
-		"projects/a/project.json": &fstest.MapFile{Data: []byte(`{"slug":"same","schema":"project_a"}`)},
-		"projects/b/project.json": &fstest.MapFile{Data: []byte(`{"slug":"same","schema":"project_b"}`)},
+		"projects/a/project.json": &fstest.MapFile{Data: []byte(`{"slug":"same","schema":"project_same"}`)},
 	}
-	if _, err := loadProjectPlans(fsys); err == nil {
-		t.Fatal("duplicate slug was accepted")
+	if _, err := loadProjectPlans(fsys); err == nil || !strings.Contains(err.Error(), "folder name and slug must match") {
+		t.Fatalf("folder/slug mismatch error = %v", err)
 	}
 
+	// Exact schema derivation makes a shared project_* schema impossible
+	// through the manifest; the rejection must still be explicit.
 	fsys = fstest.MapFS{
 		"projects/a/project.json": &fstest.MapFile{Data: []byte(`{"slug":"a","schema":"project_same"}`)},
-		"projects/b/project.json": &fstest.MapFile{Data: []byte(`{"slug":"b","schema":"project_same"}`)},
 	}
-	if _, err := loadProjectPlans(fsys); err == nil {
-		t.Fatal("duplicate schema was accepted")
+	if _, err := loadProjectPlans(fsys); err == nil || !strings.Contains(err.Error(), "must be") {
+		t.Fatalf("non-derived schema error = %v", err)
 	}
 }
 
