@@ -1,7 +1,7 @@
 # Architecture hardening — November 2026
 
-Status: **in progress**. This document is the single tracker for the
-four-audit review (routing/layering, database/RLS, auth/isolation,
+Status: **P0/P1 implemented and verified; residual items are marked**. This
+document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
 docs/ops/CI). An item is only marked `[x]` when the code is merged and
 the named verification passes.
 
@@ -106,7 +106,7 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
   `.dockerignore` excludes `*.md`, but `projectembed.go` embeds
   `projects/*/agent/agent.md` and skills. `make docker` and
   `release.yml` cannot build. Fix `.dockerignore` and add a Docker build
-  to CI.
+  to CI. The CI Docker job passed (run 45075744093).
 
 - [x] **P1-7 Production config guards.**
   `DB_POOL_MIN=0` is rejected and silently becomes 2; Vercel-only
