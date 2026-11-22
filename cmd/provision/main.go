@@ -180,8 +180,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "provision: migrate: %v\n", err)
 			return 1
 		}
+		status, err := db.InspectMigrations(ctx, pool)
+		if err != nil {
+			pool.Close()
+			_, _ = fmt.Fprintf(stderr, "provision: inspect migrations: %v\n", err)
+			return 1
+		}
 		pool.Close()
-		_, _ = fmt.Fprintln(stderr, "migrations applied")
+		if !status.Clean() {
+			_, _ = fmt.Fprintln(stderr, "provision: migrations are not clean; run migrate check")
+			return 1
+		}
+		_, _ = fmt.Fprintln(stderr, "migrations applied and clean")
 	}
 
 	c, err := newAdminClient(o.baseURL, o.adminKey)
