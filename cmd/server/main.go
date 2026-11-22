@@ -22,16 +22,14 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	// Phase 3 shared features: each registers itself in init().
-	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/article"
-	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/booking"
-	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/menu"
-	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/promo"
-	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
+	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
 	// Phase 4/6 sports-vertical custom features.
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
+	_ "github.com/davinakmalyasha/agents-proxy/internal/projectsgen"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
@@ -343,6 +341,7 @@ func main() {
 		slog.Info("agency worker disabled (JWT_SECRET unset or BACKGROUND_TICKERS=false)")
 	}
 
+	features.SetLegacyProjectRoutes(cfg.LegacyProjectRoutes)
 	router := api.NewRouter(api.Deps{
 		Cfg:       cfg,
 		Pool:      pool,
@@ -350,7 +349,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      &authapi.Auth{Pool: pool, RDB: rdb},
+		Auth:      authapi.New(pool, rdb),
 		Version:   Version,
 		AdminPool: adminPool,
 		AdminKey:  cfg.AdminAPIKey,

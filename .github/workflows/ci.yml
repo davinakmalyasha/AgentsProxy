@@ -117,8 +117,8 @@ jobs:
       - name: generated project imports are current
         run: |
           go run ./cmd/genprojects
-          if [[ -n $(git status --porcelain cmd/server/projects_gen.go) ]]; then
-            echo "::error::cmd/server/projects_gen.go is stale. Run 'go run ./cmd/genprojects' and commit."
+          if [[ -n $(git status --porcelain internal/projectsgen/projects_gen.go) ]]; then
+            echo "::error::internal/projectsgen/projects_gen.go is stale. Run 'go run ./cmd/genprojects' and commit."
             exit 1
           fi
 

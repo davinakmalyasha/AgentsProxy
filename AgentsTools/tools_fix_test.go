@@ -297,7 +297,7 @@ func TestGetPricing_NoRowVsError(t *testing.T) {
 func TestRecordStaffPayment_Runs(t *testing.T) {
 	ctx, pool, admin := toolTestPool(t)
 	tenant := "tool-test"
-	if _, err := admin.Exec(ctx, `DELETE FROM public.agent_staff_payments WHERE tenant_id=$1`, tenant); err != nil {
+	if _, err := admin.Exec(ctx, `DELETE FROM sports_staff_payments WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]any{"staff_name": "Siti", "amount": 50000})
@@ -413,8 +413,8 @@ func TestKantinSummary_RespectsDate(t *testing.T) {
 	}
 }
 
-// TestQueryRangeSummary_SingleRPC pins the private.range_summary RPC
-// (migration 056): one booking + payment + expense + kantin sale seeded,
+// TestQueryRangeSummary_SingleRPC pins the project money summary RPC:
+// one booking + payment + expense + kantin sale seeded,
 // the dashboard tool must report all four sources in one round trip.
 // Tombstoned/voided rows and out-of-range rows must not leak in.
 func TestQueryRangeSummary_SingleRPC(t *testing.T) {

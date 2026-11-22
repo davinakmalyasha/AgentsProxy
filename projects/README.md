@@ -33,12 +33,26 @@ Rules:
 - **Centrum is the route-transition exception.** Its business tables live in
   `project_centrum` (moved by its `0001` project migration). Its frontend now
   uses `/v1/p/centrum/...`; both registries stay populated so
-  `/v1/sports/...` remains a rollback surface for one release. Remove the
-  legacy registration after the stability window. Every project, including
-  Centrum, uses its own schema; `public` is platform-only.
+  `/v1/sports/...` remains a rollback surface for one release, controlled by
+  `LEGACY_PROJECT_ROUTES`. After the frontend has moved, set it false in
+  staging then production, verify the alias is 404, and remove the dual
+  registration. Every project, including Centrum, uses its own schema;
+  `public` is platform-only.
+- **`features` is the project's default entitlement.** List the feature names
+  a new tenant should start with (including `records`). Admin/provision use the
+  list as the default `clients.features` for a new tenant; every name must also
+  be registered in code. A tenant may later run a subset. `migrate check`
+  verifies the client's vertical and that every enabled feature is known and
+  allowed, so a name cannot drift into a different meaning.
 - **`auto_grant` defaults to true.** New projects get the blanket
   `app_runtime` DML grant after migrations. Centrum sets it false so a future
   table does not silently gain runtime DML; each grant is deliberate.
+- **Staff auth is split.** The platform owns `public.staff_sessions`, token
+  generation, password hashing, and the `/v1/auth` route shell. A project
+  that needs staff login adds `backend/auth/` and registers an
+  `authapi.Provider`; Centrum's provider reads `sports_users` inside
+  `tenantdb.WithActiveTx`, so RLS and the tenant schema apply. Platform
+  packages must not name a project user table.
 - **Every test tenant gets its own cloned schema.** Feature tests use
   `testutil.CloneTenantSchema`, which clones tables, FKs, triggers, RLS,
   policies, and grants from `project_centrum`. A test must not query
@@ -131,12 +145,15 @@ without a deliberate export/move procedure.
 4. Add `agent/agent.md`, `agent/skills/*.md`, `agent/mcp.json`, and optional
    `agent/tools/*.go`.
 5. Run `go generate ./...` and commit the generated imports.
-6. Provision the client row with
-   `go run ./cmd/tenant create --slug <slug> --name "<name>" --vertical <vertical>`.
-   The CLI refuses to create a project tenant unless the folder exists;
-   `--allow-missing-project` exists only for a legacy/platform row. The admin
-   endpoint creates the schema and returns the client token once.
-7. Run `go run ./cmd/migrate` to apply platform and project migrations, then
-   `go run ./cmd/migrate check`.
-8. Deploy the frontend with its own `NEXT_PUBLIC_TENANT_ID` and the new
+6. Deploy the build, then run `go run ./cmd/migrate`. It creates the project
+   schema and applies `migrations/` before any client row exists.
+7. Provision the client and first owner with
+   `go run ./cmd/provision --slug <slug> --name "<name>" --owner-email ...`.
+   The command validates `project.json`, requires the schema/ledger to be
+   ready, prints the client token once, and pauses the client if owner seeding
+   fails. `go run ./cmd/tenant create` is the lower-level path. A platform
+   tenant with no folder uses `--platform` and schema `public`.
+8. Run `go run ./cmd/migrate check`. It reconciles the folder, schema, ledger,
+   `clients.vertical`, `clients.features`, and the compiled feature registry.
+9. Deploy the frontend with its own `NEXT_PUBLIC_TENANT_ID` and the new
    `/v1/p/<slug>/...` base.

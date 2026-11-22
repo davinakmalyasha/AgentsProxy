@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
+	centrumauth "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/auth"
 )
 
 type harness struct {
@@ -41,6 +43,7 @@ type harness struct {
 	mockLLM     *httptest.Server
 	adminKey    string
 	alphaSchema string
+	projects    *fakeProjectCatalog
 }
 
 func mustReq(t *testing.T, req *http.Request) *http.Response {
@@ -159,17 +162,30 @@ func setup(t *testing.T) *harness {
 		RateLimitPerMinute: 100000, // high so tests don't trip
 		AllowOrigins:       []string{"*"},
 	}
+	authH := authapi.New(pool, rdb)
+	authH.RegisterProvider("alpha", centrumauth.New(pool))
+
+	projects := newFakeProjectCatalog()
+	projects.add("schema-a", "project_schema_a", "sports", []string{"records"}, 1, true)
+	projects.add("schema-b", "project_schema_a", "sports", []string{"records"}, 1, true)
+	projects.add("schema-c", "project_schema_c", "sports", []string{"records"}, 1, true)
+	projects.add("race-a", "project_race_test", "sports", []string{"records"}, 1, true)
+	projects.add("race-b", "project_race_test", "sports", []string{"records"}, 1, true)
+	projects.add("kind-not-ready", "project_not_ready", "sports", []string{"records"}, 1, false)
+	projects.add("kind-feature-default", "project_feature_default", "sports", []string{"records", "quote"}, 1, true)
+
 	router := NewRouter(Deps{
-		Cfg:     cfg,
-		Pool:    pool,
-		Redis:   rdb,
-		Cache:   cli,
-		LLM:     llmCli,
-		ADK:     testADKRunner(t, pool, mockLLM.URL),
-		Auth:    &authapi.Auth{Pool: pool, RDB: rdb},
-		Version: "test",
+		Cfg:      cfg,
+		Pool:     pool,
+		Redis:    rdb,
+		Cache:    cli,
+		LLM:      llmCli,
+		ADK:      testADKRunner(t, pool, mockLLM.URL),
+		Auth:     authH,
+		Version:  "test",
+		Projects: projects,
 	})
-	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey, alphaSchema: alphaSchema}
+	h := &harness{router: router, pool: pool, redis: rdb, mockLLM: mockLLM, adminKey: adminKey, alphaSchema: alphaSchema, projects: projects}
 	t.Cleanup(h.close)
 	return h
 }
@@ -904,6 +920,144 @@ func TestAdmin_CreateProjectSchemaRace(t *testing.T) {
 	wg.Wait()
 	if !((results[0] == 201 && results[1] == 409) || (results[0] == 409 && results[1] == 201)) {
 		t.Fatalf("race results=%v, want one 201 and one 409", results)
+	}
+}
+
+// TestAdmin_CreateTenantKinds pins the provisioning split:
+//   - public = platform tenant, no folder needed;
+//   - project_* = project tenant, requires a matching project folder, a
+//     migrated schema, and project.json features as the default entitlement.
+func TestAdmin_CreateTenantKinds(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	features.RegisterProject("kind-feature-default", "sports", features.Feature{Name: "quote"})
+	cleanup := func() {
+		ctx := context.Background()
+		_, _ = h.pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id LIKE 'kind-%'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	create := func(tenant, schema, vertical string) (int, map[string]any) {
+		t.Helper()
+		body := `{"name":"` + tenant + `","tenant_id":"` + tenant + `"`
+		if schema != "" {
+			body += `,"schema":"` + schema + `"`
+		}
+		if vertical != "" {
+			body += `,"vertical":"` + vertical + `"`
+		}
+		body += `}`
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		resp := mustReq(t, req)
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		return resp.StatusCode, m
+	}
+
+	// A project_* schema without a folder is the old half-provisioned path.
+	if code, body := create("kind-no-folder", "project_kind_no_folder", "sports"); code != 400 {
+		t.Fatalf("no-folder project schema=%d body=%v want 400", code, body)
+	}
+	// A platform tenant goes to public and succeeds without a folder.
+	if code, body := create("kind-platform", "public", "fnb"); code != 201 {
+		t.Fatalf("platform create=%d body=%v want 201", code, body)
+	} else if body["schema"] != "public" {
+		t.Fatalf("platform schema=%v want public", body["schema"])
+	}
+	// project.json is authoritative for schema, vertical, and default features.
+	if code, body := create("kind-feature-default", "project_feature_default", "sports"); code != 201 {
+		t.Fatalf("project default features=%d body=%v want 201", code, body)
+	} else {
+		got, _ := body["features"].([]any)
+		found := false
+		for _, v := range got {
+			if v == "quote" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("features=%v want project.json default quote", got)
+		}
+	}
+	if code, _ := create("kind-feature-default", "project_feature_default", "fnb"); code != 400 {
+		t.Fatalf("project vertical mismatch=%d want 400", code)
+	}
+	// A project whose schema is not migrated is a 409, not a half-tenant.
+	if code, _ := create("kind-not-ready", "project_not_ready", "sports"); code != 409 {
+		t.Fatalf("not-ready project=%d want 409", code)
+	}
+	h.projects.add("kind-ready-err", "project_kind_ready_err", "sports", []string{"records"}, 1, true)
+	h.projects.readyErr["kind-ready-err"] = errors.New("ledger mismatch")
+	if code, _ := create("kind-ready-err", "project_kind_ready_err", "sports"); code != 409 {
+		t.Fatalf("ready error project=%d want 409", code)
+	}
+}
+
+func TestAdmin_SeedOwner(t *testing.T) {
+	h := setup(t)
+	srv := httptest.NewServer(h.router)
+	defer srv.Close()
+	id := lookupClientID(t, h.pool, "alpha")
+
+	post := func(body string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost,
+			srv.URL+"/v1/admin/clients/"+id+"/owner", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.adminKey)
+		return mustReq(t, req)
+	}
+
+	resp := post(`{"email":"admin-owner@test.dev","password":"sekret123","full_name":"Admin Owner"}`)
+	if resp.StatusCode != 201 {
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("seed owner status=%d body=%s", resp.StatusCode, raw)
+	}
+	resp.Body.Close()
+	var role string
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT role FROM `+dbtest.Table(h.alphaSchema, "sports_users")+` WHERE tenant_id='alpha' AND email='admin-owner@test.dev'`).
+		Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "owner" {
+		t.Fatalf("role=%q want owner", role)
+	}
+
+	if resp := post(`{"email":"admin-owner@test.dev","password":"sekret123"}`); resp.StatusCode != 409 {
+		resp.Body.Close()
+		t.Fatalf("duplicate owner=%d want 409", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := post(`{"email":"x@test.dev","password":"short"}`); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("short password=%d want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := post(`{"email":"x@test.dev","password":"sekret123","role":"admin"}`); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("bad role=%d want 400", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	missing := httptest.NewRequest(http.MethodPost,
+		"/v1/admin/clients/00000000-0000-0000-0000-000000000000/owner",
+		bytes.NewReader([]byte(`{"email":"x@test.dev","password":"sekret123"}`)))
+	missing.Header.Set("Content-Type", "application/json")
+	missing.Header.Set("Authorization", "Bearer "+h.adminKey)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, missing)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing client owner=%d want 404", rec.Code)
 	}
 }
 

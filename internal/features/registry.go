@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -153,7 +154,22 @@ var (
 	projectFeatures  = map[string]map[string]Feature{}
 	projectVerticals = map[string]string{}
 	projectSlugRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	// legacyProjectRoutes keeps the /v1/{vertical} mount for a project-owned
+	// vertical during the Centrum route cutover. It defaults to true so an
+	// upgrade without the env var keeps the rollback surface; the server sets
+	// it from LEGACY_PROJECT_ROUTES before building the router.
+	legacyProjectRoutes atomic.Bool
 )
+
+func init() { legacyProjectRoutes.Store(true) }
+
+// SetLegacyProjectRoutes controls the one-release /v1/{vertical} alias for
+// project-owned verticals. It is called once at boot from config.
+func SetLegacyProjectRoutes(on bool) { legacyProjectRoutes.Store(on) }
+
+// LegacyProjectRoutes reports whether the project-owned vertical alias is
+// mounted. The project-scoped /v1/p/<slug>/... router is always mounted.
+func LegacyProjectRoutes() bool { return legacyProjectRoutes.Load() }
 
 // RegisterLegacyProject registers a project feature in both the global and
 // project-scoped registries. It exists only for the Centrum route cutover:
@@ -161,7 +177,9 @@ var (
 // projects call RegisterProject directly, and the legacy registration is
 // removed once the frontend has moved.
 func RegisterLegacyProject(project, vertical string, f Feature) {
-	Register(f)
+	if LegacyProjectRoutes() {
+		Register(f)
+	}
 	RegisterProject(project, vertical, f)
 }
 

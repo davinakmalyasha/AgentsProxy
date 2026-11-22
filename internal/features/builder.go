@@ -79,12 +79,20 @@ func LiveVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
 	return out
 }
 
-// VerticalsToMount resolves the mount list: live verticals when known,
-// every allowed vertical otherwise (boot with no tenants yet, or a
-// lookup failure). A vertical with registered custom features always
-// mounts, so a feature can never be registered yet unreachable.
+// VerticalsToMount resolves the mount list.
+//
+// live == nil means the lookup could not run (fail-open: mount every vertical,
+// the historical behavior). A non-nil empty slice means the query succeeded
+// and no platform tenant exists, so nothing is mounted. A vertical with
+// registered custom features also mounts while the legacy project route is on,
+// so a feature can never be registered yet unreachable.
 func VerticalsToMount(live []string) []string {
-	if len(live) == 0 {
+	if live == nil {
+		if !LegacyProjectRoutes() {
+			// In platform-only mode a database failure must not silently
+			// resurrect the project-owned /v1/{vertical} alias.
+			return []string{}
+		}
 		return AllowedVerticals
 	}
 	seen := make(map[string]bool, len(AllowedVerticals))
@@ -95,11 +103,46 @@ func VerticalsToMount(live []string) []string {
 			out = append(out, v)
 		}
 	}
-	for _, v := range AllowedVerticals {
-		if hasCustomFeatures(v) && !seen[v] {
-			seen[v] = true
+	if LegacyProjectRoutes() {
+		for _, v := range AllowedVerticals {
+			if hasCustomFeatures(v) && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// LivePlatformVerticals is LiveVerticals restricted to platform tenants
+// (db_schema='public'). It returns a non-nil empty slice on success with no
+// platform tenants, so VerticalsToMount can distinguish "none exist" from
+// "lookup failed". A nil pool or query failure returns nil (fail-open).
+func LivePlatformVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
+	if pool == nil {
+		return nil
+	}
+	qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	rows, err := pool.Query(qctx,
+		`SELECT DISTINCT vertical FROM clients WHERE status='active' AND db_schema='public'`)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0)
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return nil
+		}
+		if IsAllowedVertical(v) {
 			out = append(out, v)
 		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil
 	}
 	return out
 }

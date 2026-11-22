@@ -58,18 +58,30 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   GUC and `search_path` from `clients.db_schema` per transaction — defense in
   depth. Centrum's frontend uses `/v1/p/centrum/...`; the legacy
   `/v1/sports/...` alias stays mounted as a rollback surface for one release.
-  The data boundary is already project-scoped.
+  `LEGACY_PROJECT_ROUTES` (default true) controls that alias; a platform-only
+  mount list excludes project tenants when it is false. The data boundary is
+  already project-scoped.
   The database enforces the namespace: `clients.db_schema` is `public` (the
   legacy platform row only) or `project_*`, and a partial unique index allows
-  exactly one client per project schema. Admin provisioning turns a unique
-  violation into a 409; `migrate check` also requires the index and reports
-  historical drift. `project_migrations` records the schema each version ran
-  in, so a project that changes its schema fails loudly instead of silently
-  skipping every applied migration. `migrate check` also audits
-  ENABLE+FORCE RLS on every table in every project schema.
+  exactly one client per project schema. A `project_*` client requires a
+  `projects/<slug>/project.json` folder and a complete project migration
+  ledger; a platform tenant uses `public` and needs no folder. The admin API
+  creates rows, not DDL: `migrate apply` creates the schema and tables before
+  the client exists. Admin provisioning turns a unique violation into a 409;
+  `migrate check` also requires the index, reconciles the client's vertical
+  and feature entitlement with `project.json`, and reports historical drift.
+  `project_migrations` records the schema each version ran in, so a project
+  that changes its schema fails loudly instead of silently skipping every
+  applied migration. `migrate check` also audits ENABLE+FORCE RLS on every
+  table in every project schema.
   Staff sessions are platform auth state in `public.staff_sessions`; staff
-  users remain project data in each schema. The definer auth functions resolve
-  the user's schema from `clients.db_schema`.
+  users remain project data in each schema. `internal/authapi` owns the session
+  directory, token primitives, and the `/v1/auth` route shell, but knows no
+  project table. A project registers an `authapi.Provider`; Centrum's lives in
+  `projects/centrum/backend/auth` and reads `sports_users` inside
+  `tenantdb.WithActiveTx`, so RLS and the project schema apply exactly as they
+  do for every other feature. Adding staff auth to a project is a provider
+  package, not a platform function edit.
   Production runs PostgreSQL 17 (the CI and compose images match).
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
