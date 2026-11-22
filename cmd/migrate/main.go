@@ -186,8 +186,16 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 		}
 		p, ok := projects[tenant]
 		if !ok {
-			// A client without a folder is either a platform tenant
-			// (public) or the undeclared-schema issue db already reports.
+			// A client without a folder is a platform tenant (or the
+			// undeclared-schema issue db already reports). Platform
+			// tenants may only enable global features allowed for their
+			// vertical.
+			for _, f := range feats {
+				if !features.IsKnownFeature(f) || !features.AllowedForVertical(f, vertical) {
+					issues = append(issues, fmt.Sprintf(
+						"client %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
+				}
+			}
 			continue
 		}
 		if p.Schema != schema {
