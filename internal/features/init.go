@@ -12,8 +12,7 @@ package features
 //
 // A project feature is scoped to one project and mounted under
 // /v1/p/<slug>/...; two projects may own a feature with the same name.
-// Centrum dual-registers its features so the legacy /v1/sports/... alias
-// remains available as a rollback surface for one release.
+// Project features never enter the global vertical registry.
 
 // ResetForTest clears both registries. Test-only.
 func ResetForTest() {

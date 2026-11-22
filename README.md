@@ -55,7 +55,7 @@ supabase/functions/    deliver-notification, deliver-reminders (serverless drive
 | `/v1/chat`, `/v1/agent/*` | client sites, widgets | `X-Client-Token` / public (rate-limited) |
 | `/v1/auth/*` | staff login | email+password → `X-Session-Token` |
 | `/v1/reports/*` | xlsx downloads | token-in-URL, 30-min TTL |
-| `/v1/{vertical}/*` | platform runtime + legacy Centrum rollback alias | `X-Client-Token` + `RequireFeature` gate |
+| `/v1/{vertical}/*` | platform tenants only | `X-Client-Token` + `RequireFeature` gate |
 | `/v1/p/{slug}/*` | project-scoped runtime | `X-Client-Token` + project gate |
 | `/v1/admin/*` | operator | `Bearer ADMIN_API_KEY` |
 | `/api/v1/packages|projects|articles|promos|settings` | agency public site | none / IP rate-limit |
@@ -106,8 +106,7 @@ call proxy admin and a client token can't list agency leads — wrong group =
 401 before any handler runs. Same Postgres, different tables/pools
 (`pool` = `app_runtime` tenant writes, `adminPool` = cross-tenant/DDL).
 
-* Static client sites (Hostinger) → `/v1/p/<slug>/...` + `X-Client-Token`
-  (`/v1/sports/...` is the one-release Centrum rollback alias).
+* Static and Next.js client sites → `/v1/p/<slug>/...` + `X-Client-Token`.
 * Agency Next.js (Vercel) → rewrite `/api/v1/*` → Go; portal `/api/v1/client/*`.
 * Agents/MCP → `/api/v1/agent/*` + `/mcp` with bearer key.
 

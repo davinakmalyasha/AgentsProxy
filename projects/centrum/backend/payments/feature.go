@@ -30,7 +30,7 @@ const featureName = "payments"
 func init() { Register() }
 
 func Register() {
-	features.RegisterLegacyProject("centrum", "sports", features.Feature{
+	features.RegisterProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // custom table, not tenant_records
 		VerticalSlugs: []string{"sports"},

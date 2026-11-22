@@ -83,7 +83,7 @@ func setup(t *testing.T) *harness {
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	features.ResetForTest()
 	Register()
-	fr := features.BuildVerticalRouter(features.BuilderDeps{
+	fr := features.BuildProjectRouterForTest("centrum", features.BuilderDeps{
 		Pool:  pool,
 		Cache: cli,
 		Auth:  testutil.NewAuth(adminPool, "pay-a", "pay-b"),
