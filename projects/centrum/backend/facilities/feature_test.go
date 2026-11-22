@@ -85,7 +85,7 @@ func setup(t *testing.T) *harness {
 
 	cli := &cache.Client{DB: pool, RDB: rdb}
 	// Build a vertical router with the facilities feature mounted,
-	// exactly like the builder does for /v1/sports.
+	// exactly like the builder does for /v1/p/centrum.
 	features.ResetForTest()
 	Register()
 	fr := features.BuildProjectRouterForTest("centrum", features.BuilderDeps{Pool: pool, Cache: cli}, "sports")

@@ -172,18 +172,19 @@ func RequireStaffOwner(w http.ResponseWriter, r *http.Request) *clientctx.Identi
 // there. Substring matching for an authorisation decision is the wrong tool;
 // the set is small and known, so it is spelled out.
 //
-// Note the paths arrive with the /v1/{vertical} prefix still attached (the
-// middleware runs on the vertical router, so r.URL.Path is the full path),
-// so the collection must be matched relative to that prefix rather than at
-// the start of the path.
+// Note the paths arrive with their mount prefix still attached (the
+// middleware runs on the vertical/project router, so r.URL.Path is the full
+// path), so the collection must be matched relative to that prefix rather
+// than at the start of the path.
 //
 // It is matched at a FIXED position: the segment immediately after the
-// vertical name. That is where these collections actually live
-// (/v1/sports/facilities, /v1/sports/pricing/...). Anchoring there rather
-// than searching anywhere keeps the rule tight: "/v1/sports/facilities" is
-// public, while "/v1/sports/admin/facilities" -- which contains the same
-// word at a different depth -- is not, because it is a different resource
-// that happens to share a name.
+// mount prefix. That is where these collections actually live
+// (/v1/fnb/facilities for a platform tenant, /v1/p/centrum/facilities for a
+// project). Anchoring there rather than searching anywhere keeps the rule
+// tight: "/v1/p/centrum/facilities" is public, while
+// "/v1/p/centrum/admin/facilities" -- which contains the same word at a
+// different depth -- is not, because it is a different resource that happens
+// to share a name.
 var publicReadSegments = [][]string{
 	{"availability"},
 	{"facilities"},
@@ -198,10 +199,10 @@ var publicReadSegments = [][]string{
 // GET only. A public identity is read-only, and relying on each handler to
 // re-check that is how a write ends up unauthenticated.
 //
-// The collection must be the path segment directly under the vertical
-// prefix, as whole segments. "/v1/sports/facilities" and
-// "/v1/sports/facilities/{id}" are public; "/v1/sports/x-facilities",
-// "/v1/sports/facilities-internal" and "/v1/sports/admin/facilities" are
+// The collection must be the path segment directly under the vertical or
+// project prefix, as whole segments. "/v1/fnb/facilities" and
+// "/v1/p/centrum/facilities/{id}" are public; "/v1/fnb/x-facilities",
+// "/v1/fnb/facilities-internal" and "/v1/p/centrum/admin/facilities" are
 // not.
 func isPublicRead(r *http.Request) bool {
 	if r.Method != http.MethodGet {
