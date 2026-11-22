@@ -23,14 +23,14 @@ prune script and tenant hygiene.
 
 New projects are not shared vertical code: each one gets
 `projects/<slug>/` and its own Postgres schema (`project_<slug>`). Centrum
-now owns `project_centrum`; its frontend uses `/v1/p/centrum/...`, with the
-legacy `/v1/sports/...` alias retained as a rollback surface for one
-release. New frontends use `/v1/p/<slug>/...` from day one.
+now owns `project_centrum` and its frontend uses `/v1/p/centrum/...`.
+The legacy `/v1/sports/...` alias is removed; a project tenant is never
+served by `/v1/{vertical}`. New frontends use `/v1/p/<slug>/...` from day one.
 
 ## Layout
 
 ```
-cmd/server/            entrypoint (migrate → serve, :8080, chi)
+cmd/server/            entrypoint (:8080, chi; migrations are a deploy step)
 internal/api/          root chi router: /healthz, /v1/*, /api/v1/*, /mcp
 internal/features/     client runtime: registry + gate + vertical builder
   shared/              records, menu, booking, review, article, promo
@@ -39,8 +39,8 @@ internal/agency/       DFD agency backend (chi): content, intake, client,
 internal/agency/auth/  JWT cookies (humans) + SHA-256 bearer keys (machines)
 projects/<slug>/       one client project: project.json, migrations/,
                        backend/ (HTTP features), agent/ (agent.md, skills,
-                       mcp.json, tools) � generated imports in
-                       cmd/server/projects_gen.go
+                       mcp.json, tools) — generated imports in
+                       internal/projectsgen/projects_gen.go
 internal/{config,db,cache,middleware,llm,auth,quota,notify,reminder,...}
 internal/db/migrations/  platform chain (proxy + agency + project schema support)
 projectembed.go         embeds every project.json, agent config, and migrations
@@ -91,12 +91,12 @@ make test                                   # TEST_* from .env.test; never DATAB
 
 `ENV=development` refuses any database host other than localhost. Staging is
 the only environment allowed to reach a remote database, and only with
-`ALLOW_REMOTE_DB=true`. Vercel Preview carries no production secrets; a
-backend preview fails closed until the staging project exists.
+`ALLOW_REMOTE_DB=true`. The staging branch uses the staging Supabase project;
+other previews carry no production secrets.
 
 DB-backed tests read `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`, and
-`TEST_REDIS_URL` only. The old habit of exporting `DATABASE_URL` before
-`go test` is now a CI failure (see `scripts/test-local.sh`).
+`TEST_REDIS_URL` only. `make test` requires all three to be loopback, and the
+test helpers refuse a remote target even on a direct `go test` run.
 
 ## How one backend serves many frontends
 
@@ -113,7 +113,9 @@ call proxy admin and a client token can't list agency leads — wrong group =
 ## Add a feature
 
 Platform feature: add a package under `internal/features/shared/<name>`,
-register it in `init()`, and blank-import it in `cmd/server/main.go`.
+register it in `init()`, and blank-import it in
+`internal/platformfeatures/platformfeatures.go` (the server and the
+migration/provision commands all import that list).
 
 Project feature: add `projects/<slug>/backend/<name>/` and call
 `features.RegisterProject("<slug>", "<vertical>", ...)`; run
@@ -121,4 +123,5 @@ Project feature: add `projects/<slug>/backend/<name>/` and call
 features mount at `/v1/p/<slug>/...` and own their schema.
 
 Agency: add a handler under `internal/agency/<domain>/` and mount it in
-`internal/agency/router.go`. Run `go test ./...` + curl smoke.
+`internal/agency/router.go`. Run `make test` (or `go test -p 1 ./...`
+against the local test targets) + curl smoke.

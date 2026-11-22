@@ -51,3 +51,16 @@ func TestRequireAdmin_Wrong(t *testing.T) {
 		t.Errorf("status=%d want 401", resp.StatusCode)
 	}
 }
+
+func TestRequireAdmin_EmptyConfiguredKeyFailsClosed(t *testing.T) {
+	h := RequireAdmin("")(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("empty admin key reached the handler")
+	}))
+	req, _ := http.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rr.Code)
+	}
+}

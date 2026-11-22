@@ -559,10 +559,13 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 // latter is what lets a new project put its own feature name into
 // clients.features without adding it to every vertical's global registry.
 func featureAllowedForClient(tenantID, vertical, name string) bool {
-	if features.IsKnownFeature(name) {
-		return features.AllowedForVertical(name, vertical)
+	// A project-owned name wins for its own project. The two registries are
+	// separate; a project may intentionally own a feature name that also
+	// exists in the platform vocabulary.
+	if features.IsKnownProjectFeature(tenantID, name) {
+		return features.ProjectFeatureAllowed(tenantID, name, vertical)
 	}
-	return features.ProjectFeatureAllowed(tenantID, name, vertical)
+	return features.AllowedForVertical(name, vertical)
 }
 
 func containsString(xs []string, want string) bool {

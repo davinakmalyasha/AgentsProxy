@@ -1,11 +1,11 @@
 # Makefile — D:\MyProject\AgentsProxy (Laragon dev, Go 1.27)
-.PHONY: run build test vet tidy fmt docker redis-cli healthz
+.PHONY: run build test vet tidy fmt migrate docker redis-cli healthz compose-up compose-down
 
 run:
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; go run ./cmd/server
 
 build:
-	go build -ldflags="-s -w -X main.Version=$$(git rev-parse --short HEAD 2>NUL || echo dev)" -o bin/server ./cmd/server
+	go build -ldflags="-s -w -X main.Version=$$(git rev-parse --short HEAD 2>/dev/null || echo dev)" -o bin/server ./cmd/server
 
 # migrate runs embedded migrations against DATABASE_ADMIN_URL (or
 # DATABASE_URL) without booting the server. The deploy step for

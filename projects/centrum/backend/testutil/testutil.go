@@ -23,6 +23,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
 	"github.com/davinakmalyasha/agents-proxy/internal/dbtest"
+	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 	centrumauth "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/auth"
 )
 
@@ -66,6 +67,7 @@ var (
 // calls it; the once keeps the second through Nth test cheap.
 func Migrate(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	migrateOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
@@ -81,6 +83,7 @@ func Migrate(t *testing.T, pool *pgxpool.Pool) {
 // keeps per-test data isolation without re-creating every table.
 func CloneTenantSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenant string) string {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	schema := dbtest.SharedSchema(t, ctx, pool, SourceSchema, tenant)
 	if err := dbtest.ResetSchema(ctx, pool, schema); err != nil {
 		t.Fatalf("reset clone %s: %v", schema, err)
@@ -114,7 +117,7 @@ func SchemaPool(t *testing.T, ctx context.Context, dsn, schema string) *pgxpool.
 // their own tenant ids; production builds the provider map from package init
 // registrations.
 func NewAuth(pool *pgxpool.Pool, tenants ...string) *authapi.Auth {
-	a := authapi.New(pool, nil)
+	a := authapi.New(pool)
 	if len(tenants) == 0 {
 		tenants = []string{"centrum"}
 	}

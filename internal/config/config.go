@@ -142,34 +142,35 @@ func Load() (*Config, error) {
 		frontendDefault = "http://localhost:3000"
 	}
 	c := &Config{
-		Port:                    getenv("PORT", "8080"),
-		Env:                     env,
-		DatabaseURL:             os.Getenv("DATABASE_URL"),
-		DatabaseAdminURL:        os.Getenv("DATABASE_ADMIN_URL"),
-		ExpectedDBRef:           strings.TrimSpace(os.Getenv("EXPECTED_DB_REF")),
-		RedisURL:                getenv("REDIS_URL", "localhost:6379"),
-		LLMBaseURL:              getenv("LLM_BASE_URL", "https://api.deepseek.com"),
-		LLMAPIKey:               os.Getenv("LLM_API_KEY"),
-		LLMModel:                getenv("LLM_MODEL", "deepseek-chat"),
-		AdminAPIKey:             os.Getenv("ADMIN_API_KEY"),
-		ReportWorkerToken:       os.Getenv("REPORT_WORKER_TOKEN"),
-		MaxTokensPerReq:         getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
-		RateLimitPerMinute:      getenvInt("RATE_LIMIT_PER_MINUTE", 180),
-		AllowOrigins:            splitCSV(getenv("ALLOW_ORIGINS", "*")),
-		TrustedProxyCIDRs:       splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
-		CostInPerMtok:           getenvFloatUnbounded("LLM_COST_IN_PER_MTOK", 0.14),
-		CostOutPerMtok:          getenvFloatUnbounded("LLM_COST_OUT_PER_MTOK", 0.28),
-		CapCallsClient:          getenvInt("CAP_CALLS_CLIENT", 20),
-		CapCallsStaff:           getenvInt("CAP_CALLS_PEGAWAI", 80),
-		CapCallsOwner:           getenvInt("CAP_CALLS_OWNER", 150),
-		RPDCallsClient:          getenvInt("RPD_CALLS_CLIENT", 30),
-		RPDCallsStaff:           getenvInt("RPD_CALLS_PEGAWAI", 80),
-		RPDCallsOwner:           getenvInt("RPD_CALLS_OWNER", 150),
-		SentryDSN:               os.Getenv("SENTRY_DSN"),
-		SentryEnv:               getenv("SENTRY_ENV", ""),
-		SentryRelease:           getenv("SENTRY_RELEASE", ""),
-		TracesSampleRate:        getenvFloat("TRACES_SAMPLE_RATE", 0.1),
-		DBPoolMin:               getenvPositiveInt("DB_POOL_MIN", 2),
+		Port:               getenv("PORT", "8080"),
+		Env:                env,
+		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		DatabaseAdminURL:   os.Getenv("DATABASE_ADMIN_URL"),
+		ExpectedDBRef:      strings.TrimSpace(os.Getenv("EXPECTED_DB_REF")),
+		RedisURL:           getenv("REDIS_URL", "localhost:6379"),
+		LLMBaseURL:         getenv("LLM_BASE_URL", "https://api.deepseek.com"),
+		LLMAPIKey:          os.Getenv("LLM_API_KEY"),
+		LLMModel:           getenv("LLM_MODEL", "deepseek-chat"),
+		AdminAPIKey:        os.Getenv("ADMIN_API_KEY"),
+		ReportWorkerToken:  os.Getenv("REPORT_WORKER_TOKEN"),
+		MaxTokensPerReq:    getenvPositiveInt("MAX_TOKENS_PER_REQUEST", 2048),
+		RateLimitPerMinute: getenvInt("RATE_LIMIT_PER_MINUTE", 60),
+		AllowOrigins:       splitCSV(getenv("ALLOW_ORIGINS", "*")),
+		TrustedProxyCIDRs:  splitCSV(getenv("TRUSTED_PROXY_CIDRS", "")),
+		CostInPerMtok:      getenvFloatUnbounded("LLM_COST_IN_PER_MTOK", 0.14),
+		CostOutPerMtok:     getenvFloatUnbounded("LLM_COST_OUT_PER_MTOK", 0.28),
+		CapCallsClient:     getenvInt("CAP_CALLS_CLIENT", 20),
+		CapCallsStaff:      getenvInt("CAP_CALLS_PEGAWAI", 80),
+		CapCallsOwner:      getenvInt("CAP_CALLS_OWNER", 150),
+		RPDCallsClient:     getenvInt("RPD_CALLS_CLIENT", 30),
+		RPDCallsStaff:      getenvInt("RPD_CALLS_PEGAWAI", 80),
+		RPDCallsOwner:      getenvInt("RPD_CALLS_OWNER", 150),
+		SentryDSN:          os.Getenv("SENTRY_DSN"),
+		SentryEnv:          getenv("SENTRY_ENV", ""),
+		SentryRelease:      getenv("SENTRY_RELEASE", ""),
+		TracesSampleRate:   getenvFloat("TRACES_SAMPLE_RATE", 0.1),
+		// Min may be zero: a serverless lambda must park no idle sessions.
+		DBPoolMin:               getenvInt("DB_POOL_MIN", 2),
 		DBPoolMax:               getenvPositiveInt("DB_POOL_MAX", 20),
 		DBSimpleProtocol:        false, // set below (strict parse, may error)
 		DBAdminPoolMin:          getenvPositiveInt("DB_ADMIN_POOL_MIN", 0),
@@ -230,6 +231,9 @@ func Load() (*Config, error) {
 	}
 	if err := validateDatabaseTargets(c); err != nil {
 		return nil, err
+	}
+	if c.AgencyJWTSecret != "" && len(c.AgencyJWTSecret) < 32 {
+		return nil, errors.New("JWT_SECRET must be at least 32 characters when set")
 	}
 	// ENV=production tightens CORS: a wildcard origin in production is
 	// a quota-burn hole (any site can call the public endpoints), so it
@@ -326,6 +330,20 @@ func validateDatabaseTargets(c *Config) error {
 				continue
 			}
 			return fmt.Errorf("%s points at remote host %q while ENV=%s; local development must use localhost, and only staging may opt in with ALLOW_REMOTE_DB=true", target.name, host, c.Env)
+		}
+	}
+	// A remote staging/production database without a project-ref pin is the
+	// copied-DSN failure this guard exists to stop. Loopback test targets
+	// may omit it; a real deployment may not.
+	if c.Env != "development" && strings.TrimSpace(c.ExpectedDBRef) == "" {
+		for _, dsn := range []string{c.DatabaseURL, c.DatabaseAdminURL} {
+			if dsn == "" {
+				continue
+			}
+			host, ok := dsnHost(dsn)
+			if ok && !isLoopbackHost(host) {
+				return errors.New("EXPECTED_DB_REF is required for a remote staging or production database")
+			}
 		}
 	}
 	return validateExpectedDBRef(c)

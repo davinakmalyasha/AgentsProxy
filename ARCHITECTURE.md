@@ -5,10 +5,12 @@
 One deployed Go binary serves two planes over one chi router:
 
 * **Client plane** (`/v1/*`) — per-project runtime for client businesses.
-  Every capability is a **feature** (`internal/features/`): core `records`
-  (always on), platform features (`menu/booking/review/article/promo`, gated
-  per client), and project features (`projects/<slug>/backend/*`, mounted at
-  `/v1/p/<slug>/*`, isolation test required).
+  Every **business capability** is a feature (`internal/features/`): core
+  `records` (always on), platform features (`menu/booking/review/article/promo`,
+  gated per client), and project features (`projects/<slug>/backend/*`, mounted
+  at `/v1/p/<slug>/*`, isolation test required). Shared services (`/v1/chat`,
+  `/v1/agent`, `/v1/auth`, `/v1/reports`, `/v1/push`) are not features; they
+  are tenant-scoped platform services and keep their own auth gates.
   Gate = in-memory check `name ∈ client.features ∧ AllowedForVertical`; a
   project gate also pins the tenant to the project named in the URL.
 * **Agency plane** (`/api/v1/*`, `/mcp`) — DFD's own backend: public catalog,
@@ -55,8 +57,12 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   table still carries `tenant_id → clients(tenant_id) ON DELETE CASCADE` +
   `ENABLE+FORCE RLS` + policy `tenant_id = current_setting('app.tenant_id')`
   + `GRANT app_runtime`. Handlers run in `WithTenantTx`, which sets both the
-  GUC and `search_path` from `clients.db_schema` per transaction — defense in
-  depth. Project tenants are reachable only under `/v1/p/<slug>/...`.
+  GUC and `search_path` from `clients.db_schema` per transaction. Every
+  records/feature query also carries an explicit `tenant_id` predicate.
+  RLS is defense-in-depth, not the sole boundary: `app_runtime` can set the
+  tenant GUC and the table owner/definers bypass it. The route gate pins the
+  project URL to its derived schema, and `WithTx` fails closed for an unknown
+  tenant. Project tenants are reachable only under `/v1/p/<slug>/...`.
   `/v1/{vertical}` is reserved for platform tenants in `public`; a project
   tenant never creates a vertical alias. Centrum's frontend uses
   `/v1/p/centrum/...`, and the old `/v1/sports/...` surface was removed after
@@ -86,10 +92,17 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/
   agent_events/webhook_*` (migration 068). Admin-only via `adminPool`;
-  no per-row tenant boundary (DFD is the only tenant).
+  no per-row tenant boundary (DFD is the only tenant). `app_runtime` is
+  deliberately not granted agency DML (migration 082).
+* ADK conversations: `sessions/events/app_states/user_states` are filtered by
+  `app_name` in the session service. Their RLS policies are `USING (true)`
+  because the service does not set a per-query tenant GUC; treat this as an
+  application-enforced boundary until the tenant_id migration lands.
 * Rules: every query parameterized (`$1`); `service_role` never touches
-  tenant tables; migrations additive-only, checksummed, advisory-locked at
-  boot (`RUN_MIGRATIONS=false` on Vercel — migrate as deploy step).
+  tenant tables; migrations are checksummed and advisory-locked. They follow
+  expand/contract: additive changes first, destructive cleanup in a later
+  contract migration after the stability window. `RUN_MIGRATIONS=false` on
+  Vercel — migrate as a deploy step.
   Platform migrations live in `internal/db/migrations/`; project migrations
   live in `projects/<slug>/migrations/` and are recorded in
   `public.project_migrations` with a per-project version scope.
@@ -125,5 +138,5 @@ PATCH), `rl:{id}:{min}` 60s (fail-open when down), `quota:{id}:{month}` 30s.
 Delivery is claim-based so both deploys work: Go tickers
 (`BACKGROUND_TICKERS=true`, Railway/VPS) or `pg_cron` + Edge Functions
 (`false`, Vercel) — atomic claim means exactly one driver sends each row.
-Pool: runtime `Min 2/Max 20` (`2/0` on Vercel), admin `0/3` direct 5432,
+Pool: runtime `Min 2/Max 20` (`Min 0/Max 2` on Vercel), admin `0/3` direct 5432,
 `DB_USE_SIMPLE_PROTOCOL=true` on Supavisor 6543.

@@ -50,6 +50,7 @@ func LoadCollect() (good map[string]*Project, bad map[string]error) {
 
 	good = make(map[string]*Project, len(dirs))
 	bad = make(map[string]error)
+	seenDir := make(map[string]string, len(dirs))
 	for dir := range dirs {
 		p, err := loadOne(dir)
 		if err != nil {
@@ -58,6 +59,15 @@ func LoadCollect() (good map[string]*Project, bad map[string]error) {
 			bad[slugOf(dir)] = err
 			continue
 		}
+		if priorDir, exists := seenDir[p.Slug]; exists {
+			bad[p.Slug] = fmt.Errorf("project slug %q is declared by both projects/%s and projects/%s", p.Slug, priorDir, dir)
+			continue
+		}
+		if err := Validate(p, DefaultBudget()); err != nil {
+			bad[p.Slug] = err
+			continue
+		}
+		seenDir[p.Slug] = dir
 		good[p.Slug] = p
 	}
 	return good, bad
@@ -161,7 +171,7 @@ func loadOne(dir string) (*Project, error) {
 	if p.Schema == "" {
 		// A new project is isolated by default. Centrum states
 		// "project_centrum" explicitly in its project.json.
-		p.Schema = "project_" + strings.ReplaceAll(p.Slug, "-", "_")
+		p.Schema = SchemaForSlug(p.Slug)
 	}
 	p.Agent.Enabled = doc.Agent.Enabled
 	p.Agent.Model = doc.Agent.Model

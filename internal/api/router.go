@@ -2,7 +2,6 @@
 package api
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -36,7 +35,6 @@ type Deps struct {
 	Version string
 	// Admin (super-operator) wiring for the REST /admin surface.
 	AdminPool *pgxpool.Pool // nil when the app pool doubles for it
-	AdminKey  string        // ADMIN_API_KEY
 	// Origins is the DB-backed CORS registry (migration 058). Nil keeps
 	// the static env list only (tests, local dev); production wires it
 	// at boot and exits when it cannot load (fail closed).
@@ -142,8 +140,12 @@ func NewRouter(d Deps) http.Handler {
 			Redis:              d.Redis,
 			RateLimitPerMinute: d.Cfg.RateLimitPerMinute,
 		}
-		live := features.LivePlatformVerticals(context.Background(), d.Pool)
-		for _, v := range features.VerticalsToMount(live) {
+		// Mount the platform surface statically. Route availability must not
+		// depend on tenant rows: a new platform tenant of a new vertical must
+		// be reachable immediately, and a project tenant must never gain the
+		// platform surface merely because another tenant shares its vertical.
+		// RequirePlatformTenant in the builder is the access boundary.
+		for _, v := range features.AllowedVerticals {
 			v := v
 			r.Mount("/"+v, features.BuildVerticalRouter(bDeps, v))
 		}
@@ -152,23 +154,36 @@ func NewRouter(d Deps) http.Handler {
 		// handlers and its schema; /v1/p/<slug>/... cannot reach another
 		// project's router or data.
 		projectCfgs, badProjects := agentconfig.LoadCollect()
+		badProjectSet := make(map[string]bool, len(badProjects))
 		for slug, err := range badProjects {
-			slog.Warn("project config unavailable for project routes", "project", slug, "err", err)
+			badProjectSet[slug] = true
+			slog.Error("project config unavailable; fencing its project router", "project", slug, "err", err)
+			if !features.ValidProjectSlug(slug) {
+				continue
+			}
+			slug := slug
+			r.Mount("/p/"+slug, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSONError(w, http.StatusServiceUnavailable,
+					"project configuration unavailable; the deploy is not ready")
+			}))
 		}
 		for slug, p := range projectCfgs {
-			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, bDeps, p.Vertical))
+			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, p.Schema, bDeps, p.Vertical))
 		}
 		for _, project := range features.RegisteredProjects() {
 			project := project
 			if _, mounted := projectCfgs[project]; mounted {
 				continue
 			}
+			if badProjectSet[project] {
+				continue // already fenced with 503 above
+			}
 			vertical := features.ProjectVertical(project)
 			if vertical == "" {
 				slog.Warn("project features registered without a vertical", "project", project)
 				continue
 			}
-			r.Mount("/p/"+project, features.BuildProjectRouter(project, bDeps, vertical))
+			r.Mount("/p/"+project, features.BuildProjectRouter(project, features.ProjectSchema(project), bDeps, vertical))
 		}
 
 		// The admin surface WRITES to clients (POST /clients), and

@@ -57,7 +57,9 @@ func TestClientsUsageRLSEnabled(t *testing.T) {
 	// The policies the runtime depends on are present.
 	want := map[string][]string{
 		"clients": {"clients_read_runtime"},
-		"usage":   {"usage_read_runtime", "usage_write_runtime"},
+		// Reads go through private.month_tokens; 084 removes the blanket
+		// read policy that 063 accidentally restored.
+		"usage": {"usage_write_runtime"},
 	}
 	rows, err := adminPool.Query(ctx,
 		`SELECT tablename, policyname FROM pg_policies WHERE tablename IN ('clients','usage')`)
@@ -85,6 +87,9 @@ func TestClientsUsageRLSEnabled(t *testing.T) {
 				t.Errorf("missing policy %s on %s", p, table)
 			}
 		}
+	}
+	if have["usage"]["usage_read_runtime"] {
+		t.Error("usage_read_runtime must be absent; all-tenant usage reads belong to private.month_tokens")
 	}
 
 	// Behavior: app_runtime reads clients and appends usage via the
@@ -126,5 +131,14 @@ func TestClientsUsageRLSEnabled(t *testing.T) {
 		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind)
 		 SELECT id, 1, 1, 0, 'test-model', 'chat' FROM clients WHERE tenant_id = $1`, tenant); err != nil {
 		t.Fatalf("app_runtime INSERT usage under RLS: %v", err)
+	}
+	// No SELECT policy means RLS filters every row, including the row just
+	// inserted. The quota path uses private.month_tokens instead.
+	var usageRows int
+	if err := runtimePool.QueryRow(ctx, `SELECT count(*) FROM usage`).Scan(&usageRows); err != nil {
+		t.Fatalf("app_runtime SELECT usage: %v", err)
+	}
+	if usageRows != 0 {
+		t.Errorf("app_runtime sees %d usage rows; want 0 without usage_read_runtime", usageRows)
 	}
 }

@@ -21,10 +21,16 @@ permissions:
 
 jobs:
   check:
+    # Read-only, but it still carries the production admin DSN. Never run a
+    # branch-supplied checkout with that credential.
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: actions/setup-go@v5
         with:
@@ -37,9 +43,6 @@ jobs:
           EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
           DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
           DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
-          ALLOW_ORIGINS: https://dfdagency.vercel.app
-          LLM_API_KEY: schema-check-unused
-          ADMIN_API_KEY: schema-check-unused
         run: |
           set -euo pipefail
           test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }

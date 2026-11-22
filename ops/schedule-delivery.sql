@@ -1,16 +1,13 @@
--- schedule-delivery.sql - one-time environment setup for Supabase
--- hosted delivery (pg_cron + Database Webhook).
+-- schedule-delivery.sql — HISTORICAL, DO NOT RUN.
 --
--- Run this ONCE per environment, AFTER migrations 029-031 have been
--- applied and the two Edge Functions are deployed. It is deliberately
--- NOT a migration: it embeds a function URL, references Vault secrets
--- that only exist on the hosted project, and would otherwise duplicate
--- a job on every environment sharing the migration ledger.
+-- This file installed a Database Webhook for `deliver-notification`, an
+-- Edge Function that is not deployed. Running it unschedules the working
+-- reminder tick and installs a broken notification path. The current
+-- delivery matrix is in ops/RUNBOOK-delivery.md: reminders use
+-- `deliver-reminders`; the notify drain is not installed on Vercel.
 --
--- Local dev (Laragon) does not need this at all: the Go ticker owns
--- delivery there (BACKGROUND_TICKERS unset = true).
---
---   psql "$DATABASE_ADMIN_URL" -f ops/schedule-delivery.sql
+-- It is kept only as a record of the pre-push design. It is deliberately
+-- not a migration and is not referenced by any runbook.
 --
 -- DONE: Vercel/Supabase split / STANDARDS A, E
 

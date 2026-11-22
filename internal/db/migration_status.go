@@ -230,7 +230,12 @@ func InspectMigrationsFS(ctx context.Context, pool *Pool, fsys fs.FS) (*Migratio
 		if err != nil {
 			return nil, err
 		}
+		shapeIssues, err := auditProjectShape(ctx, tx, p.Schema, len(applied))
+		if err != nil {
+			return nil, err
+		}
 		ps.Issues = append(ps.Issues, rlsIssues...)
+		ps.Issues = append(ps.Issues, shapeIssues...)
 		status.Issues = append(status.Issues, ps.Issues...)
 		status.Projects = append(status.Projects, ps)
 	}
@@ -381,6 +386,27 @@ func readProjectLedger(ctx context.Context, tx pgx.Tx, exists bool) (map[string]
 // ENABLE+FORCE RLS invariant. app_runtime is not the owner, so ENABLE alone
 // protects tenant traffic today; FORCE also protects definer/owner paths and
 // keeps the schema contract honest.
+// auditProjectShape proves the schema the ledger names is actually present.
+// A dropped schema that apply recreates empty has no tables; the ledger alone
+// would otherwise report clean and provisioning would accept it.
+func auditProjectShape(ctx context.Context, tx pgx.Tx, schema string, applied int) ([]string, error) {
+	if applied == 0 {
+		return nil, nil
+	}
+	var hasRecords bool
+	if err := tx.QueryRow(ctx,
+		`SELECT to_regclass(format('%I.tenant_records', $1::text)) IS NOT NULL`, schema).
+		Scan(&hasRecords); err != nil {
+		return nil, fmt.Errorf("inspect project shape %q: %w", schema, err)
+	}
+	if !hasRecords {
+		return []string{fmt.Sprintf(
+			"project schema %q has %d applied migrations but no tenant_records table; restore the schema or reapply the project migrations",
+			schema, applied)}, nil
+	}
+	return nil, nil
+}
+
 func auditProjectRLS(ctx context.Context, tx pgx.Tx, schema string) ([]string, error) {
 	var exists bool
 	if err := tx.QueryRow(ctx,

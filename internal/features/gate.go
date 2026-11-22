@@ -73,7 +73,9 @@ func RequireFeature(name string) func(http.Handler) http.Handler {
 				return
 			}
 			// Staff users (owner/pegawai) are inside the tenant already.
-			if id.Role != clientctx.RoleClient {
+			// A public identity is not a staff identity: it must still pass
+			// the entitlement check below.
+			if id.Role == clientctx.RoleOwner || id.Role == clientctx.RoleStaff {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -88,12 +90,34 @@ func RequireFeature(name string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequirePlatformTenant rejects a request whose resolved tenant is not a
+// platform tenant (db_schema='public'). It is the hard boundary for
+// /v1/{vertical}/...: a project tenant must never be served by the platform
+// surface, even when it shares a vertical with a platform tenant.
+func RequirePlatformTenant(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := clientctx.From(r.Context())
+		if id == nil || id.DBSchema != "public" {
+			// This is the retired project-on-platform surface. Answer 404,
+			// the same as the old alias, so a project tenant cannot tell
+			// whether a platform tenant of this vertical exists.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RequireProject rejects a request whose resolved tenant is not the project
-// that owns this router. This is the hard boundary for /v1/p/<slug>/...:
-// authentication happens first, then the request can only reach the schema
-// and handlers of the project named in the URL.
-func RequireProject(project string) func(http.Handler) http.Handler {
+// that owns this router, or whose tenant schema is not the project schema.
+// This is the hard boundary for /v1/p/<slug>/...: authentication happens
+// first, then the request can only reach the schema and handlers of the
+// project named in the URL.
+func RequireProject(project, schema string) func(http.Handler) http.Handler {
 	want := strings.ToLower(strings.TrimSpace(project))
+	wantSchema := strings.TrimSpace(schema)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := clientctx.From(r.Context())
@@ -107,6 +131,12 @@ func RequireProject(project string) func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"error":"project mismatch"}`))
+				return
+			}
+			if wantSchema == "" || id.DBSchema != wantSchema {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"project schema mismatch"}`))
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -132,7 +162,7 @@ func RequireProjectFeature(project, name string, publicRead bool) func(http.Hand
 				next.ServeHTTP(w, r)
 				return
 			}
-			if id.Role == "public" && publicRead && r.Method == http.MethodGet {
+			if id.Role == clientctx.RolePublic && publicRead && r.Method == http.MethodGet {
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -3,6 +3,7 @@ package records
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -20,75 +21,95 @@ type Querier interface {
 // lookup — as opposed to a tenant that genuinely does not exist.
 var ErrTenantLookup = errors.New("tenant lookup failed")
 
-// CheckTenant reports whether tenantID belongs to an active client, and
-// keeps "no such tenant" separate from "the lookup itself broke".
-//
-// The distinction matters: this runs before any tenant context exists, so
-// a fault here (RLS denying the role, a missing grant, a pool timeout) is
-// indistinguishable from an unknown tenant if it is collapsed into a bare
-// bool — the caller then answers 400 "unknown tenant" and blames a caller
-// for a server-side problem. That is exactly how a policy-less clients
-// table went unnoticed: the real cause (row-level security) was reported
-// as a bad request. Callers that can distinguish should use this and
-// answer 5xx on ErrTenantLookup.
-func CheckTenant(ctx context.Context, q Querier, tenantID string) (bool, error) {
+// TenantInfo is the routing identity of an active tenant. The schema is the
+// value the route gates and tenant transactions must agree on.
+type TenantInfo struct {
+	Active   bool   `json:"active"`
+	Schema   string `json:"schema"`
+	Vertical string `json:"vertical"`
+}
+
+// LookupTenantInfo reports an active client's schema and vertical. A missing
+// or non-active tenant returns Active=false, not an error.
+func LookupTenantInfo(ctx context.Context, q Querier, tenantID string) (TenantInfo, error) {
+	var info TenantInfo
 	if tenantID == "" {
-		return false, nil
+		return info, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	var one int
 	err := q.QueryRow(cctx,
-		`SELECT 1 FROM clients WHERE tenant_id=$1 AND status='active'`, tenantID).Scan(&one)
-	if err != nil {
-		// Not-a-client is a normal answer, not a failure.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("%w: %w", ErrTenantLookup, err)
+		`SELECT db_schema, vertical FROM clients WHERE tenant_id=$1 AND status='active'`,
+		tenantID).Scan(&info.Schema, &info.Vertical)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return info, nil
 	}
-	return true, nil
+	if err != nil {
+		return info, fmt.Errorf("%w: %w", ErrTenantLookup, err)
+	}
+	info.Active = true
+	return info, nil
+}
+
+// CheckTenant reports whether tenantID belongs to an active client. It is the
+// boolean view of LookupTenantInfo.
+func CheckTenant(ctx context.Context, q Querier, tenantID string) (bool, error) {
+	info, err := LookupTenantInfo(ctx, q, tenantID)
+	return info.Active, err
 }
 
 // knownTenantKey is the Redis key for the tenant-exists cache. Short
 // TTL: a just-provisioned tenant must become visible quickly, and a
 // just-paused one must fence quickly. Admin writes evict it eagerly
 // (see EvictTenantKnown); the TTL is the backstop, not the mechanism.
-const knownTenantKeyPrefix = "tknown:"
+const (
+	knownTenantKeyPrefix = "tknown:"
+	tenantInfoKeyPrefix  = "tinfo:"
+)
 
-// CheckTenantCached is CheckTenant with a 30s Redis cache. The tenant
+// CheckTenantInfoCached is LookupTenantInfo with a 30s Redis cache. The
 // lookup sits on the hottest anonymous path (every public read, every
 // client-chat); without this, landing traffic is a Postgres query per
 // request with a thundering herd every time a client row changes.
-func CheckTenantCached(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (bool, error) {
+func CheckTenantInfoCached(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (TenantInfo, error) {
+	var info TenantInfo
 	if tenantID == "" {
-		return false, nil
+		return info, nil
 	}
 	if rdb != nil {
-		if v, err := rdb.Get(ctx, knownTenantKeyPrefix+tenantID).Result(); err == nil {
-			return v == "1", nil
+		if b, err := rdb.Get(ctx, tenantInfoKeyPrefix+tenantID).Bytes(); err == nil {
+			if json.Unmarshal(b, &info) == nil {
+				return info, nil
+			}
 		}
 	}
-	ok, err := CheckTenant(ctx, q, tenantID)
+	info, err := LookupTenantInfo(ctx, q, tenantID)
 	if err != nil {
-		return false, err
+		return info, err
 	}
 	if rdb != nil {
-		val := "0"
-		if ok {
-			val = "1"
+		if b, err := json.Marshal(info); err == nil {
+			_ = rdb.Set(ctx, tenantInfoKeyPrefix+tenantID, b, 30*time.Second).Err()
 		}
-		_ = rdb.Set(ctx, knownTenantKeyPrefix+tenantID, val, 30*time.Second).Err()
 	}
-	return ok, nil
+	return info, nil
 }
 
-// EvictTenantKnown drops a cached tenant-exists entry. Call on every
-// clients write (provision, patch, status change) so the 30s TTL never
-// delays a fence or a launch.
+// CheckTenantCached is CheckTenant with a 30s Redis cache.
+func CheckTenantCached(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (bool, error) {
+	info, err := CheckTenantInfoCached(ctx, rdb, q, tenantID)
+	return info.Active, err
+}
+
+// EvictTenantKnown drops the cached tenant entries. Call on every clients
+// write (provision, patch, status change) so the 30s TTL never delays a
+// fence or a launch.
 func EvictTenantKnown(ctx context.Context, rdb *redis.Client, tenantID string) error {
 	if rdb == nil || tenantID == "" {
 		return nil
 	}
-	return rdb.Del(ctx, knownTenantKeyPrefix+tenantID).Err()
+	return rdb.Del(ctx,
+		knownTenantKeyPrefix+tenantID,
+		tenantInfoKeyPrefix+tenantID,
+	).Err()
 }

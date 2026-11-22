@@ -135,21 +135,30 @@ vercel ls agents-proxy
 vercel rollback <known-good-deployment-url> --yes
 ```
 
-Database migrations are additive and forward-only. Rolling the binary back
-does not roll the schema back; the previous binary must tolerate the newer
-schema (this is why additive migrations are mandatory). A destructive change
-needs a separate phased migration, not a revert.
+Database migrations follow expand/contract. Rolling the binary back does not
+roll the schema back; the previous binary must tolerate the newer schema. A
+destructive change is a later contract migration after the stability window,
+not a revert.
 
-**Schema-clone contract:** after migrations 079/080 and Centrum 0005, the
-database no longer has `clients.project_key` or
-`project_centrum.sports_sessions`. Do not promote a binary older than the
-schema-clone release: it writes `project_key` on admin create and cleans the
-legacy session table. Roll back to a binary from this release line, or
-re-add the column temporarily with a deliberate compatibility migration.
+**Compatibility floor:** migrations 079/080, 081, and Centrum 0005 and
+0009–0011 removed `clients.project_key`, `project_centrum.sports_sessions`,
+the legacy auth functions, `public.agent_staff_payments`,
+`private.range_summary`, and `money_reader`. Do not promote a binary older
+than this contract release: it will fail on writes or auth. Roll back to a
+binary from this release line, or re-add a compatibility object with a
+deliberate migration.
 
-For data incidents: restore from `ops/backup.sh` output:
+For data incidents, restore from `ops/backup.sh` output. The dump includes
+object ownership and ACLs, so pre-create the cluster roles first:
 ```bash
-gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz | psql "$DATABASE_ADMIN_URL"
+psql "$DATABASE_ADMIN_URL" -v ON_ERROR_STOP=1 -f scripts/restore-roles.sql
+gunzip -c backups/agents_proxy-2026-08-31T17-00-00Z.sql.gz \
+  | psql "$DATABASE_ADMIN_URL" -v ON_ERROR_STOP=1
+```
+The dump already contains both migration ledgers; do not re-run `migrate
+apply` against a restored database. Verify as the runtime role:
+```bash
+psql "$DATABASE_ADMIN_URL" -c "SET ROLE app_runtime; SELECT count(*) FROM clients"
 ```
 Supply `DATABASE_ADMIN_URL` ad hoc from the password manager. It must not
 live in a local `.env`; the app refuses a remote database in development.
@@ -164,7 +173,7 @@ live in a local `.env`; the app refuses a remote database in development.
 | `ENV` | development | strict enum: `development` / `staging` / `production`; anything else fails boot |
 | `DATABASE_URL` | required | runtime pool — **must be `app_runtime` (NOBYPASSRLS) in production**; boot rejects superuser/BYPASSRLS |
 | `DATABASE_ADMIN_URL` | empty | migrations + admin endpoints — superuser (Supabase 5432 direct); required when `ENV=production` |
-| `EXPECTED_DB_REF` | empty | optional Supabase project ref guard; when set, both DSNs must belong to that project or boot fails |
+| `EXPECTED_DB_REF` | empty | required for a remote staging/production DSN; both DSNs must belong to that Supabase project or boot fails |
 | `ALLOW_REMOTE_DB` | false | staging-only opt-in for a remote database; development always rejects remote |
 | `RUN_MIGRATIONS` | true in development, false otherwise | Vercel preview/production may never set true |
 | `REDIS_URL` | localhost:6379 | production: `rediss://...` for TLS |
@@ -179,9 +188,13 @@ live in a local `.env`; the app refuses a remote database in development.
 | `SENTRY_ENV` | development | |
 | `SENTRY_RELEASE` | empty | default: `-ldflags="-X main.Version=..."` |
 | `TRACES_SAMPLE_RATE` | 0.1 | 0.0..1.0 |
-| `DB_POOL_MIN` | 2 | runtime pool minimum connections |
-| `DB_POOL_MAX` | 20 | runtime pool maximum connections |
-| `DB_USE_SIMPLE_PROTOCOL` | false | **set to `true` when connecting via Supavisor 6543** |
+| `DB_POOL_MIN` | 2 | runtime pool minimum connections; **0 on Vercel** |
+| `DB_POOL_MAX` | 20 | runtime pool maximum connections; **2 on Vercel** |
+| `DB_USE_SIMPLE_PROTOCOL` | false | **must be `true` on Vercel/Supavisor 6543** |
+| `JWT_SECRET` | empty | agency plane; 32+ chars when set; empty disables `/api/v1` with 503 |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | empty | PWA push; empty preserves pending reminders |
+| `SUPABASE_URL` / `SUPABASE_STORAGE_KEY` | empty | durable report storage; empty writes local ephemeral files |
+| `REPORT_BUCKET` / `REPORT_MAX_BYTES` | reports / 15000000 | report storage bucket and upload cap |
 | `TEST_DATABASE_URL` | empty | tests only; local throwaway DB as `app_runtime` |
 | `TEST_DATABASE_ADMIN_URL` | empty | tests only; local throwaway DB as `postgres` |
 | `TEST_REDIS_URL` | empty | tests only; local Redis |
@@ -214,7 +227,7 @@ shell history.
 | Role | Used by | Rotate | Update | Verify |
 |---|---|---|---|---|
 | `app_runtime` | Vercel Production `DATABASE_URL` | `ALTER ROLE` in Supabase SQL editor | Vercel Production env, then redeploy | `/healthz` + one tenant read |
-| `postgres` | Vercel Production `DATABASE_ADMIN_URL` | Supabase dashboard → **Reset database password** (not raw SQL; pg_net/internal services) | Vercel Production env, then redeploy | `go run ./cmd/migrate` (no-op) + admin read |
+| `postgres` | Vercel Production `DATABASE_ADMIN_URL` | Supabase dashboard → **Reset database password** (not raw SQL; pg_net/internal services) | Vercel Production env, then redeploy | `db-migrate` workflow `check` + admin read |
 | `backup_reader` | GitHub `BACKUP_DATABASE_URL` | `ALTER ROLE` | GitHub secret | run the backup workflow |
 | `delivery_caller` | Edge Function `DELIVERY_DATABASE_URL` | `ALTER ROLE` | Supabase Edge Function secret | next reminder tick / function log |
 
@@ -284,13 +297,15 @@ before the client row does; the admin API never creates DDL.
 
 ```bash
 # 1. Add projects/<slug>/project.json and migrations/, deploy the build.
-# 2. Apply platform + project migrations (creates the schema and ledger).
-go run ./cmd/migrate
+# 2. Apply the migrations as a deploy step. Production uses the db-migrate
+#    workflow; local/staging may use the guarded CLI:
+go run ./cmd/migrate apply        # local/staging only
 
 # 3. One audited command: validate, create the client, seed the first owner.
+#    It does not apply DDL by default; pass --migrate only for a local or
+#    staging database that has not been migrated yet.
 export AGENTS_PROXY_URL=https://<host>
 export ADMIN_API_KEY=...                    # from the password manager
-export DATABASE_ADMIN_URL=...               # only for the migrate step
 
 go run ./cmd/provision --slug warung-sari --name "Warung Sari" \
   --owner-email owner@warung-sari.example --generate-owner-password
@@ -490,7 +505,7 @@ Production and staging run PostgreSQL 17. CI and `docker-compose.yml` use
 `postgres:17-alpine` so a migration cannot pass on an older server and fail
 in production.
 
-**Phase 4 note:** migrations `007`–`010` (sports vertical) create custom tables with RLS. Migration `008` runs `CREATE EXTENSION btree_gist` (needs superuser) — migrations run on the admin pool, so this is fine. The booking exclusion constraint (`tsrange`, NOT `tstzrange` — see ARCHITECTURE §11.3) prevents double-bookings at the DB level; a concurrent double-book surfaces as HTTP `409 slot already booked`.
+**Phase 4 note:** migrations `007`–`010` (sports vertical) create custom tables with RLS. Migration `008` runs `CREATE EXTENSION btree_gist` (needs superuser) — migrations run on the admin pool, so this is fine. The booking exclusion constraint (`tsrange`, NOT `tstzrange` — see ARCHITECTURE §3) prevents double-bookings at the DB level; a concurrent double-book surfaces as HTTP `409 slot already booked`.
 
 ---
 
@@ -502,13 +517,18 @@ dumps through `ops/backup.sh`, and restores the dump into a scratch
 
 * **RPO:** up to 6 hours. The free Supabase plan has no PITR
   (`pitr_enabled=false`); the logical dump is the recovery point.
-* **RTO:** restore the newest artifact, then recreate roles/extensions and
-  apply the embedded migration chain. The restore smoke already exercises
-  the schema + data path; treat a failed restore-smoke run as a release
-  blocker.
-* **Scope:** the dump includes platform and project schemas. Roles are
-  cluster-level and are recreated by the platform migration chain; hosted
-  extensions (`pg_cron`, `pg_net`) are recreated by the host.
+* **RTO:** pre-create the roles with `scripts/restore-roles.sql`, install
+  `btree_gist`, restore the newest artifact, then verify as `app_runtime`
+  (the workflow does exactly this and asserts non-zero platform and project
+  rows). The dump carries both migration ledgers, so applying the chain is
+  unnecessary and would be a no-op.
+* **Scope:** the dump includes platform and project schemas plus ownership
+  and ACLs. Roles are cluster-level and are pre-created by the restore
+  script; hosted extensions (`pg_cron`, `pg_net`) are recreated by the host.
+* **RPO caveat:** GitHub's scheduled workflow is best-effort; observed runs
+  can be delayed or skipped. For a tighter RPO, enable Supabase PITR or use
+  an external scheduler. The logical dump remains the portable/off-platform
+  copy.
 
 Do not restore production data into staging. Staging is synthetic.
 
@@ -542,7 +562,7 @@ Do not restore production data into staging. Staging is synthetic.
 
 | You want to… | Touch |
 |---|---|
-| Add a new vertical | `internal/features/builder.go` — append one string to `AllowedVerticals` |
+| Add a new vertical | `internal/agentconfig/config.go` — append one string to `AllowedVerticals` (the feature builder re-exports it) |
 | Add a new business field | nothing — it's all in `payload` jsonb |
 | Add a new admin endpoint | `internal/api/admin.go` (proxy) or `internal/agency/admin/` (agency plane) |
 | Add an agency endpoint | handler in `internal/agency/<domain>/` + route in its `RegisterRoutes` (chi) |

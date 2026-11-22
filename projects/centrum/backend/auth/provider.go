@@ -39,14 +39,19 @@ func (p *Provider) Authenticate(ctx context.Context, tenantID, email string) (au
 	var c authapi.Credentials
 	email = strings.ToLower(strings.TrimSpace(email))
 	err := tenantdb.WithActiveTx(ctx, p.Pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			SELECT id::text, email, password_hash, role, full_name,
 			       COALESCE(phone, ''), is_active
 			  FROM sports_users
 			 WHERE tenant_id = $1 AND email = $2`,
 			tenantID, email,
 		).Scan(&c.User.ID, &c.User.Email, &c.PasswordHash,
-			&c.User.Role, &c.User.FullName, &c.User.Phone, &c.Active)
+			&c.User.Role, &c.User.FullName, &c.User.Phone, &c.Active); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&c.User.DBSchema)
 	})
 	if errors.Is(err, pgx.ErrNoRows) ||
 		errors.Is(err, tenantdb.ErrUnknownTenant) ||
@@ -65,12 +70,17 @@ func (p *Provider) Authenticate(ctx context.Context, tenantID, email string) (au
 func (p *Provider) Profile(ctx context.Context, tenantID, userID string) (authapi.User, error) {
 	var u authapi.User
 	err := tenantdb.WithActiveTx(ctx, p.Pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			SELECT id::text, email, role, full_name, COALESCE(phone, '')
 			  FROM sports_users
 			 WHERE id = $1::uuid AND tenant_id = $2 AND is_active`,
 			userID, tenantID,
-		).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone)
+		).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&u.DBSchema)
 	})
 	if errors.Is(err, pgx.ErrNoRows) ||
 		errors.Is(err, tenantdb.ErrUnknownTenant) ||
@@ -95,13 +105,18 @@ func (p *Provider) Register(ctx context.Context, tenantID string, in authapi.Reg
 	var u authapi.User
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 	err := tenantdb.WithActiveTx(ctx, p.Pool, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
+		if err := tx.QueryRow(ctx, `
 			INSERT INTO sports_users (tenant_id, email, password_hash, role, full_name, phone)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id::text, email, role, full_name, COALESCE(phone, '')`,
 			tenantID, email, in.PasswordHash, role,
 			strings.TrimSpace(in.FullName), strings.TrimSpace(in.Phone),
-		).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone)
+		).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&u.DBSchema)
 	})
 	if isUniqueViolation(err) {
 		return authapi.User{}, authapi.ErrEmailTaken

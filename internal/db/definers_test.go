@@ -14,14 +14,10 @@ import (
 //   - Direct INSERT still works (usage_write_runtime kept).
 //   - private.mint_report / expired_reports / delete_reports round-trip.
 //
-// NOTE: this test does NOT assert the dropped usage_read_runtime
-// denial, because RLS on clients/usage is enabled out-of-band on
-// production (033) and absent on fresh databases: with RLS off, the
-// table grants govern and a SELECT succeeds. Asserting denial would
-// couple the test to out-of-band state. The isolation property (one
-// client sees only its own rows) holds in both worlds and is what's
-// asserted. Closing the fresh-DB RLS gap needs test-role rework
-// (the `app` test role has no policies); tracked in DEFERRED.
+// NOTE: migration 063 enables RLS on clients/usage in the migration chain,
+// and migration 084 removes the blanket usage read policy again. The quota
+// path uses private.month_tokens; the `rls_enable_test` now asserts that
+// app_runtime cannot read the usage ledger directly.
 func TestDefiners_AsAppRuntime(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	adminDSN := os.Getenv("TEST_DATABASE_ADMIN_URL")

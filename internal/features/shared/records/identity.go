@@ -62,11 +62,21 @@ func WithIdentity(deps IdentityDeps) func(http.Handler) http.Handler {
 					writeJSONError(w, http.StatusInternalServerError, "internal")
 					return
 				}
+				schema := u.DBSchema
+				if schema == "" && deps.Pool != nil {
+					// A provider that predates the schema field still gets
+					// the route gate correct. The provider should set this;
+					// this is a single indexed fallback.
+					_ = deps.Pool.QueryRow(r.Context(),
+						`SELECT db_schema FROM clients WHERE tenant_id = $1`,
+						u.TenantID).Scan(&schema)
+				}
 				id := &clientctx.Identity{
-					UserID: u.ID,
-					Email:  u.Email,
-					Role:   u.Role,
-					Tenant: u.TenantID,
+					UserID:   u.ID,
+					Email:    u.Email,
+					Role:     u.Role,
+					Tenant:   u.TenantID,
+					DBSchema: schema,
 				}
 				ctx := clientctx.With(r.Context(), id)
 				next.ServeHTTP(w, r.WithContext(ctx))
@@ -276,15 +286,15 @@ func publicIdentity(w http.ResponseWriter, r *http.Request, deps IdentityDeps) *
 	if !ok {
 		return nil
 	}
-	known, err := CheckTenantCached(r.Context(), cache.RDBOf(deps.Cache), deps.Pool, tenant)
+	info, err := CheckTenantInfoCached(r.Context(), cache.RDBOf(deps.Cache), deps.Pool, tenant)
 	if err != nil {
 		slog.Error("public tenant lookup failed", "tenant", tenant, "err", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "tenant lookup unavailable")
 		return nil
 	}
-	if !known {
+	if !info.Active {
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return nil
 	}
-	return &clientctx.Identity{Role: "public", Tenant: tenant}
+	return &clientctx.Identity{Role: "public", Tenant: tenant, DBSchema: info.Schema}
 }

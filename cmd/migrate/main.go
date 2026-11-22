@@ -83,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadDatabase()
 	if err != nil {
 		slog.Error("config load", "err", err)
 		return 1
@@ -170,6 +170,20 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 		if err := agentconfig.Validate(p, agentconfig.DefaultBudget()); err != nil {
 			issues = append(issues, fmt.Sprintf("project %q: %v", slug, err))
 		}
+		for _, f := range p.Features {
+			if f == "records" {
+				continue
+			}
+			if !features.IsKnownProjectFeature(slug, f) {
+				issues = append(issues, fmt.Sprintf(
+					"project %q: project.json feature %q is not registered in the project registry", slug, f))
+				continue
+			}
+			if !features.ProjectFeatureAllowed(slug, f, p.Vertical) {
+				issues = append(issues, fmt.Sprintf(
+					"project %q: project.json feature %q is not allowed for vertical %q", slug, f, p.Vertical))
+			}
+		}
 	}
 
 	rows, err := pool.Query(ctx,
@@ -212,17 +226,17 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 		// minimum entitlement: a tenant may intentionally run a subset.
 		// What must not drift is the meaning of a name that IS present.
 		for _, f := range feats {
-			if features.IsKnownFeature(f) {
-				if !features.AllowedForVertical(f, vertical) {
-					issues = append(issues, fmt.Sprintf(
-						"project %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
-				}
-				continue
-			}
 			if features.IsKnownProjectFeature(tenant, f) {
 				if !features.ProjectFeatureAllowed(tenant, f, vertical) {
 					issues = append(issues, fmt.Sprintf(
 						"project %q: project feature %q is not allowed for vertical %q", tenant, f, vertical))
+				}
+				continue
+			}
+			if features.IsKnownFeature(f) {
+				if !features.AllowedForVertical(f, vertical) {
+					issues = append(issues, fmt.Sprintf(
+						"project %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
 				}
 				continue
 			}

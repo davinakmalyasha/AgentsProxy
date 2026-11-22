@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 )
 
 // fakeProvider proves the platform auth shell is project-agnostic. It owns an
@@ -85,6 +86,22 @@ func (f *fakeProvider) Profile(_ context.Context, tenantID, userID string) (User
 	return User{}, ErrInvalidCredentials
 }
 
+func (f *fakeProvider) setRole(tenant, email, role string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row := f.users[key(tenant, email)]
+	row.User.Role = role
+	f.users[key(tenant, email)] = row
+}
+
+func (f *fakeProvider) setActive(tenant, email string, active bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row := f.users[key(tenant, email)]
+	row.Active = active
+	f.users[key(tenant, email)] = row
+}
+
 func (f *fakeProvider) Register(_ context.Context, tenantID string, in RegisterInput) (User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -103,6 +120,7 @@ func (f *fakeProvider) Register(_ context.Context, tenantID string, in RegisterI
 
 func setup(t *testing.T) (*Auth, *pgxpool.Pool, *fakeProvider, context.Context) {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set — skipping auth test")
@@ -138,7 +156,7 @@ func setup(t *testing.T) (*Auth, *pgxpool.Pool, *fakeProvider, context.Context) 
 		t.Fatal(err)
 	}
 
-	a := New(pool, nil)
+	a := New(pool)
 	fake := newFakeProvider()
 	a.RegisterProvider(tenant, fake)
 	return a, pool, fake, ctx
@@ -307,6 +325,34 @@ func TestSessionCreateRejectsInactiveTenant(t *testing.T) {
 	}
 }
 
+// TestUserByTokenReadsLiveRole is the regression for the staff-session
+// cache: a demoted or deactivated owner must lose authority on the very next
+// request, not after a TTL.
+func TestUserByTokenReadsLiveRole(t *testing.T) {
+	a, _, fake, ctx := setup(t)
+	fake.add("auth-t", "owner@test.dev", "sekret123", "owner", "Owner", true)
+	tok := login(t, a, "auth-t", "owner@test.dev", "sekret123")
+
+	u, err := a.UserByToken(ctx, tok)
+	if err != nil || u.Role != "owner" {
+		t.Fatalf("initial user role=%q err=%v", u.Role, err)
+	}
+
+	fake.setRole("auth-t", "owner@test.dev", "pegawai")
+	u, err = a.UserByToken(ctx, tok)
+	if err != nil {
+		t.Fatalf("resolve after demotion: %v", err)
+	}
+	if u.Role != "pegawai" {
+		t.Fatalf("role after demotion = %q, want pegawai (stale cache)", u.Role)
+	}
+
+	fake.setActive("auth-t", "owner@test.dev", false)
+	if _, err := a.UserByToken(ctx, tok); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("deactivated user err=%v, want pgx.ErrNoRows", err)
+	}
+}
+
 func TestUserByTokenReturnsNoRowsForUnknownProvider(t *testing.T) {
 	_, pool, _, ctx := setup(t)
 	// A session row for a tenant with no registered provider must be an
@@ -318,7 +364,7 @@ func TestUserByTokenReturnsNoRowsForUnknownProvider(t *testing.T) {
 		"00000000-0000-0000-0000-000000000002", HashToken("orphan-token")); err != nil {
 		t.Fatal(err)
 	}
-	bare := New(pool, nil)
+	bare := New(pool)
 	if _, err := bare.UserByToken(ctx, "orphan-token"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("unknown provider err=%v, want pgx.ErrNoRows", err)
 	}

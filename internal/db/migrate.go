@@ -27,6 +27,11 @@ const migrationLockID = 734561
 // an invisible deadlock.
 const projectMigrationLockID = 734562
 
+// allMigrationLockID serialises a whole MigrateAll (platform then project).
+// It is held on a dedicated session connection; the inner transaction locks
+// still protect direct Migrate/MigrateProjects callers.
+const allMigrationLockID = 734560
+
 // Migrate applies every embedded platform migration in lexical order,
 // recording each in schema_migrations. All migrations are idempotent
 // (IF NOT EXISTS / ON CONFLICT DO NOTHING), so re-running is safe.

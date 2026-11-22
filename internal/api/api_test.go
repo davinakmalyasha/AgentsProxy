@@ -32,6 +32,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
 	centrumauth "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/auth"
 )
@@ -69,6 +70,7 @@ func (h *harness) close() {
 
 func setup(t *testing.T) *harness {
 	t.Helper()
+	testsafety.RequireLocal(t)
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	rurl := os.Getenv("TEST_REDIS_URL")
 	if dsn == "" || rurl == "" {
@@ -166,17 +168,17 @@ func setup(t *testing.T) *harness {
 		RateLimitPerMinute: 100000, // high so tests don't trip
 		AllowOrigins:       []string{"*"},
 	}
-	authH := authapi.New(pool, rdb)
+	authH := authapi.New(pool)
 	authH.RegisterProvider("alpha", centrumauth.New(pool))
 
 	projects := newFakeProjectCatalog()
 	projects.add("schema-a", "project_schema_a", "sports", []string{"records"}, 1, true)
-	projects.add("schema-b", "project_schema_a", "sports", []string{"records"}, 1, true)
+	projects.add("schema-b", "project_schema_b", "sports", []string{"records"}, 1, true)
 	projects.add("schema-c", "project_schema_c", "sports", []string{"records"}, 1, true)
-	projects.add("race-a", "project_race_test", "sports", []string{"records"}, 1, true)
-	projects.add("race-b", "project_race_test", "sports", []string{"records"}, 1, true)
-	projects.add("kind-not-ready", "project_not_ready", "sports", []string{"records"}, 1, false)
-	projects.add("kind-feature-default", "project_feature_default", "sports", []string{"records", "quote"}, 1, true)
+	projects.add("race-a", "project_race_a", "sports", []string{"records"}, 1, true)
+	projects.add("race-b", "project_race_b", "sports", []string{"records"}, 1, true)
+	projects.add("kind-not-ready", "project_kind_not_ready", "sports", []string{"records"}, 1, false)
+	projects.add("kind-feature-default", "project_kind_feature_default", "sports", []string{"records", "quote"}, 1, true)
 
 	router := NewRouter(Deps{
 		Cfg:      cfg,
@@ -655,6 +657,7 @@ func TestAdmin_Create_ProjectFeature(t *testing.T) {
 	defer srv.Close()
 	const tenant = "proj-admin-test"
 	features.RegisterProject(tenant, "sports", features.Feature{Name: "quote"})
+	h.projects.add(tenant, "project_proj_admin_test", "sports", []string{"records", "quote"}, 1, true)
 	cleanup := func() {
 		ctx := context.Background()
 		_, _ = h.pool.Exec(ctx, `DROP SCHEMA IF EXISTS project_proj_admin_test CASCADE`)
@@ -835,8 +838,10 @@ func TestAdmin_CreateRejectsBadShape(t *testing.T) {
 	}
 }
 
-// TestAdmin_CreateEnforcesProjectSchemaBoundary pins the database-level
-// invariant: only project_* schemas, and one client per project schema.
+// TestAdmin_CreateEnforcesProjectSchemaBoundary pins the provisioning
+// boundary: a project's schema is derived from its slug, so a caller cannot
+// point it at another schema. The database unique index is covered by
+// TestUniqueProjectSchema.
 func TestAdmin_CreateEnforcesProjectSchemaBoundary(t *testing.T) {
 	h := setup(t)
 	srv := httptest.NewServer(h.router)
@@ -867,10 +872,10 @@ func TestAdmin_CreateEnforcesProjectSchemaBoundary(t *testing.T) {
 	resp.Body.Close()
 
 	resp = create("schema-b", "project_schema_a")
-	if resp.StatusCode != 409 {
+	if resp.StatusCode != 400 {
 		raw, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		t.Fatalf("duplicate schema status=%d body=%s, want 409", resp.StatusCode, raw)
+		t.Fatalf("non-derived schema status=%d body=%s, want 400", resp.StatusCode, raw)
 	}
 	resp.Body.Close()
 
@@ -885,10 +890,10 @@ func TestAdmin_CreateEnforcesProjectSchemaBoundary(t *testing.T) {
 	}
 }
 
-// TestAdmin_CreateProjectSchemaRace proves the unique index, not just the
-// friendly pre-check: two concurrent creates for the same schema must yield
-// exactly one 201 and one 409.
-func TestAdmin_CreateProjectSchemaRace(t *testing.T) {
+// TestAdmin_CreateTenantRace proves the tenant unique constraint, not just
+// the friendly pre-check: two concurrent creates for the same tenant must
+// yield exactly one 201 and one 409.
+func TestAdmin_CreateTenantRace(t *testing.T) {
 	h := setup(t)
 	srv := httptest.NewServer(h.router)
 	defer srv.Close()
@@ -900,7 +905,7 @@ func TestAdmin_CreateProjectSchemaRace(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	create := func(tenant string) int {
-		body := `{"name":"` + tenant + `","tenant_id":"` + tenant + `","vertical":"sports","schema":"project_race_test"}`
+		body := `{"name":"` + tenant + `","tenant_id":"` + tenant + `","vertical":"sports","schema":"project_race_a"}`
 		req, _ := http.NewRequest("POST", srv.URL+"/v1/admin/clients", bytes.NewReader([]byte(body)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+h.adminKey)
@@ -912,7 +917,7 @@ func TestAdmin_CreateProjectSchemaRace(t *testing.T) {
 	start := make(chan struct{})
 	results := make([]int, 2)
 	var wg sync.WaitGroup
-	for i, tenant := range []string{"race-a", "race-b"} {
+	for i, tenant := range []string{"race-a", "race-a"} {
 		wg.Add(1)
 		go func(i int, tenant string) {
 			defer wg.Done()
@@ -974,7 +979,7 @@ func TestAdmin_CreateTenantKinds(t *testing.T) {
 		t.Fatalf("platform schema=%v want public", body["schema"])
 	}
 	// project.json is authoritative for schema, vertical, and default features.
-	if code, body := create("kind-feature-default", "project_feature_default", "sports"); code != 201 {
+	if code, body := create("kind-feature-default", "project_kind_feature_default", "sports"); code != 201 {
 		t.Fatalf("project default features=%d body=%v want 201", code, body)
 	} else {
 		got, _ := body["features"].([]any)
@@ -988,11 +993,11 @@ func TestAdmin_CreateTenantKinds(t *testing.T) {
 			t.Fatalf("features=%v want project.json default quote", got)
 		}
 	}
-	if code, _ := create("kind-feature-default", "project_feature_default", "fnb"); code != 400 {
+	if code, _ := create("kind-feature-default", "project_kind_feature_default", "fnb"); code != 400 {
 		t.Fatalf("project vertical mismatch=%d want 400", code)
 	}
 	// A project whose schema is not migrated is a 409, not a half-tenant.
-	if code, _ := create("kind-not-ready", "project_not_ready", "sports"); code != 409 {
+	if code, _ := create("kind-not-ready", "project_kind_not_ready", "sports"); code != 409 {
 		t.Fatalf("not-ready project=%d want 409", code)
 	}
 	h.projects.add("kind-ready-err", "project_kind_ready_err", "sports", []string{"records"}, 1, true)
