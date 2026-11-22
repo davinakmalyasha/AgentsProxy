@@ -40,6 +40,33 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backup_reader') THEN
     CREATE ROLE backup_reader LOGIN;
   END IF;
+  -- Supabase-managed roles that appear in the dump's ACLs (default
+  -- privileges and the project-schema revokes). A scratch cluster needs
+  -- them to apply GRANT/REVOKE statements even though the app never logs in
+  -- as them.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
+    CREATE ROLE authenticator NOLOGIN;
+  END IF;
+  -- Legacy app role referenced by historical grants in the dump. It is not
+  -- a login path in the current runtime, but the ACL statements need it.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') THEN
+    CREATE ROLE app NOLOGIN;
+  END IF;
+  -- Default ACLs in the dump are owned by Supabase's admin role; the role is
+  -- needed to apply the ALTER DEFAULT PRIVILEGES statements in a scratch
+  -- cluster. It is not a superuser here and is never a login path.
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+    CREATE ROLE supabase_admin NOLOGIN;
+  END IF;
 END $$;
 
 ALTER ROLE app_runtime      LOGIN  NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;

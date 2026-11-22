@@ -98,8 +98,9 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
   schema can be clean); project apply ignores orphan migration files;
   platform and project runners use separate advisory locks. Fix: add an
   object-presence check, reject orphan project files on apply, and
-  serialize the whole `MigrateAll`. Reconcile the `backup_reader`
-  attributes.
+  serialize the whole `MigrateAll`. The backup script refuses a role
+  without `BYPASSRLS` (Supabase's `postgres` cannot alter that attribute,
+  so this is checked at use rather than in a migration).
 
 - [~] **P1-6 Docker/release build.**
   `.dockerignore` excludes `*.md`, but `projectembed.go` embeds
@@ -214,7 +215,7 @@ architecture work above.
 | P1-2 | `internal/db/migrations/084_drop_usage_read_policy.sql`, `internal/db/rls_enable_test.go`, `ARCHITECTURE.md` |
 | P1-3 | `internal/agentconfig/{config,load}.go`, `internal/features/registry.go`, `internal/db/project_migrations.go`, `cmd/migrate/main.go` |
 | P1-4 | `internal/api/agent_chat.go` |
-| P1-5 | `internal/db/{migrate,migration_status,project_migrations}.go`, `internal/db/migrations/083_backup_reader_reconcile.sql` |
+| P1-5 | `internal/db/{migrate,migration_status,project_migrations}.go`, `ops/backup.sh` |
 | P1-6 | `.dockerignore`, `.github/workflows/ci.yml` |
 | P1-7 | `internal/config/{config,database,server}.go`, `cmd/server/main.go`, `.env.staging.example` |
 | P1-8 | `cmd/provision/main.go`, `cmd/migrate/main.go`, `.github/workflows/db-migrate.yml` |

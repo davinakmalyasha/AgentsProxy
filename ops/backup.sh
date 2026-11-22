@@ -43,6 +43,17 @@ schema_args=()
 for s in "${schemas[@]}"; do
   schema_args+=(--schema="$s")
 done
+
+# A dump role without BYPASSRLS sees zero rows in every FORCE-RLS tenant
+# table. Fail before writing a plausible-looking empty artifact. Supabase's
+# postgres role cannot ALTER another role's BYPASSRLS attribute, so this is a
+# deployment invariant checked at use, not a migration.
+if [ "$(psql "$ADMIN_URL" -Atc \
+  "SELECT coalesce((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false)" \
+  | tr -d '\r')" != "t" ]; then
+  echo "[backup] refusing: the backup role must be LOGIN BYPASSRLS or tenant tables dump empty" >&2
+  exit 1
+fi
 # Ownership and ACLs are part of the restore contract: definer functions
 # must stay owned by their least-privilege roles, and app_runtime must get
 # the grants the migrations created. The restore pre-creates the roles.
