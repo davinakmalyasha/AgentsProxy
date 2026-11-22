@@ -260,18 +260,29 @@ func TestCloneSchemaAuthStaysInClone(t *testing.T) {
 	}
 	raw := "clone-session-token"
 	if _, err := pool.Exec(ctx,
-		`SELECT private.create_session($1::uuid, $2, now() + interval '1 hour')`,
-		userID, auth.HashToken(raw)); err != nil {
+		`SELECT private.staff_session_create($1, $2::uuid, $3, now() + interval '1 hour')`,
+		tenant, userID, auth.HashToken(raw)); err != nil {
 		t.Fatal(err)
 	}
-	var gotTenant, gotEmail string
+	var gotTenant, gotUser string
 	if err := pool.QueryRow(ctx,
-		`SELECT tenant_id, email FROM private.session_user($1)`,
-		auth.HashToken(raw)).Scan(&gotTenant, &gotEmail); err != nil {
+		`SELECT tenant_id, user_id::text FROM private.staff_session_resolve($1)`,
+		auth.HashToken(raw)).Scan(&gotTenant, &gotUser); err != nil {
 		t.Fatal(err)
 	}
-	if gotTenant != tenant || gotEmail != "owner@clone.test" {
-		t.Fatalf("session resolved %q/%q, want %q/owner@clone.test", gotTenant, gotEmail, tenant)
+	if gotTenant != tenant || gotUser != userID {
+		t.Fatalf("session resolved %q/%q, want %q/%s", gotTenant, gotUser, tenant, userID)
+	}
+	// The platform session directory holds no project data. Resolve the live
+	// profile from the cloned schema, exactly as the Centrum provider does.
+	var gotEmail string
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT email FROM %s WHERE id = $1::uuid AND tenant_id = $2`,
+		Table(dest, "sports_users")), userID, tenant).Scan(&gotEmail); err != nil {
+		t.Fatal(err)
+	}
+	if gotEmail != "owner@clone.test" {
+		t.Fatalf("clone profile=%q want owner@clone.test", gotEmail)
 	}
 
 	// The same token must not resolve a user from the base schema.
