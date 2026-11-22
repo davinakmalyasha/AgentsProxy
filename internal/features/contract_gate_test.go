@@ -61,7 +61,7 @@ func TestContractGateCoverage(t *testing.T) {
 	series.Register()
 	users.Register()
 	seen := map[string]bool{}
-	for _, f := range features.All() {
+	for _, f := range features.ProjectFeatures("centrum") {
 		if f.Routes == nil {
 			continue // adapter-served shared features carry no schema
 		}

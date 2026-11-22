@@ -22,7 +22,6 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
-	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	// Phase 3 shared features: each registers itself in init().
 	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
 	// Phase 4/6 sports-vertical custom features.
@@ -341,7 +340,6 @@ func main() {
 		slog.Info("agency worker disabled (JWT_SECRET unset or BACKGROUND_TICKERS=false)")
 	}
 
-	features.SetLegacyProjectRoutes(cfg.LegacyProjectRoutes)
 	router := api.NewRouter(api.Deps{
 		Cfg:       cfg,
 		Pool:      pool,

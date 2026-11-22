@@ -56,11 +56,11 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   `ENABLE+FORCE RLS` + policy `tenant_id = current_setting('app.tenant_id')`
   + `GRANT app_runtime`. Handlers run in `WithTenantTx`, which sets both the
   GUC and `search_path` from `clients.db_schema` per transaction — defense in
-  depth. Centrum's frontend uses `/v1/p/centrum/...`; the legacy
-  `/v1/sports/...` alias stays mounted as a rollback surface for one release.
-  `LEGACY_PROJECT_ROUTES` (default true) controls that alias; a platform-only
-  mount list excludes project tenants when it is false. The data boundary is
-  already project-scoped.
+  depth. Project tenants are reachable only under `/v1/p/<slug>/...`.
+  `/v1/{vertical}` is reserved for platform tenants in `public`; a project
+  tenant never creates a vertical alias. Centrum's frontend uses
+  `/v1/p/centrum/...`, and the old `/v1/sports/...` surface was removed after
+  its stability window. The data boundary is project-scoped.
   The database enforces the namespace: `clients.db_schema` is `public` (the
   legacy platform row only) or `project_*`, and a partial unique index allows
   exactly one client per project schema. A `project_*` client requires a

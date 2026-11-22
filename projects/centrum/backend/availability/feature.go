@@ -27,7 +27,7 @@ const featureName = "availability"
 func init() { Register() }
 
 func Register() {
-	features.RegisterLegacyProject("centrum", "sports", features.Feature{
+	features.RegisterProject("centrum", "sports", features.Feature{
 		Name:          featureName,
 		Kind:          "", // route-only, read-only
 		VerticalSlugs: []string{"sports"},

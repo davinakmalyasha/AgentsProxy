@@ -88,7 +88,7 @@ func setup(t *testing.T) *harness {
 	// exactly like the builder does for /v1/sports.
 	features.ResetForTest()
 	Register()
-	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
+	fr := features.BuildProjectRouterForTest("centrum", features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
 	return &harness{router: fr, pool: pool, rdb: rdb, admin: adminPool, schemaA: schemaA, schemaB: schemaB}
 }
 

@@ -144,6 +144,10 @@ func setup(t *testing.T) *harness {
 	}
 	seedClient(t, ctx, pool, alphaSchema, "alpha", "alpha", "tok-alpha", 100000, "active")
 	seedClient(t, ctx, pool, "public", "bravo", "bravo", "tok-bravo", 100000, "paused")
+	// /v1/{vertical} is platform-only after the route contract. Keep one
+	// active platform tenant so the shared-feature tests exercise the real
+	// mount rule instead of a project schema standing in for one.
+	seedClient(t, ctx, pool, "public", "charlie", "charlie", "tok-charlie", 100000, "active")
 
 	adminKey := "admin-test-key-12345"
 	cli := &cache.Client{DB: pool, RDB: rdb}
@@ -1081,7 +1085,7 @@ func TestFeatureMenu_Happy(t *testing.T) {
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/fnb/menu",
 		bytes.NewReader([]byte(`{"title":"Nasi Goreng","payload":{"name":"Nasi Goreng","price":15000}}`)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp := mustReq(t, req)
 	if resp.StatusCode != 201 {
 		raw, _ := io.ReadAll(resp.Body)
@@ -1096,7 +1100,7 @@ func TestFeatureMenu_Happy(t *testing.T) {
 	// list — filter by our own title to ignore cross-tenant data
 	// (api tests use the admin pool, which bypasses RLS).
 	req, _ = http.NewRequest("GET", srv.URL+"/v1/fnb/menu?q=Nasi+Goreng", nil)
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp = mustReq(t, req)
 	if resp.StatusCode != 200 {
 		t.Fatalf("menu list status=%d", resp.StatusCode)
@@ -1116,7 +1120,7 @@ func TestFeatureMenu_Validation(t *testing.T) {
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/fnb/menu",
 		bytes.NewReader([]byte(`{"title":"x","payload":{"name":"","price":-1}}`)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp := mustReq(t, req)
 	if resp.StatusCode != 400 {
 		t.Errorf("menu bad payload status=%d want 400", resp.StatusCode)
@@ -1132,7 +1136,7 @@ func TestFeatureMenu_KindForcedServerSide(t *testing.T) {
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/fnb/menu",
 		bytes.NewReader([]byte(`{"kind":"service","title":"x","payload":{"name":"x","price":1}}`)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp := mustReq(t, req)
 	if resp.StatusCode != 201 {
 		raw, _ := io.ReadAll(resp.Body)
@@ -1144,7 +1148,7 @@ func TestFeatureMenu_KindForcedServerSide(t *testing.T) {
 	// GET it back — the kind must be menu_item regardless of what
 	// the client sent.
 	req, _ = http.NewRequest("GET", srv.URL+"/v1/fnb/menu/"+id, nil)
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp = mustReq(t, req)
 	if resp.StatusCode != 200 {
 		t.Fatalf("get status=%d", resp.StatusCode)
@@ -1162,7 +1166,7 @@ func TestFeatureGate_BlocksWhenRemoved(t *testing.T) {
 	srv := httptest.NewServer(h.router)
 	defer srv.Close()
 	// Find alpha's id.
-	row := h.pool.QueryRow(context.Background(), `SELECT id::text FROM clients WHERE tenant_id='alpha'`)
+	row := h.pool.QueryRow(context.Background(), `SELECT id::text FROM clients WHERE tenant_id='charlie'`)
 	var id string
 	if err := row.Scan(&id); err != nil {
 		t.Fatal(err)
@@ -1181,7 +1185,7 @@ func TestFeatureGate_BlocksWhenRemoved(t *testing.T) {
 	req, _ = http.NewRequest("POST", srv.URL+"/v1/fnb/menu",
 		bytes.NewReader([]byte(`{"name":"x","price":1,"payload":{}}`)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-Token", "tok-alpha")
+	req.Header.Set("X-Client-Token", "tok-charlie")
 	resp = mustReq(t, req)
 	if resp.StatusCode != 403 {
 		t.Errorf("menu without feature status=%d want 403", resp.StatusCode)

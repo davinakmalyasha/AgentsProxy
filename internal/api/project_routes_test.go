@@ -10,10 +10,10 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/facilities"
 )
 
-// TestCentrumProjectRoutesParity proves the cutover surface: the legacy
-// /v1/sports/... and the project-scoped /v1/p/centrum/... return the same
-// public reads, while the project gate still rejects another tenant.
-func TestCentrumProjectRoutesParity(t *testing.T) {
+// TestCentrumProjectRoutes proves the final cutover surface: Centrum is
+// reachable only under /v1/p/centrum/..., the old vertical alias is gone, and
+// the project gate still rejects another tenant.
+func TestCentrumProjectRoutes(t *testing.T) {
 	h := setup(t)
 	srv := httptest.NewServer(h.router)
 	defer srv.Close()
@@ -51,19 +51,20 @@ func TestCentrumProjectRoutesParity(t *testing.T) {
 		return mustReq(t, req)
 	}
 
-	for _, path := range []string{
-		"/v1/sports/facilities?tenant_id=centrum",
-		"/v1/p/centrum/facilities",
-	} {
-		resp := get(path, "", "")
-		body := readJSON(t, resp)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s status=%d body=%v", path, resp.StatusCode, body)
-		}
-		items, _ := body["items"].([]any)
-		if len(items) != 1 {
-			t.Fatalf("%s items=%v, want one facility", path, items)
-		}
+	if resp := get("/v1/sports/facilities?tenant_id=centrum", "", ""); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("legacy alias status=%d, want 404", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	resp := get("/v1/p/centrum/facilities", "", "")
+	body := readJSON(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/p/centrum/facilities status=%d body=%v", resp.StatusCode, body)
+	}
+	items, _ := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("/v1/p/centrum/facilities items=%v, want one facility", items)
 	}
 
 	if resp := get("/v1/p/centrum/bookings", "", ""); resp.StatusCode != http.StatusUnauthorized {

@@ -42,82 +42,29 @@ func IsAllowedVertical(v string) bool {
 	return agentconfig.IsAllowedVertical(v)
 }
 
-// LiveVerticals returns the verticals that have at least one active
-// tenant, for mounting routers. Verticals with no tenants serve nothing
-// but the generic records shell, so skipping them saves ~90% of boot
-// route registrations on a young deployment.
+// VerticalsToMount resolves the platform-only mount list. Project tenants live
+// under /v1/p/<slug>/... and never create a /v1/{vertical} alias.
 //
-// Fail-open by design: on any error (or zero rows) it returns nil and
-// the caller mounts every AllowedVertical — identical to the old
-// behavior. A fresh database with no tenants yet therefore behaves
-// exactly as before.
-func LiveVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
-	if pool == nil {
-		return nil
-	}
-	qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rows, err := pool.Query(qctx, `SELECT DISTINCT vertical FROM clients WHERE status='active'`)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			rows.Close()
-			return nil
-		}
-		if IsAllowedVertical(v) {
-			out = append(out, v)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil || len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// VerticalsToMount resolves the mount list.
-//
-// live == nil means the lookup could not run (fail-open: mount every vertical,
-// the historical behavior). A non-nil empty slice means the query succeeded
-// and no platform tenant exists, so nothing is mounted. A vertical with
-// registered custom features also mounts while the legacy project route is on,
-// so a feature can never be registered yet unreachable.
+// A nil or empty lookup mounts nothing. Fail-closed is deliberate: a database
+// failure at boot must not resurrect a route surface that a project tenant
+// does not own. Platform handlers need the database anyway, so an outage is
+// already an outage; an accidental alias is the worse failure.
 func VerticalsToMount(live []string) []string {
-	if live == nil {
-		if !LegacyProjectRoutes() {
-			// In platform-only mode a database failure must not silently
-			// resurrect the project-owned /v1/{vertical} alias.
-			return []string{}
-		}
-		return AllowedVerticals
-	}
-	seen := make(map[string]bool, len(AllowedVerticals))
-	out := make([]string, 0, len(AllowedVerticals))
+	seen := make(map[string]bool, len(live))
+	out := make([]string, 0, len(live))
 	for _, v := range live {
 		if IsAllowedVertical(v) && !seen[v] {
 			seen[v] = true
 			out = append(out, v)
 		}
 	}
-	if LegacyProjectRoutes() {
-		for _, v := range AllowedVerticals {
-			if hasCustomFeatures(v) && !seen[v] {
-				seen[v] = true
-				out = append(out, v)
-			}
-		}
-	}
 	return out
 }
 
-// LivePlatformVerticals is LiveVerticals restricted to platform tenants
-// (db_schema='public'). It returns a non-nil empty slice on success with no
-// platform tenants, so VerticalsToMount can distinguish "none exist" from
-// "lookup failed". A nil pool or query failure returns nil (fail-open).
+// LivePlatformVerticals returns the verticals that have at least one active
+// platform tenant (db_schema='public'). It returns a non-nil empty slice on
+// success with no platform tenants. A nil pool or query failure returns nil,
+// which VerticalsToMount treats as "mount nothing".
 func LivePlatformVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
 	if pool == nil {
 		return nil
@@ -145,17 +92,6 @@ func LivePlatformVerticals(ctx context.Context, pool *pgxpool.Pool) []string {
 		return nil
 	}
 	return out
-}
-
-// hasCustomFeatures reports whether any registered feature brings its
-// own routes for the vertical (as opposed to the generic adapter).
-func hasCustomFeatures(vertical string) bool {
-	for _, f := range All() {
-		if f.Routes != nil && AllowedForVertical(f.Name, vertical) {
-			return true
-		}
-	}
-	return false
 }
 
 // BuildVerticalRouter returns a chi router for one vertical. The
