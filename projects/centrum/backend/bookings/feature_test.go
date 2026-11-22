@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -36,6 +37,8 @@ type harness struct {
 	pool      *pgxpool.Pool // app role (RLS applies)
 	adminPool *pgxpool.Pool // superuser (seeding bypasses RLS)
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -49,7 +52,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -57,34 +60,23 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('bk-a','bk-b')`); err != nil {
 		t.Fatal(err)
 	}
-	// Clean this test's tenants under an advisory lock so the four
-	// sports packages don't race their DELETE+INSERT on the same
-	// tables (SQLSTATE XX000 "tuple concurrently updated").
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
-			 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('bk-a','bk-b');
-			 DELETE FROM project_centrum.sports_pricing_rules WHERE tenant_id IN ('bk-a','bk-b');
-			 DELETE FROM clients WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
-			return err
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "bk-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "bk-b")
+	seedClient(t, ctx, adminPool, schemaA, "bk-a", "bk-a", "tok-bk-a", 1000000, "active", "records", "facilities", "bookings")
+	seedClient(t, ctx, adminPool, schemaB, "bk-b", "bk-b", "tok-bk-b", 1000000, "active", "records", "facilities", "bookings")
+	// Pricing rules every booking test needs (RuleFor requires a rule
+	// covering the date), seeded into each tenant's own clone.
+	for _, tc := range []struct{ schema, tenant string }{{schemaA, "bk-a"}, {schemaB, "bk-b"}} {
+		if _, err := adminPool.Exec(ctx, fmt.Sprintf(
+			`INSERT INTO %s (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+			 VALUES ($1,'2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`,
+			testutil.Table(tc.schema, "sports_pricing_rules")), tc.tenant); err != nil {
+			t.Fatal(err)
 		}
-		seedClientTx(t, ctx, tx, "bk-a", "bk-a", "tok-bk-a", 1000000, "active", "records", "facilities", "bookings")
-		seedClientTx(t, ctx, tx, "bk-b", "bk-b", "tok-bk-b", 1000000, "active", "records", "facilities", "bookings")
-		// Pricing rules every booking test needs (RuleFor requires a rule
-		// covering the date). Seeded here so no test depends on another
-		// test's leftovers.
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO project_centrum.sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
-			 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
-			        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)`); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
 	}
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
@@ -92,11 +84,6 @@ func setup(t *testing.T) *harness {
 		t.Fatalf("connect as app: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := adminPool.Exec(ctx,
-		`DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('bk-a','bk-b');
-		 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('bk-a','bk-b');`); err != nil {
-		t.Fatal(err)
-	}
 
 	rdb, err := redisx.NewClient(ctx, rurl)
 	if err != nil {
@@ -109,7 +96,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, pool: pool, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, pool: pool, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -125,46 +112,38 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
 	); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
+// seedClientTx is the tx variant used inside a locked setup.
+func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
 	); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func seedFacility(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) string {
+func seedFacility(t *testing.T, ctx context.Context, admin *pgxpool.Pool, schema, tenant string) string {
 	t.Helper()
 	var id string
-	// Locked: seeding a facility INSERTS into project_centrum.sports_facilities while
-	// other sports packages DELETE from it during setup — Postgres can
-	// raise "tuple concurrently updated" (SQLSTATE XX000) at the page
-	// level even for different tenants.
-	err := testutil.LockAndRun(ctx, admin, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour, open_time, close_time)
-			 VALUES ($1,'Court 3','badminton',50000,'06:00','22:00') RETURNING id::text`,
-			tenant,
-		).Scan(&id)
-	})
-	if err != nil {
+	if err := admin.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, type, price_per_hour, open_time, close_time)
+		 VALUES ($1,'Court 3','badminton',50000,'06:00','22:00') RETURNING id::text`,
+		testutil.Table(schema, "sports_facilities")), tenant).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -220,7 +199,7 @@ func TestBookings_CRUD(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	// Create
 	body := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"19:00","end_time":"20:00","customer_name":"Alice","customer_phone":"+628123","price":50000}`
@@ -281,13 +260,13 @@ func TestBookings_CRUD(t *testing.T) {
 }
 
 // TestBookings_CancelKeepsTheRow pins that DELETE is a SOFT cancel. A
-// hard delete would cascade into project_centrum.sports_payments and destroy the ledger
+// hard delete would cascade into the tenant's payments and destroy the ledger
 // entry the reports read, so the row must survive.
 func TestBookings_CancelKeepsTheRow(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	body := `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"19:00","end_time":"20:00","customer_name":"Bob","price":50000}`
 	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
@@ -331,16 +310,16 @@ func TestBookings_BlockedSlot(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	// A pricing rule, so create gets past the price step and reaches the
 	// block check rather than stopping at ErrNoRule. Seeded in setup; the
 	// conflict guard keeps this self-sufficient when run standalone.
-	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_pricing_rules (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
-		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000),
-		        ('bk-b','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)
-		 ON CONFLICT (tenant_id, valid_from) DO NOTHING`); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, valid_from, open_time, close_time, day_start, day_end, price_day, price_evening)
+		 VALUES ('bk-a','2026-01-01','07:00','23:00','07:00','17:00',40000,50000)
+		 ON CONFLICT (tenant_id, valid_from) DO NOTHING`,
+		testutil.Table(h.schemaA, "sports_pricing_rules"))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -352,14 +331,16 @@ func TestBookings_BlockedSlot(t *testing.T) {
 
 	// Block 19:00-21:00 on one date, and 10:00-12:00 across ALL courts on
 	// another (facility_id NULL).
-	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
-		 VALUES ('bk-a',$1,'2026-09-07','19:00','21:00','maintenance')`, fac); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		 VALUES ('bk-a',$1,'2026-09-07','19:00','21:00','maintenance')`,
+		testutil.Table(h.schemaA, "sports_court_blocks")), fac); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
-		 VALUES ('bk-a',NULL,'2026-09-08','10:00','12:00','private event')`); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, block_date, start_time, end_time, reason)
+		 VALUES ('bk-a',NULL,'2026-09-08','10:00','12:00','private event')`,
+		testutil.Table(h.schemaA, "sports_court_blocks"))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -395,9 +376,10 @@ func TestBookings_BlockedSlot(t *testing.T) {
 
 	// The database trigger, which is what protects the paths that bypass
 	// this handler -- the agent's book_slot INSERTs directly.
-	_, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
-		 VALUES ('bk-a',$1,'2026-09-07','19:30','20:30','RawInsert','confirmed',50000)`, fac)
+	_, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 VALUES ('bk-a',$1,'2026-09-07','19:30','20:30','RawInsert','confirmed',50000)`,
+		testutil.Table(h.schemaA, "sports_bookings")), fac)
 	if err == nil {
 		t.Error("a direct INSERT into a blocked slot should have been refused by the trigger")
 	} else if !strings.Contains(err.Error(), "blocked") {
@@ -406,9 +388,10 @@ func TestBookings_BlockedSlot(t *testing.T) {
 
 	// And a direct INSERT into a free slot still works, so the trigger is
 	// not simply refusing everything.
-	if _, err := h.adminPool.Exec(ctx,
-		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
-		 VALUES ('bk-a',$1,'2026-09-07','15:00','16:00','RawFree','confirmed',50000)`, fac); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, date, start_time, end_time, customer_name, status, price)
+		 VALUES ('bk-a',$1,'2026-09-07','15:00','16:00','RawFree','confirmed',50000)`,
+		testutil.Table(h.schemaA, "sports_bookings")), fac); err != nil {
 		t.Errorf("direct INSERT into a free slot was refused: %v", err)
 	}
 }
@@ -420,7 +403,7 @@ func TestBookings_DoubleBooking(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	body := func(name string) string {
 		return `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"18:00","end_time":"19:00","customer_name":"` + name + `"}`
@@ -461,8 +444,9 @@ func TestBookings_DoubleBooking(t *testing.T) {
 
 	// And the DB has exactly one booking for that slot.
 	var n int
-	h.adminPool.QueryRow(ctx,
-		`SELECT count(*) FROM project_centrum.sports_bookings WHERE tenant_id='bk-a' AND facility_id=$1::uuid AND date='2026-09-06'`,
+	h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT count(*) FROM %s WHERE tenant_id='bk-a' AND facility_id=$1::uuid AND date='2026-09-06'`,
+		testutil.Table(h.schemaA, "sports_bookings")),
 		fac).Scan(&n)
 	if n != 1 {
 		t.Errorf("DB has %d bookings for slot, want 1", n)
@@ -474,8 +458,8 @@ func TestBookings_TenantIsolation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	facA := seedFacility(t, ctx, h.adminPool, "bk-a")
-	facB := seedFacility(t, ctx, h.adminPool, "bk-b")
+	facA := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
+	facB := seedFacility(t, ctx, h.adminPool, h.schemaB, "bk-b")
 
 	// A books.
 	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",
@@ -510,7 +494,7 @@ func TestBookings_ContractMismatch428(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	if _, err := h.adminPool.Exec(ctx,
 		`INSERT INTO tenant_schema_contracts (tenant_id, feature, version, status)
@@ -561,7 +545,7 @@ func TestBookings_CreateIdempotency(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	body := `{"facility_id":"` + fac + `","date":"2026-09-05","start_time":"19:00","end_time":"20:00","customer_name":"Idem"}`
 	resp := doReqKey(t, h.router, "POST", "/bookings", "tok-bk-a", body, "bk-key-1")
@@ -578,8 +562,9 @@ func TestBookings_CreateIdempotency(t *testing.T) {
 		t.Errorf("replay = %v, want same id with deduplicated:true", second)
 	}
 	var n int
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_centrum.sports_bookings WHERE tenant_id='bk-a'`).Scan(&n); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE tenant_id='bk-a'`,
+		testutil.Table(h.schemaA, "sports_bookings"))).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -593,7 +578,7 @@ func TestBookings_CancelWithNote(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	body := `{"facility_id":"` + fac + `","date":"2026-09-06","start_time":"19:00","end_time":"20:00","customer_name":"Noted"}`
 	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a", body)
@@ -608,8 +593,9 @@ func TestBookings_CancelWithNote(t *testing.T) {
 	}
 	readAll(t, respD)
 	var notes string
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT notes FROM project_centrum.sports_bookings WHERE id=$1::uuid`, id).Scan(&notes); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT notes FROM %s WHERE id=$1::uuid`,
+		testutil.Table(h.schemaA, "sports_bookings")), id).Scan(&notes); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(notes, "uang kembali tunai") {
@@ -623,8 +609,9 @@ func TestBookings_CancelWithNote(t *testing.T) {
 		t.Fatalf("create2 status=%d body=%s", resp2.StatusCode, readAll(t, resp2))
 	}
 	id2, _ := readJSON(t, resp2)["id"].(string)
-	if _, err := h.adminPool.Exec(ctx,
-		`UPDATE project_centrum.sports_bookings SET status='checked_in' WHERE id=$1::uuid`, id2); err != nil {
+	if _, err := h.adminPool.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s SET status='checked_in' WHERE id=$1::uuid`,
+		testutil.Table(h.schemaA, "sports_bookings")), id2); err != nil {
 		t.Fatal(err)
 	}
 	respC := doReq(t, h.router, "DELETE", "/bookings/"+id2, "tok-bk-a", "")
@@ -639,7 +626,7 @@ func TestBookings_Validation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fac := seedFacility(t, ctx, h.adminPool, "bk-a")
+	fac := seedFacility(t, ctx, h.adminPool, h.schemaA, "bk-a")
 
 	// Outside open hours (open 06:00, close 22:00).
 	resp := doReq(t, h.router, "POST", "/bookings", "tok-bk-a",

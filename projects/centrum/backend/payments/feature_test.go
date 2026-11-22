@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -32,6 +32,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -45,7 +47,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -53,28 +55,17 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('pay-a','pay-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_payments WHERE tenant_id IN ('pay-a','pay-b');
-			 DELETE FROM project_centrum.sports_bookings WHERE tenant_id IN ('pay-a','pay-b');
-			 DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('pay-a','pay-b');
-			 DELETE FROM clients WHERE tenant_id IN ('pay-a','pay-b');`); err != nil {
-			return err
-		}
-		for _, c := range [][]string{
-			{"pay-a", "pay-a", "tok-pay-a"},
-			{"pay-b", "pay-b", "tok-pay-b"},
-		} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "facilities", "bookings", "payments"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "pay-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "pay-b")
+	for _, c := range []struct{ schema, name, tenant, token string }{
+		{schemaA, "pay-a", "pay-a", "tok-pay-a"},
+		{schemaB, "pay-b", "pay-b", "tok-pay-b"},
+	} {
+		seedClient(t, ctx, adminPool, c.schema, c.name, c.tenant, c.token, 1000000, "active", "records", "facilities", "bookings", "payments")
 	}
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
@@ -98,7 +89,7 @@ func setup(t *testing.T) *harness {
 		Cache: cli,
 		Auth:  &authapi.Auth{Pool: adminPool},
 	}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -114,15 +105,16 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	_, err := tx.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	)
-	return err
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
@@ -172,27 +164,30 @@ func readAll(t *testing.T, resp *http.Response) string {
 }
 
 // seedBooking creates a booking (price 100000) for tenant via admin pool.
-func seedBooking(t *testing.T, ctx context.Context, admin *pgxpool.Pool, tenant string) (facilityID, bookingID string) {
+func seedBooking(t *testing.T, ctx context.Context, admin *pgxpool.Pool, schema, tenant string) (facilityID, bookingID string) {
 	t.Helper()
-	if err := admin.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_facilities (tenant_id, name, type, price_per_hour) VALUES ($1,'Court 1','badminton',50000) RETURNING id::text`,
+	if err := admin.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, name, type, price_per_hour) VALUES ($1,'Court 1','badminton',50000) RETURNING id::text`,
+		testutil.Table(schema, "sports_facilities")),
 		tenant).Scan(&facilityID); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.QueryRow(ctx,
-		`INSERT INTO project_centrum.sports_bookings (tenant_id, facility_id, date, start_time, end_time, customer_name, price)
+	if err := admin.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, facility_id, date, start_time, end_time, customer_name, price)
 		 VALUES ($1,$2::uuid,'2026-09-15','18:00','20:00','Alice',100000) RETURNING id::text`,
+		testutil.Table(schema, "sports_bookings")),
 		tenant, facilityID).Scan(&bookingID); err != nil {
 		t.Fatal(err)
 	}
 	return
 }
 
-func bookingStatus(t *testing.T, ctx context.Context, admin *pgxpool.Pool, bookingID string) string {
+func bookingStatus(t *testing.T, ctx context.Context, admin *pgxpool.Pool, schema, bookingID string) string {
 	t.Helper()
 	var s string
-	if err := admin.QueryRow(ctx,
-		`SELECT payment_status FROM project_centrum.sports_bookings WHERE id=$1::uuid`, bookingID).Scan(&s); err != nil {
+	if err := admin.QueryRow(ctx, fmt.Sprintf(
+		`SELECT payment_status FROM %s WHERE id=$1::uuid`,
+		testutil.Table(schema, "sports_bookings")), bookingID).Scan(&s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -204,7 +199,7 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, h.schemaA, "pay-a")
 
 	// Pay 40000 of 100000 → partial.
 	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
@@ -214,7 +209,7 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	}
 	m := readJSON(t, resp)
 	payID, _ := m["id"].(string)
-	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "partial" {
+	if s := bookingStatus(t, ctx, h.adminPool, h.schemaA, bookingID); s != "partial" {
 		t.Errorf("after 40k: status=%s want partial", s)
 	}
 
@@ -224,7 +219,7 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	if resp2.StatusCode != 201 {
 		t.Fatalf("pay2 status=%d", resp2.StatusCode)
 	}
-	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "paid" {
+	if s := bookingStatus(t, ctx, h.adminPool, h.schemaA, bookingID); s != "paid" {
 		t.Errorf("after full: status=%s want paid", s)
 	}
 
@@ -233,7 +228,7 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	if resp3.StatusCode != 200 {
 		t.Fatalf("del status=%d", resp3.StatusCode)
 	}
-	if s := bookingStatus(t, ctx, h.adminPool, bookingID); s != "partial" {
+	if s := bookingStatus(t, ctx, h.adminPool, h.schemaA, bookingID); s != "partial" {
 		t.Errorf("after delete: status=%s want partial", s)
 	}
 	// Tombstone, not gone: getOne 404s, list excludes, row keeps who/when.
@@ -250,8 +245,9 @@ func TestPayments_RecalcTrigger(t *testing.T) {
 	}
 	var delBy string
 	var delAt time.Time
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM project_centrum.sports_payments WHERE id=$1::uuid`, payID).Scan(&delBy, &delAt); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT deleted_by, deleted_at FROM %s WHERE id=$1::uuid`,
+		testutil.Table(h.schemaA, "sports_payments")), payID).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {
@@ -264,7 +260,7 @@ func TestPayments_Isolation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, h.schemaA, "pay-a")
 
 	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-b",
 		`{"booking_id":"`+bookingID+`","amount":10000}`)
@@ -287,7 +283,7 @@ func TestPayments_Idempotency(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, h.schemaA, "pay-a")
 
 	body := `{"booking_id":"` + bookingID + `","amount":25000,"method":"cash"}`
 	resp := doReqKey(t, h.router, "POST", "/payments", "tok-pay-a", body, "key-1")
@@ -307,8 +303,9 @@ func TestPayments_Idempotency(t *testing.T) {
 	}
 
 	var n int
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM project_centrum.sports_payments WHERE tenant_id='pay-a'`).Scan(&n); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE tenant_id='pay-a'`,
+		testutil.Table(h.schemaA, "sports_payments"))).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -350,7 +347,7 @@ func TestPayments_Validation(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, h.schemaA, "pay-a")
 
 	resp := doReq(t, h.router, "POST", "/payments", "tok-pay-a",
 		`{"booking_id":"`+bookingID+`","amount":0}`)
@@ -398,10 +395,10 @@ func TestPayments_RoleMatrix(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	testutil.SeedStaffSession(t, ctx, h.adminPool, "pay-a", "owner@pay.test", "owner", "sess-pay-owner")
-	testutil.SeedStaffSession(t, ctx, h.adminPool, "pay-a", "staff@pay.test", "pegawai", "sess-pay-staff")
+	testutil.SeedStaffSession(t, ctx, h.adminPool, h.schemaA, "pay-a", "owner@pay.test", "owner", "sess-pay-owner")
+	testutil.SeedStaffSession(t, ctx, h.adminPool, h.schemaA, "pay-a", "staff@pay.test", "pegawai", "sess-pay-staff")
 
-	_, bookingID := seedBooking(t, ctx, h.adminPool, "pay-a")
+	_, bookingID := seedBooking(t, ctx, h.adminPool, h.schemaA, "pay-a")
 	created := readJSON(t, doReq(t, h.router, "POST", "/payments", "tok-pay-a",
 		`{"booking_id":"`+bookingID+`","amount":10000,"method":"cash"}`))
 	payID, _ := created["id"].(string)

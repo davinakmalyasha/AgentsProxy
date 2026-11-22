@@ -10,11 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// TestProjectKeyIsUnique pins the race-safe owner key from migration 076.
-func TestProjectKeyIsUnique(t *testing.T) {
+// TestUniqueProjectSchema pins the 079 invariant: the database, not just
+// admin.Create, rejects a second client on the same project schema.
+func TestUniqueProjectSchema(t *testing.T) {
 	dsn := migrateDSN()
 	if dsn == "" {
-		t.Skip("DATABASE_URL not set — skipping project_key test")
+		t.Skip("DATABASE_URL not set — skipping unique project schema test")
 	}
 	requireLocalDB(t, dsn)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -34,22 +35,22 @@ func TestProjectKeyIsUnique(t *testing.T) {
 	cleanup()
 	t.Cleanup(cleanup)
 
-	insert := func(tenant, schema, key string) error {
+	insert := func(tenant, schema string) error {
 		_, err := pool.Exec(ctx,
 			`INSERT INTO public.clients
-			   (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema, project_key)
-			 VALUES ($1, $1, $1 || '-hash', 500000, 'active', 'sports', ARRAY['records'], $2, $3)`,
-			tenant, schema, key)
+			   (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+			 VALUES ($1, $1, $1 || '-hash', 500000, 'active', 'sports', ARRAY['records'], $2)`,
+			tenant, schema)
 		return err
 	}
-	if err := insert("key-a", "project_keytest", "project_keytest"); err != nil {
+	if err := insert("key-a", "project_unique_test"); err != nil {
 		t.Fatalf("first owner: %v", err)
 	}
-	if err := insert("key-b", "project_keytest", "project_keytest"); err == nil {
-		t.Fatal("second owner of the same project_key was accepted")
+	if err := insert("key-b", "project_unique_test"); err == nil {
+		t.Fatal("a second client on the same project schema was accepted")
 	}
-	if err := insert("key-c", "project_keytest", "project_other"); err == nil {
-		t.Fatal("project_key that does not match db_schema was accepted")
+	if err := insert("key-c", "project_unique_other"); err != nil {
+		t.Fatalf("a distinct project schema should be accepted: %v", err)
 	}
 }
 

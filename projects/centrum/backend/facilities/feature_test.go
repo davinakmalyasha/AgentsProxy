@@ -32,10 +32,12 @@ import (
 )
 
 type harness struct {
-	router http.Handler
-	pool   *pgxpool.Pool
-	rdb    *redis.Client
-	admin  *pgxpool.Pool
+	router  http.Handler
+	pool    *pgxpool.Pool
+	rdb     *redis.Client
+	admin   *pgxpool.Pool
+	schemaA string
+	schemaB string
 }
 
 func setup(t *testing.T) *harness {
@@ -49,7 +51,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -57,34 +59,22 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	// Every tenant gets its own cloned schema; there is no shared-table
+	// DELETE+INSERT race, so setup no longer takes the advisory lock.
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('fac-a','fac-b','fac-c')`); err != nil {
 		t.Fatal(err)
 	}
-	// Clean up this test's own tenants under an advisory lock so the
-	// four sports packages don't race their DELETE+INSERT on the same
-	// tables (SQLSTATE XX000 "tuple concurrently updated").
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('fac-a','fac-b','fac-c');
-			 DELETE FROM clients WHERE tenant_id IN ('fac-a','fac-b','fac-c');`); err != nil {
-			return err
-		}
-		seedClientTx(t, ctx, tx, "fac-a", "fac-a", "tok-fac-a", 1000000, "active", "records", "facilities")
-		seedClientTx(t, ctx, tx, "fac-b", "fac-b", "tok-fac-b", 1000000, "active", "records", "facilities")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "fac-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "fac-b")
+	seedClient(t, ctx, adminPool, schemaA, "fac-a", "fac-a", "tok-fac-a", 1000000, "active", "records", "facilities")
+	seedClient(t, ctx, adminPool, schemaB, "fac-b", "fac-b", "tok-fac-b", 1000000, "active", "records", "facilities")
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
 	if err != nil {
 		t.Fatalf("connect as app: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := adminPool.Exec(ctx,
-		`DELETE FROM project_centrum.sports_facilities WHERE tenant_id IN ('fac-a','fac-b','fac-c');`); err != nil {
-		t.Fatal(err)
-	}
 
 	rdb, err := redisx.NewClient(ctx, rurl)
 	if err != nil {
@@ -99,7 +89,7 @@ func setup(t *testing.T) *harness {
 	features.ResetForTest()
 	Register()
 	fr := features.BuildVerticalRouter(features.BuilderDeps{Pool: pool, Cache: cli}, "sports")
-	return &harness{router: fr, pool: pool, rdb: rdb, admin: adminPool}
+	return &harness{router: fr, pool: pool, rdb: rdb, admin: adminPool, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -115,7 +105,7 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, tenant, token string, quota int, status string, feats ...string) {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
 	featuresList := feats
@@ -124,25 +114,8 @@ func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, ten
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, featuresList,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedClientTx is the tx variant used inside the locked setup.
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) {
-	t.Helper()
-	hash := auth.HashToken(token)
-	featuresList := feats
-	if len(featuresList) == 0 {
-		featuresList = []string{"records"}
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, featuresList,
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, featuresList, schema,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +265,7 @@ func TestFacilities_Gate(t *testing.T) {
 	// Seed a client withOUT facilities (default = records only).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	seedClient(t, ctx, h.admin, "fac-c", "fac-c", "tok-fac-c", 1000000, "active")
+	seedClient(t, ctx, h.admin, "public", "fac-c", "fac-c", "tok-fac-c", 1000000, "active")
 	// The gate reads the cached client; seed wrote to DB, flush to re-read.
 	h.rdb.FlushDB(ctx)
 	resp := doReq(t, h.router, "GET", "/facilities", "tok-fac-c", "")
@@ -355,7 +328,7 @@ func TestFacilities_TombstoneDelete(t *testing.T) {
 	var delAt time.Time
 	if err := records.WithTenantTx(ctx, h.pool, "fac-a", func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT deleted_by, deleted_at FROM project_centrum.sports_facilities WHERE id=$1::uuid`, id).Scan(&delBy, &delAt)
+			`SELECT deleted_by, deleted_at FROM sports_facilities WHERE id=$1::uuid`, id).Scan(&delBy, &delAt)
 	}); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}

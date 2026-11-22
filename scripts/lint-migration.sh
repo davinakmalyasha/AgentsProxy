@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # scripts/lint-migration.sh — additive-DDL law (GOVERNANCE §3).
 # Fails on non-additive DDL: DROP COLUMN, ALTER TYPE, RENAME, DROP TABLE.
-# Historical exceptions: documented removals, pre-law (042) or with all
-# code references already deleted in the same change (071).
+# Historical exceptions: documented removals, pre-law (042), or with all
+# code references already deleted in the same change (071). 080 removes the
+# temporary project_key after 079 made db_schema unique and the binary
+# stopped writing it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail=0
 for f in internal/db/migrations/*.sql; do
   case "$f" in
-    *042_drop_telegram.sql|*071_drop_invite_columns.sql) continue ;;
+    *042_drop_telegram.sql|*071_drop_invite_columns.sql|*080_drop_project_key.sql) continue ;;
   esac
   # Strip -- comments so documented words ("never DROP COLUMN") don't trip it.
   body=$(grep -v '^[[:space:]]*--' "$f" || true)

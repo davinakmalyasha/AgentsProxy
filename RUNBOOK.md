@@ -352,6 +352,18 @@ update both workflows.
 schema. Additive, backward-compatible migrations may ship with their code,
 but the binary must never require a column the database does not have yet.
 
+The schema-clone/auth release follows the expand/contract order:
+
+1. Apply `077`–`079` and Centrum `0004`/`0006`. The auth functions keep the
+   same signatures, so the old binary stays compatible; sessions are copied
+   into `public.staff_sessions`.
+2. Deploy the binary. It stops writing `clients.project_key`, uses
+   `public.staff_sessions` in the janitor, and resolves the tenant schema for
+   auth and money summaries.
+3. Apply `080` and Centrum `0005`. They remove the dead `project_key` column
+   and the legacy `project_centrum.sports_sessions` table. Do this only after
+   the new binary is live.
+
 Both ledgers store a SHA-256 checksum. An applied file that changed after
 application fails the migration with a clear error; add a new migration
 instead. Platform rows are in `public.schema_migrations`; project rows are in
@@ -376,13 +388,16 @@ Add `--json` for CI. The `db-migrate` workflow exposes the same modes through
 its `command` input (`apply` is the default). `check` also fails when:
 
 * `clients.db_schema` disagrees with a project's `project.json`;
+* the partial unique index `clients_project_schema_key` is missing;
 * two projects claim the same slug or schema, or two clients share a
   `project_*` schema;
 * a client points at a `project_*` schema that no project folder declares;
 * the ledger contains a project folder that disappeared from the build;
 * a table in any project schema is missing `ENABLE+FORCE RLS`.
 
-The `schema-check` workflow runs the same read-only check daily.
+The `schema-check` workflow runs the same read-only check daily. Tests use
+`internal/dbtest` to clone a tenant schema; no feature test may query
+`project_centrum` directly (`scripts/lint-tests.sh`).
 
 The runner takes `pg_advisory_xact_lock(734561)` for platform migrations and
 `734562` per project. On Vercel, `RUN_MIGRATIONS=false`; production applies
@@ -436,7 +451,7 @@ Do not restore production data into staging. Staging is synthetic.
 - [x] `pgx` parameterized (`$1,$2`) — no `fmt.Sprintf` into SQL anywhere
 - [x] RLS on `tenant_records` with `FORCE ROW LEVEL SECURITY` + RESTRICTIVE-style predicate (migration 002)
 - [x] Every project table `ENABLE+FORCE RLS`, audited by `migrate check`
-- [x] `clients.db_schema` constrained to `public` or `project_*`; `project_key` partial unique index prevents concurrent duplicate ownership
+- [x] `clients.db_schema` constrained to `public` or `project_*`; partial unique index prevents duplicate ownership
 - [x] Staging/production DB identity pinned with `EXPECTED_DB_REF`
 - [x] slog redaction: `Authorization` + any `*password*` / `*secret*` keys → `[REDACTED]`
 - [x] Sentry BeforeSend: same redaction

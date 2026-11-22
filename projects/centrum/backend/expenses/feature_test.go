@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -31,6 +31,8 @@ type harness struct {
 	router    http.Handler
 	adminPool *pgxpool.Pool
 	rdb       *redis.Client
+	schemaA   string
+	schemaB   string
 }
 
 func setup(t *testing.T) *harness {
@@ -44,7 +46,7 @@ func setup(t *testing.T) *harness {
 	if adminDSN == "" {
 		adminDSN = dsn
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	adminPool, err := db.NewPool(ctx, adminDSN)
@@ -52,23 +54,17 @@ func setup(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(adminPool.Close)
-	if err := db.MigrateAll(ctx, adminPool); err != nil {
+	testutil.Migrate(t, adminPool)
+	if _, err := adminPool.Exec(ctx, `DELETE FROM clients WHERE tenant_id IN ('ex-a','ex-b')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := testutil.LockAndRun(ctx, adminPool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM project_centrum.sports_expenses WHERE tenant_id IN ('ex-a','ex-b');
-			 DELETE FROM clients WHERE tenant_id IN ('ex-a','ex-b');`); err != nil {
-			return err
-		}
-		for _, c := range [][]string{{"ex-a", "ex-a", "tok-ex-a"}, {"ex-b", "ex-b", "tok-ex-b"}} {
-			if err := seedClientTx(t, ctx, tx, c[0], c[1], c[2], 1000000, "active", "records", "expenses"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	schemaA := testutil.CloneTenantSchema(t, ctx, adminPool, "ex-a")
+	schemaB := testutil.CloneTenantSchema(t, ctx, adminPool, "ex-b")
+	for _, c := range []struct{ schema, name, tenant, token string }{
+		{schemaA, "ex-a", "ex-a", "tok-ex-a"},
+		{schemaB, "ex-b", "ex-b", "tok-ex-b"},
+	} {
+		seedClient(t, ctx, adminPool, c.schema, c.name, c.tenant, c.token, 1000000, "active", "records", "expenses")
 	}
 
 	pool, err := db.NewPool(ctx, toRuntimeDSN(dsn))
@@ -92,7 +88,7 @@ func setup(t *testing.T) *harness {
 		Cache: cli,
 		Auth:  &authapi.Auth{Pool: adminPool},
 	}, "sports")
-	return &harness{router: fr, adminPool: adminPool, rdb: rdb}
+	return &harness{router: fr, adminPool: adminPool, rdb: rdb, schemaA: schemaA, schemaB: schemaB}
 }
 
 func toRuntimeDSN(dsn string) string {
@@ -108,15 +104,16 @@ func toRuntimeDSN(dsn string) string {
 	return dsn[:i+3] + "app_runtime" + rest[at:]
 }
 
-func seedClientTx(t *testing.T, ctx context.Context, tx pgx.Tx, name, tenant, token string, quota int, status string, feats ...string) error {
+func seedClient(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, name, tenant, token string, quota int, status string, feats ...string) {
 	t.Helper()
 	hash := auth.HashToken(token)
-	_, err := tx.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
-		 VALUES ($1,$2,$3,$4,$5,'sports',$6,'project_centrum')`,
-		name, tenant, hash, quota, status, feats,
-	)
-	return err
+		 VALUES ($1,$2,$3,$4,$5,'sports',$6,$7)`,
+		name, tenant, hash, quota, status, feats, schema,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token, body string) *http.Response {
@@ -259,8 +256,9 @@ func TestExpenses_TombstoneDelete(t *testing.T) {
 	// exactly as the payments tombstone stores it.
 	var delBy string
 	var delAt time.Time
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT deleted_by, deleted_at FROM project_centrum.sports_expenses WHERE id=$1::uuid`, id).Scan(&delBy, &delAt); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT deleted_by, deleted_at FROM %s WHERE id=$1::uuid`,
+		testutil.Table(h.schemaA, "sports_expenses")), id).Scan(&delBy, &delAt); err != nil {
 		t.Fatalf("tombstone row missing: %v", err)
 	}
 	if delAt.IsZero() {
@@ -273,12 +271,14 @@ func TestExpenses_TombstoneDelete(t *testing.T) {
 	// Net-profit shape: the filtered SUM sees only the survivor, while
 	// the unfiltered total proves the row was preserved, not removed.
 	var filtered, all float64
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount),0) FROM project_centrum.sports_expenses WHERE tenant_id='ex-a' AND deleted_at IS NULL`).Scan(&filtered); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT COALESCE(SUM(amount),0) FROM %s WHERE tenant_id='ex-a' AND deleted_at IS NULL`,
+		testutil.Table(h.schemaA, "sports_expenses"))).Scan(&filtered); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.adminPool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount),0) FROM project_centrum.sports_expenses WHERE tenant_id='ex-a'`).Scan(&all); err != nil {
+	if err := h.adminPool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT COALESCE(SUM(amount),0) FROM %s WHERE tenant_id='ex-a'`,
+		testutil.Table(h.schemaA, "sports_expenses"))).Scan(&all); err != nil {
 		t.Fatal(err)
 	}
 	if filtered != 200000 {
@@ -340,8 +340,8 @@ func TestExpenses_RoleMatrix(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	testutil.SeedStaffSession(t, ctx, h.adminPool, "ex-a", "owner@ex.test", "owner", "sess-ex-owner")
-	testutil.SeedStaffSession(t, ctx, h.adminPool, "ex-a", "staff@ex.test", "pegawai", "sess-ex-staff")
+	testutil.SeedStaffSession(t, ctx, h.adminPool, h.schemaA, "ex-a", "owner@ex.test", "owner", "sess-ex-owner")
+	testutil.SeedStaffSession(t, ctx, h.adminPool, h.schemaA, "ex-a", "staff@ex.test", "pegawai", "sess-ex-staff")
 
 	// Seed one expense as the client token (client passes the owner tier
 	// by design — the integration model).
