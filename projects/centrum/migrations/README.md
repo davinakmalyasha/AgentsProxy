@@ -5,9 +5,8 @@ platform chain created them in `public`; `0001_move_to_project_schema.sql`
 is the one-time move that relocates them and rewrites the definer functions
 that referenced `public.sports_*`.
 
-Centrum's frontend now uses `/v1/p/centrum/*`; `/v1/sports/*` remains a
-one-release rollback alias. The project folder and schema are the real
-boundary.
+Centrum's frontend uses `/v1/p/centrum/*`. The project folder and schema are
+the real boundary; there is no project-owned legacy route alias.
 
 Project migrations:
 - `0001_move_to_project_schema.sql` — move tables out of `public`, rewrite
@@ -23,6 +22,21 @@ Project migrations:
   project-scoped session table after the binary uses the platform directory.
 - `0006_grant_money_reader_clients.sql` — let the money definer resolve
   `clients.db_schema`.
+- `0007_staff_payments_to_project.sql` — create
+  `project_centrum.sports_staff_payments` and copy the public ledger.
+- `0008_money_summary_project.sql` — add the invoker money aggregate for the
+  agent tools.
+- `0009_contract_staff_payments.sql` — copy late payroll rows, then drop the
+  public ledger.
+- `0010_contract_legacy_auth.sql` — drop the schema-scanning auth functions
+  and remove `auth_definer`'s project-data grants.
+- `0011_contract_range_summary.sql` — drop `private.range_summary` and retire
+  `money_reader`.
+
+The contract migrations live in the project chain on purpose. The runner
+applies platform migrations before project migrations, and Centrum `0004` /
+`0006` recreate the legacy functions and grants. Cleanup therefore has to run
+after `0008`, including on a fresh database.
 
 New migrations for Centrum go here. Because `project.json` sets
 `"auto_grant": false`, a new table must grant `app_runtime` explicitly:
