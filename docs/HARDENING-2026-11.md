@@ -288,6 +288,11 @@ architecture work above.
 - Production ADK smoke after `085`: `POST /v1/agent/client-chat` returned a
   reply (the session service set `app.tenant_id` and the scoped policies
   allowed the write/read).
+- Architecture-closure production rollout: the new gate exposed an empty
+  `centrum` entitlement. Production and staging were backfilled to the
+  project manifest set; `088_project_entitlement_backfill.sql` records the
+  one-time normalization, and `migrate check` now rejects an empty project
+  entitlement.
 - Architecture-closure local suite: `go test -p 1 ./... -count=1` — pass;
   `go vet ./...` clean. Targeted API tests cover the platform vertical pin,
   project-vertical immutability, platform feature revalidation, canonical

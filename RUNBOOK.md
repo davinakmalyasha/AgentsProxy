@@ -590,6 +590,10 @@ Do not restore production data into staging. Staging is synthetic.
 - Project verticals are fixed by `project.json`; admin PATCH rejects a
   vertical change. A platform tenant's vertical may change only if every
   existing feature remains valid for the new vertical.
+- `clients.features` is the live entitlement for every identity, including
+  public landing reads. An active project tenant must carry an explicit list;
+  `migrate check` fails on an empty one. Apply the entitlement backfill before
+  deploying a gate that starts enforcing it.
 - Admin actions are recorded in `public.admin_audit_log` (owner-only). Inspect
   with:
   `select occurred_at, actor, action, target, status from admin_audit_log order by id desc limit 50;`
