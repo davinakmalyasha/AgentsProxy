@@ -67,6 +67,13 @@ type Config struct {
 	DBAdminPoolMax int
 	// Agent-chat per-IP sub-limit (router hardcodes 20/min today).
 	AgentRateLimitPerMinute int
+	// Staff-login brute-force controls. The rate counts every attempt for
+	// one tenant/email; the lockout counts failed password checks inside
+	// LoginLockoutMinutes. Both live in Redis and fail open on a cache
+	// outage so a Redis incident cannot lock every operator out.
+	LoginRateLimitPerMinute int
+	LoginLockoutFailures    int
+	LoginLockoutMinutes     int
 	// Durable report storage (Supabase Storage). Empty URL/key keeps the
 	// local-disk backend (dev/tests). Bucket must exist; objects are
 	// private and app-proxied, never public.
@@ -176,6 +183,9 @@ func Load() (*Config, error) {
 		DBAdminPoolMin:          getenvPositiveInt("DB_ADMIN_POOL_MIN", 0),
 		DBAdminPoolMax:          getenvPositiveInt("DB_ADMIN_POOL_MAX", 3),
 		AgentRateLimitPerMinute: getenvInt("AGENT_RATE_LIMIT_PER_MINUTE", 20),
+		LoginRateLimitPerMinute: getenvPositiveInt("LOGIN_RATE_LIMIT_PER_MINUTE", 10),
+		LoginLockoutFailures:    getenvPositiveInt("LOGIN_LOCKOUT_FAILURES", 5),
+		LoginLockoutMinutes:     getenvPositiveInt("LOGIN_LOCKOUT_MINUTES", 15),
 		SupabaseURL:             strings.TrimRight(getenv("SUPABASE_URL", ""), "/"),
 		SupabaseStorageKey:      os.Getenv("SUPABASE_STORAGE_KEY"),
 		ReportBucket:            getenv("REPORT_BUCKET", "reports"),
@@ -526,9 +536,10 @@ func splitCSV(s string) []string {
 // String redacts secrets for safe logging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t ALLOW_REMOTE_DB=%t agency=%t frontend=%s}",
+		"Config{port=%s env=%s db=%s db_admin=%s redis=%s llm_base=%s llm_model=%s admin_key=%s report_worker_key=%s max_tokens=%d rate_limit=%d login_rate=%d login_lockout=%d/%dm origins=%v proxies=%v sentry=%s sentry_env=%s sentry_release=%s traces=%.2f pool_min=%d pool_max=%d simple_proto=%t reports=%s/%s max_report_bytes=%d vapid=%t BACKGROUND_TICKERS=%t RUN_MIGRATIONS=%t ALLOW_REMOTE_DB=%t agency=%t frontend=%s}",
 		c.Port, c.Env, redactDSN(c.DatabaseURL), redactDSN(c.DatabaseAdminURL), redactDSN(c.RedisURL), c.LLMBaseURL, c.LLMModel,
-		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute, c.AllowOrigins, c.TrustedProxyCIDRs,
+		redact(c.AdminAPIKey, 4), redact(c.ReportWorkerToken, 4), c.MaxTokensPerReq, c.RateLimitPerMinute,
+		c.LoginRateLimitPerMinute, c.LoginLockoutFailures, c.LoginLockoutMinutes, c.AllowOrigins, c.TrustedProxyCIDRs,
 		redactDSN(c.SentryDSN), c.SentryEnv, c.SentryRelease, c.TracesSampleRate,
 		c.DBPoolMin, c.DBPoolMax, c.DBSimpleProtocol, reportBackend(c), c.ReportBucket, c.ReportMaxBytes, c.VAPIDPrivateKey != "", c.BackgroundTickers, c.RunMigrations,
 		c.AllowRemoteDB, c.AgencyJWTSecret != "", c.AgencyFrontend,

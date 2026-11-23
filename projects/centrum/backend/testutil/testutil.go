@@ -117,7 +117,7 @@ func SchemaPool(t *testing.T, ctx context.Context, dsn, schema string) *pgxpool.
 // their own tenant ids; production builds the provider map from package init
 // registrations.
 func NewAuth(pool *pgxpool.Pool, tenants ...string) *authapi.Auth {
-	a := authapi.New(pool)
+	a := authapi.New(pool, nil)
 	if len(tenants) == 0 {
 		tenants = []string{"centrum"}
 	}

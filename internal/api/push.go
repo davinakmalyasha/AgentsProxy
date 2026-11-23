@@ -7,6 +7,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
+	"github.com/davinakmalyasha/agents-proxy/internal/pushsafe"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -50,7 +51,9 @@ func validPushKeys(endpoint, p256dh, auth string) bool {
 	if len(endpoint) < 12 || len(endpoint) > 2048 {
 		return false
 	}
-	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://localhost") && !strings.HasPrefix(endpoint, "http://127.0.0.1") {
+	// The endpoint is a server-side request target, not just a string:
+	// restrict it to the browser push services. See internal/pushsafe.
+	if err := pushsafe.ValidateEndpoint(endpoint); err != nil {
 		return false
 	}
 	// Key material is validated at send time (encryption fails

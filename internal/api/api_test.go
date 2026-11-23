@@ -168,7 +168,12 @@ func setup(t *testing.T) *harness {
 		RateLimitPerMinute: 100000, // high so tests don't trip
 		AllowOrigins:       []string{"*"},
 	}
-	authH := authapi.New(pool)
+	authH := authapi.New(pool, rdb)
+	// The test suite logs in repeatedly from one fixture account; keep
+	// the production brute-force limits out of unrelated tests. The
+	// limiter itself is covered in internal/authapi.
+	authH.LoginRatePerMinute = 100000
+	authH.LoginLockoutFailures = 100000
 	authH.RegisterProvider("alpha", centrumauth.New(pool))
 
 	projects := newFakeProjectCatalog()

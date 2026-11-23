@@ -15,8 +15,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 )
 
@@ -156,7 +158,23 @@ func setup(t *testing.T) (*Auth, *pgxpool.Pool, *fakeProvider, context.Context) 
 		t.Fatal(err)
 	}
 
-	a := New(pool)
+	// Redis is optional here: the auth/login tests need the session
+	// directory, while the brute-force tests explicitly skip when there
+	// is no cache to count in.
+	var rdb *redis.Client
+	if rurl := os.Getenv("TEST_REDIS_URL"); rurl != "" {
+		rdb, err = redisx.NewClient(ctx, rurl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rdb.Close() })
+	}
+
+	a := New(pool, rdb)
+	// Keep the production lockout out of unrelated tests; the dedicated
+	// TestLoginLockoutAndRecovery lowers these per-test.
+	a.LoginRatePerMinute = 100000
+	a.LoginLockoutFailures = 100000
 	fake := newFakeProvider()
 	a.RegisterProvider(tenant, fake)
 	return a, pool, fake, ctx
@@ -364,8 +382,93 @@ func TestUserByTokenReturnsNoRowsForUnknownProvider(t *testing.T) {
 		"00000000-0000-0000-0000-000000000002", HashToken("orphan-token")); err != nil {
 		t.Fatal(err)
 	}
-	bare := New(pool)
+	bare := New(pool, nil)
 	if _, err := bare.UserByToken(ctx, "orphan-token"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("unknown provider err=%v, want pgx.ErrNoRows", err)
+	}
+}
+
+// TestLoginLockoutAndRecovery proves the account lockout is enforced below
+// the password check (a correct password during the window is still refused)
+// and that a successful login clears the failure budget.
+func TestLoginLockoutAndRecovery(t *testing.T) {
+	a, _, fake, ctx := setup(t)
+	if a.RDB == nil {
+		t.Skip("TEST_REDIS_URL not set — skipping login lockout test")
+	}
+	const tenant, email = "auth-t", "lockout@test.dev"
+	fake.add(tenant, email, "sekret123", "owner", "Lockout", true)
+	subject := loginSubject(tenant, email)
+	t.Cleanup(func() {
+		_ = a.RDB.Del(context.Background(), loginFailureKey(subject)).Err()
+	})
+	_ = a.RDB.Del(ctx, loginFailureKey(subject)).Err()
+
+	a.LoginRatePerMinute = 1000
+	a.LoginLockoutFailures = 5
+	a.LoginLockout = time.Minute
+
+	badBody := `{"tenant_id":"auth-t","email":"lockout@test.dev","password":"wrong"}`
+	for i := 0; i < 5; i++ {
+		if rec := do(t, a, http.MethodPost, "/login", "", badBody); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d status=%d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	rec := do(t, a, http.MethodPost, "/login", "", badBody)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked attempt status=%d want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("429 response missing Retry-After")
+	}
+	if rec := do(t, a, http.MethodPost, "/login", "",
+		`{"tenant_id":"auth-t","email":"lockout@test.dev","password":"sekret123"}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password while locked=%d want 429", rec.Code)
+	}
+
+	// Success clears the failure window, so the next four bad attempts are
+	// ordinary 401s, not a renewed lockout.
+	_ = a.RDB.Del(ctx, loginFailureKey(subject)).Err()
+	login(t, a, tenant, email, "sekret123")
+	for i := 0; i < 4; i++ {
+		if rec := do(t, a, http.MethodPost, "/login", "", badBody); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("post-success failure %d status=%d want 401", i+1, rec.Code)
+		}
+	}
+}
+
+// TestLoginRateLimitedPerAccount proves the per-account minute bucket
+// applies even when the password is correct: rotating IPs cannot multiply
+// the attempts one account is allowed.
+func TestLoginRateLimitedPerAccount(t *testing.T) {
+	a, _, fake, ctx := setup(t)
+	if a.RDB == nil {
+		t.Skip("TEST_REDIS_URL not set — skipping login rate test")
+	}
+	const tenant, email = "auth-t", "rate@test.dev"
+	fake.add(tenant, email, "sekret123", "owner", "Rate", true)
+	subject := loginSubject(tenant, email)
+	now := time.Now().UTC()
+	rateKey := fmt.Sprintf("auth:login:rate:%s:%s", subject, now.Format("200601021504"))
+	t.Cleanup(func() {
+		_ = a.RDB.Del(context.Background(), rateKey, loginFailureKey(subject)).Err()
+	})
+	_ = a.RDB.Del(ctx, rateKey, loginFailureKey(subject)).Err()
+
+	a.LoginRatePerMinute = 2
+	a.LoginLockoutFailures = 1000
+
+	body := `{"tenant_id":"auth-t","email":"rate@test.dev","password":"wrong"}`
+	for i := 0; i < 2; i++ {
+		if rec := do(t, a, http.MethodPost, "/login", "", body); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status=%d want 401", i+1, rec.Code)
+		}
+	}
+	rec := do(t, a, http.MethodPost, "/login", "", body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third attempt status=%d want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("429 response missing Retry-After")
 	}
 }

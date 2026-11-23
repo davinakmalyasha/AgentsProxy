@@ -19,7 +19,7 @@ func Recovery() func(http.Handler) http.Handler {
 					stack := string(debug.Stack())
 					slog.Error("panic recovered",
 						"err", fmt.Sprint(rec),
-						"path", r.URL.Path,
+						"path", RedactPath(r.URL.Path),
 						"method", r.Method,
 						"stack", stack,
 					)

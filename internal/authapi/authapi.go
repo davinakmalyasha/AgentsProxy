@@ -9,16 +9,24 @@
 package authapi
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
+	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 )
 
 // Auth is the platform staff-auth handler. Providers are constructed from the
@@ -31,14 +39,38 @@ import (
 // project profile read is the price of that guarantee.
 type Auth struct {
 	Pool      *pgxpool.Pool
+	RDB       *redis.Client
 	Providers map[string]Provider
+
+	// LoginRatePerMinute bounds attempts per tenant/email per minute.
+	// It is a per-account limit on purpose: the pre-auth IP limiter
+	// cannot see the account, and on Vercel every request shares the
+	// proxy's socket address unless TRUSTED_PROXY_CIDRS is configured.
+	LoginRatePerMinute int
+	// LoginLockoutFailures is the number of failed password checks inside
+	// LoginLockout that locks the account.
+	LoginLockoutFailures int
+	// LoginLockout is the sliding failure window and lockout duration.
+	LoginLockout time.Duration
 }
 
-// New builds the handler and one provider per registered project.
-func New(pool *pgxpool.Pool) *Auth {
+const (
+	defaultLoginRatePerMinute   = 10
+	defaultLoginLockoutFailures = 5
+	defaultLoginLockout         = 15 * time.Minute
+)
+
+// New builds the handler and one provider per registered project. A nil
+// Redis client disables the login limiter (tests and local shells); the
+// server always passes the real client.
+func New(pool *pgxpool.Pool, rdb *redis.Client) *Auth {
 	return &Auth{
-		Pool:      pool,
-		Providers: newProviders(pool),
+		Pool:                 pool,
+		RDB:                  rdb,
+		Providers:            newProviders(pool),
+		LoginRatePerMinute:   defaultLoginRatePerMinute,
+		LoginLockoutFailures: defaultLoginLockoutFailures,
+		LoginLockout:         defaultLoginLockout,
 	}
 }
 
@@ -72,14 +104,34 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-account throttle and lockout before any password work. The key is
+	// a hash of tenant+email, so Redis never holds a raw address.
+	subject := loginSubject(req.TenantID, req.Email)
+	if retry, locked := a.loginLocked(r.Context(), subject); locked {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeErr(w, http.StatusTooManyRequests, "too many login attempts")
+		return
+	}
+	if retry, limited := a.loginRateLimited(r.Context(), subject); limited {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeErr(w, http.StatusTooManyRequests, "too many login attempts")
+		return
+	}
+
 	p := a.providerFor(req.TenantID)
 	if p == nil {
-		// Do not reveal whether the tenant exists.
+		// Do not reveal whether the tenant exists. Still burn a bcrypt
+		// verification and record the failure so timing and lockout are
+		// identical to a real account with a wrong password.
+		verifyDummyPassword(req.Password)
+		a.recordLoginFailure(r.Context(), subject)
 		writeErr(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	creds, err := p.Authenticate(r.Context(), req.TenantID, req.Email)
 	if errors.Is(err, ErrInvalidCredentials) {
+		verifyDummyPassword(req.Password)
+		a.recordLoginFailure(r.Context(), subject)
 		writeErr(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -89,9 +141,13 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !creds.Active || !VerifyPassword(creds.PasswordHash, req.Password) {
+		a.recordLoginFailure(r.Context(), subject)
 		writeErr(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	// Correct credentials clear the failure window before any session
+	// write. A later token/DB error is not a password failure.
+	a.clearLoginFailures(r.Context(), subject)
 
 	raw, tokenHash, err := GenerateSessionToken()
 	if err != nil {
@@ -122,6 +178,130 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		"token": raw,
 		"user":  u,
 	})
+}
+
+// dummyPasswordHash keeps unknown-tenant and unknown-email login responses
+// time-comparable to a real bcrypt verification. Generated once at startup;
+// never accepted by any account.
+var dummyPasswordHash = func() string {
+	h, err := HashPassword("login-timing-equalizer-not-a-password")
+	if err != nil {
+		return ""
+	}
+	return h
+}()
+
+func verifyDummyPassword(password string) {
+	if dummyPasswordHash != "" {
+		VerifyPassword(dummyPasswordHash, password)
+	}
+}
+
+// loginSubject is the limiter key. Hashing keeps raw emails out of Redis
+// (keys can be inspected operationally) while preserving exact scoping.
+func loginSubject(tenant, email string) string {
+	sum := sha256.Sum256([]byte(tenant + "\x00" + email))
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *Auth) loginPolicy() (rate, failures int, lockout time.Duration) {
+	rate, failures, lockout = a.LoginRatePerMinute, a.LoginLockoutFailures, a.LoginLockout
+	if rate <= 0 {
+		rate = defaultLoginRatePerMinute
+	}
+	if failures <= 0 {
+		failures = defaultLoginLockoutFailures
+	}
+	if lockout <= 0 {
+		lockout = defaultLoginLockout
+	}
+	return rate, failures, lockout
+}
+
+func loginFailureKey(subject string) string { return "auth:login:fail:" + subject }
+
+// loginLocked reports the remaining lockout seconds. Redis errors fail open:
+// a cache outage must not lock every staff user out of the product. The
+// failure is logged (without email or token) so the outage is visible.
+func (a *Auth) loginLocked(ctx context.Context, subject string) (int, bool) {
+	if a.RDB == nil {
+		return 0, false
+	}
+	_, maxFailures, lockout := a.loginPolicy()
+	key := loginFailureKey(subject)
+	n, err := a.RDB.Get(ctx, key).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0, false
+	}
+	if err != nil {
+		slog.Warn("login lockout check, failing open", "err", err)
+		return 0, false
+	}
+	if n < maxFailures {
+		return 0, false
+	}
+	ttl, err := a.RDB.TTL(ctx, key).Result()
+	if err != nil || ttl <= 0 {
+		ttl = lockout
+	}
+	retry := int(ttl.Seconds())
+	if retry < 1 {
+		retry = 1
+	}
+	return retry, true
+}
+
+// loginRateLimited counts every attempt (success or failure) for one account
+// in a fixed one-minute window. The account key is what survives IP rotation
+// and NAT sharing, which the pre-auth IP limiter cannot see.
+func (a *Auth) loginRateLimited(ctx context.Context, subject string) (int, bool) {
+	if a.RDB == nil {
+		return 0, false
+	}
+	rate, _, _ := a.loginPolicy()
+	if rate <= 0 {
+		return 0, false
+	}
+	now := time.Now().UTC()
+	key := fmt.Sprintf("auth:login:rate:%s:%s", subject, now.Format("200601021504"))
+	n, err := redisx.IncrExpireRun(ctx, a.RDB, key, 65*time.Second)
+	if err != nil {
+		slog.Warn("login rate check, failing open", "err", err)
+		return 0, false
+	}
+	if int(n) > rate {
+		retry := 60 - now.Second()
+		if retry < 1 {
+			retry = 60
+		}
+		return retry, true
+	}
+	return 0, false
+}
+
+func (a *Auth) recordLoginFailure(ctx context.Context, subject string) {
+	if a.RDB == nil {
+		return
+	}
+	_, maxFailures, lockout := a.loginPolicy()
+	n, err := redisx.IncrExpireRun(ctx, a.RDB, loginFailureKey(subject), lockout)
+	if err != nil {
+		slog.Warn("login failure record, failing open", "err", err)
+		return
+	}
+	if int(n) == maxFailures {
+		// No email or token in the log: the subject is already hashed.
+		slog.Warn("login locked after repeated failures", "failures", n, "lockout", lockout.String())
+	}
+}
+
+func (a *Auth) clearLoginFailures(ctx context.Context, subject string) {
+	if a.RDB == nil {
+		return
+	}
+	if err := a.RDB.Del(ctx, loginFailureKey(subject)).Err(); err != nil {
+		slog.Warn("login failure clear", "err", err)
+	}
 }
 
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {

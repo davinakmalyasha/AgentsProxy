@@ -76,10 +76,12 @@ money-reader schema grant, `0007` staff-payments move, `0008` project money
 summary, `0009` payroll contract, `0010` legacy-auth contract, `0011`
 range-summary contract) plus platform `081_staff_sessions_generic.sql`,
 `082_revoke_agency_runtime_grants.sql`,
-`084_drop_usage_read_policy.sql`, `085_adk_sessions_tenant_rls.sql`, and
-`086_usage_client_scope.sql`. For `085`/`086`, deploy the new binary first
-and wait for `/healthz`; the policies require GUCs the old binary does not
-set. Verify:
+`084_drop_usage_read_policy.sql`, `085_adk_sessions_tenant_rls.sql`,
+`086_usage_client_scope.sql`, and `087_admin_audit_log.sql`. For `085`/`086`,
+deploy the new binary first and wait for `/healthz`; the policies require GUCs
+the old binary does not set. For `087`, apply the migration before the binary
+that writes admin audit rows: the middleware fails closed until the table
+exists. `087` is additive and is safe with the old binary. Verify:
 
 ```sql
 select count(*) from pg_namespace where nspname = 'project_centrum';

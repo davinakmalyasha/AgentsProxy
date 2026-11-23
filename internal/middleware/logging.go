@@ -4,11 +4,13 @@ package middleware
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,7 +122,7 @@ func Logging() func(http.Handler) http.Handler {
 			attrs := make([]any, 0, 12)
 			attrs = append(attrs,
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", RedactPath(r.URL.Path),
 				"status", rec.status,
 				"duration_ms", dur.Milliseconds(),
 				"request_id", rid,
@@ -143,7 +145,7 @@ func Logging() func(http.Handler) http.Handler {
 			if r.URL.Path != "/healthz" && sentry.Enabled() {
 				bc := map[string]any{
 					"method":      r.Method,
-					"path":        r.URL.Path,
+					"path":        RedactPath(r.URL.Path),
 					"status":      rec.status,
 					"duration_ms": dur.Milliseconds(),
 					"request_id":  rid,
@@ -159,4 +161,27 @@ func Logging() func(http.Handler) http.Handler {
 
 func SetClientID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, CtxClientID, id)
+}
+
+// RedactPath removes capability credentials from request paths before they
+// reach logs, Sentry breadcrumbs, or panic reports. Report downloads and
+// report-job links authenticate by possession of the path segment itself, so
+// logging the raw path is equivalent to logging a password.
+func RedactPath(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/v1/reports/jobs/"):
+		return "/v1/reports/jobs/[REDACTED]"
+	case strings.HasPrefix(path, "/v1/reports/"):
+		return "/v1/reports/[REDACTED]"
+	default:
+		return path
+	}
+}
+
+// Fingerprint is a short, stable label for a capability value that must be
+// correlated in logs without being usable. It is not a replacement for
+// RedactPath; use it when an opaque id (not a full path) needs a log field.
+func Fingerprint(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:4])
 }

@@ -97,6 +97,10 @@ func testPushSender(pool *pgxpool.Pool, client *http.Client) *PushSender {
 	return &PushSender{
 		Pool: pool, VAPIDPublic: pub, VAPIDPrivate: priv,
 		Subject: "mailto:test@example.id", HTTP: client,
+		// Tests use an httptest server, which is intentionally not a
+		// browser push-service host. The production policy is covered by
+		// TestPushSender_RejectsDisallowedEndpoint and pushsafe.
+		allowEndpoint: func(string) error { return nil },
 	}
 }
 
@@ -231,6 +235,30 @@ func TestScheduler_NoSubscriptionsHoldsWithoutBurning(t *testing.T) {
 	}
 	if status != "pending" || attempts != 0 {
 		t.Errorf("status=%q attempts=%d, want pending/0 (held, budget intact)", status, attempts)
+	}
+}
+
+func TestPushSender_RejectsDisallowedEndpoint(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	const tenant = "rem-push-ssrf"
+	// A stored endpoint that is not a browser push service must never be
+	// dialed. This is the send-time half of the SSRF boundary; the write
+	// path validation is pinned in internal/api/push_test.go.
+	seedPushClient(t, ctx, pool, tenant, "owner", "https://169.254.169.254/latest/meta-data")
+
+	s := testPushSender(pool, nil)
+	s.allowEndpoint = nil // use the production allowlist
+	if err := s.Send(ctx, tenant, "owner", "x"); err == nil {
+		t.Fatal("Send to a disallowed endpoint succeeded, want error")
+	}
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM push_subscriptions WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("disallowed subscription not pruned, rows = %d", n)
 	}
 }
 

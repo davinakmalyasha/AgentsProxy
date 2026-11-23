@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
+	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 )
 
 // ReportJobs runs deferred report builds (migration 064) and serves the
@@ -89,7 +90,7 @@ func (h *ReportJobs) Build(w http.ResponseWriter, r *http.Request) {
 	objectKey, filename, size, buildErr := h.build(r.Context(), c)
 	if buildErr != nil {
 		h.fail(r.Context(), c, buildErr)
-		slog.Warn("report job build failed", "id", c.id, "attempt", c.attempts, "err", buildErr)
+		slog.Warn("report job build failed", "job", middleware.Fingerprint(c.id), "attempt", c.attempts, "err", buildErr)
 		writeJSON(w, http.StatusOK, map[string]any{"claimed": 1, "built": 0})
 		return
 	}
@@ -99,7 +100,7 @@ func (h *ReportJobs) Build(w http.ResponseWriter, r *http.Request) {
 		        filename = $3, size_bytes = $4, error = '', updated_at = now()
 		  WHERE id = $1::uuid`,
 		c.id, objectKey, filename, size); err != nil {
-		slog.Error("report job complete", "id", c.id, "err", err)
+		slog.Error("report job complete", "job", middleware.Fingerprint(c.id), "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"claimed": 1, "built": 1})
 }
@@ -144,7 +145,7 @@ func (h *ReportJobs) fail(ctx context.Context, c reportJobClaim, buildErr error)
 		    SET status = $2, claimed_at = NULL, error = $3, updated_at = now()
 		  WHERE id = $1::uuid`,
 		c.id, status, buildErr.Error()); err != nil {
-		slog.Error("report job fail", "id", c.id, "err", err)
+		slog.Error("report job fail", "job", middleware.Fingerprint(c.id), "err", err)
 	}
 }
 
@@ -182,7 +183,7 @@ func (h *ReportJobs) Get(w http.ResponseWriter, r *http.Request) {
 	case "done":
 		token, err := agentstools.MintReportToken(r.Context(), h.Pool, tenant, objectKey, size)
 		if err != nil {
-			slog.Error("report job mint", "id", id, "err", err)
+			slog.Error("report job mint", "job", middleware.Fingerprint(id), "err", err)
 			writeJSONError(w, http.StatusInternalServerError, "internal")
 			return
 		}
