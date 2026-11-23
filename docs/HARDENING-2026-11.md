@@ -1,6 +1,6 @@
 # Architecture hardening — November 2026
 
-Status: **P0/P1 implemented and verified; residual items are marked**. This
+Status: **P0/P1 and security-polish controls implemented and verified; residual ops items are marked**. This
 document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
 docs/ops/CI). An item is only marked `[x]` when the code is merged and
 the named verification passes.
@@ -143,6 +143,57 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
 
 ---
 
+## Security polish — post-hardening controls
+
+These are additive controls on top of the P0/P1/P2 invariants. They are
+marked `[x]` once the implementation and named tests pass; rollout evidence
+is recorded in the verification log.
+
+- [x] **S-1 Staff-login brute-force protection.**
+  `/v1/auth/login` has a per-tenant/email attempt bucket (default 10/min)
+  and a failure lockout (default 5 failures / 15 min) in Redis. Keys are
+  SHA-256 hashes of tenant+email, so Redis never holds a raw address.
+  Unknown tenants/users still pay a bcrypt comparison, keeping the failure
+  path timing-comparable. A locked account returns 429 + `Retry-After`;
+  a successful login clears the failure budget. Redis errors fail open
+  (availability) with a warning. Tuning:
+  `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_LOCKOUT_FAILURES`,
+  `LOGIN_LOCKOUT_MINUTES`.
+
+- [x] **S-2 Push endpoint SSRF allowlist.**
+  `internal/pushsafe` accepts only HTTPS endpoints on
+  `fcm.googleapis.com`, `web.push.apple.com`,
+  `updates.push.services.mozilla.com`, `push.services.mozilla.com`, and
+  `*.notify.windows.com` (dot boundary), on port 443, with no userinfo and
+  a non-empty path. Validation runs on subscribe and again immediately
+  before every send; invalid stored rows are pruned and never dialed. The
+  sender's HTTP client also refuses redirects outside the allowlist, and
+  logs only the endpoint host. Tests:
+  `TestValidPushKeys_ServiceAllowlist`,
+  `TestPushSender_RejectsDisallowedEndpoint`, and the `pushsafe` table
+  tests.
+
+- [x] **S-3 Admin audit trail.**
+  Migration `087_admin_audit_log.sql` adds an append-only table for the
+  `/v1/admin` surface. The middleware inserts a row BEFORE the handler
+  (fail closed on insert failure), then records status and duration. Actor
+  is a 12-hex SHA-256 fingerprint of the configured `ADMIN_API_KEY`, never
+  the key. Safe target fields (`id`, `tenant_id`, `origin`, `suffix`,
+  `feature`) are captured from URL/query/body; request bodies are never
+  stored, so the owner password cannot leak into the trail. RLS is enabled
+  with no policy; `app_runtime`/`anon`/`authenticated` have no grant, pinned
+  by `TestAgencyTablesAreNotRuntimeAccessible`. Test:
+  `TestAdminAuditWritesRow`.
+
+- [x] **S-4 Report-capability log redaction.**
+  `/v1/reports/{token}` and `/v1/reports/jobs/{id}` authenticate by path
+  possession. `middleware.RedactPath` replaces the capability segment in
+  access logs, Sentry breadcrumbs, and panic reports with `[REDACTED]`.
+  Report-job build logs use a short fingerprint instead of the UUID.
+  Tests: `TestRedactPath`, `TestFingerprint`.
+
+---
+
 ## Remaining ops backlog (separate from architecture)
 
 - [x] Centrum `next`/`eslint-config-next` → 16.4.6; Dependabot #16 closed.
@@ -204,9 +255,6 @@ architecture work above.
 
 - **Docker build** is fixed in `.dockerignore` and added to CI, but Docker is
   not installed on this workstation; the CI job is the verification gate.
-- **Login rate limit / lockout, push SSRF allowlist, admin audit trail,
-  report-token log redaction** remain in the security-polish phase; they are
-  additive controls, not broken invariants.
 - `ops/backup.sh` also ran successfully as the real `backup_reader` role
   (local test credential), proving the BYPASSRLS dump path still produces
   rows after removing `--no-owner --no-privileges`.
@@ -232,8 +280,20 @@ architecture work above.
 | P1-6 | `.dockerignore`, `.github/workflows/ci.yml` |
 | P1-7 | `internal/config/{config,database,server}.go`, `cmd/server/main.go`, `.env.staging.example` |
 | P1-8 | `cmd/provision/main.go`, `cmd/migrate/main.go`, `.github/workflows/db-migrate.yml` |
+| S-1 | `internal/authapi/authapi.go`, `internal/config/config.go`, `cmd/server/main.go`, `internal/authapi/authapi_test.go`, `.env.example` |
+| S-2 | `internal/pushsafe/*`, `internal/api/push.go`, `internal/reminder/push_sender.go` |
+| S-3 | `internal/db/migrations/087_admin_audit_log.sql`, `internal/api/admin_audit.go`, `internal/auth/admin.go`, `internal/api/router.go`, `internal/db/contract_test.go` |
+| S-4 | `internal/middleware/{logging,recovery}.go`, `internal/api/report_jobs.go` |
 - P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
   GUC sees only its app, cross-tenant insert rejected) and
   `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with
   `app.client_id`) pass.
 - Final P1-2 full suite: `go test -p 1 ./... -count=1` — `exit=0`.
+- Security polish targeted tests:
+  `go test -p 1 ./internal/pushsafe ./internal/middleware` — pass;
+  `go test ./internal/authapi -run 'TestLogin|TestUserByToken'` — pass
+  (includes `TestLoginLockoutAndRecovery`, `TestLoginRateLimitedPerAccount`);
+  `go test ./internal/api -run 'TestAdminAuditWritesRow|TestValidPushKeys'` — pass;
+  `go test ./internal/reminder -run TestPushSender` — pass;
+  `go test ./internal/db -run TestAgencyTablesAreNotRuntimeAccessible` — pass.
+- Security-polish full suite: `go test -p 1 ./... -count=1` — `exit=0`.
