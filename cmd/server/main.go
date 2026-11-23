@@ -17,25 +17,27 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	agencynotify "github.com/davinakmalyasha/agents-proxy/internal/agency/notify"
 	agencyworker "github.com/davinakmalyasha/agents-proxy/internal/agency/worker"
+	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
 	"github.com/davinakmalyasha/agents-proxy/internal/api"
 	"github.com/davinakmalyasha/agents-proxy/internal/authapi"
 	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/config"
 	"github.com/davinakmalyasha/agents-proxy/internal/db"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	// Phase 3 shared features: each registers itself in init().
 	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
 	// Phase 4/6 sports-vertical custom features.
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
+	"github.com/davinakmalyasha/agents-proxy/internal/projecthooks"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/projectsgen"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
+	"github.com/davinakmalyasha/agents-proxy/internal/requestip"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
-
-	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/bookings"
 )
 
 //go:generate go run ../../cmd/genprojects
@@ -52,20 +54,10 @@ func main() {
 		slog.Error("config load", "err", err)
 		os.Exit(1)
 	}
-	// Boot-success line (postmortem 2026-10-14): the Oct 10 CORS outage
-	// was diagnosed from this file's absence in the logs — the server
-	// died at config load with nothing prior. Effective env + allowlist
-	// (never secrets) prints on every boot so the next misconfiguration
-	// is diagnosable from the first log screen.
 	if err := cfg.ValidateServerSecrets(); err != nil {
 		slog.Error("config load", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("config loaded",
-		"env", cfg.Env,
-		"allowOrigins", cfg.AllowOrigins,
-		"runMigrations", cfg.RunMigrations,
-		"backgroundTickers", cfg.BackgroundTickers)
 
 	// Sentry after config: a single source for DSN/env/release/rate.
 	// config.Load cannot fail on a missing DSN (empty disables), so the
@@ -94,6 +86,10 @@ func main() {
 	inner := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: redact})
 	slog.SetDefault(slog.New(sentry.NewSlogHandler(inner)))
 
+	// Boot-success line (postmortem 2026-10-14): the Oct 10 CORS outage was
+	// diagnosed from this file's absence in the logs. One redacted summary
+	// prints every boot so a misconfiguration is visible from the first
+	// screen; Config.String masks keys and DSN credentials.
 	slog.Info("config loaded", "summary", cfg.String())
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -193,7 +189,7 @@ func main() {
 	// Trust boundary for forwarding headers, from config (not a hidden
 	// os.Getenv): on Vercel this must list the egress ranges or every
 	// client buckets as one IP.
-	api.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
+	requestip.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
 
 	// CORS origin registry (migration 058): exact origins + suffix rules
 	// loaded from the database, merged with the static env list at the
@@ -221,7 +217,19 @@ func main() {
 	// Fatal is still the point for shared mistakes: a config that cannot
 	// even be listed means no tenant can be evaluated, and the deploy
 	// must fail loudly rather than serve an empty world.
-	projects, badTenants, err := agentstools.LoadProjectsCollect(agentstools.AllTools(pool))
+	projectCfgs, badProjects := agentconfig.LoadCollect()
+	for slug, err := range features.ValidateProjectDeclarations(projectCfgs) {
+		badProjects[slug] = err
+		delete(projectCfgs, slug)
+	}
+	// A compiled project feature without a project.json has no schema,
+	// migration ledger, or REST manifest. It must not be mounted from the
+	// registry alone; that was a test-only fallback leaking into production.
+	for _, slug := range features.UnmanifestedProjects(projectCfgs, badProjects) {
+		slog.Error("project features registered without project.json; refusing boot", "project", slug)
+		os.Exit(1)
+	}
+	projects, badTenants, err := agentstools.LoadProjectsSnapshot(projectCfgs, badProjects, agentstools.AllTools(pool))
 	if err != nil {
 		slog.Error("agent project config unloadable", "err", err)
 		os.Exit(1)
@@ -291,7 +299,7 @@ func main() {
 		slog.Info("notify drain disabled; Supabase webhook + pg_cron own delivery")
 	}
 	defer notifyQ.Stop()
-	bookings.NotifyFunc = func(ctx context.Context, tenantID, to, text string) {
+	projecthooks.BookingNotify = func(ctx context.Context, tenantID, to, text string) {
 		// Detached: the booking already committed, so a client disconnect
 		// must not drop the notification. Bounded so a hung DB cannot
 		// hold this goroutine forever.
@@ -350,16 +358,18 @@ func main() {
 	authH.LoginLockout = time.Duration(cfg.LoginLockoutMinutes) * time.Minute
 
 	router := api.NewRouter(api.Deps{
-		Cfg:       cfg,
-		Pool:      pool,
-		Redis:     rdb,
-		Cache:     cli,
-		LLM:       llmCli,
-		ADK:       adkRunner,
-		Auth:      authH,
-		Version:   Version,
-		AdminPool: adminPool,
-		Origins:   origins,
+		Cfg:            cfg,
+		Pool:           pool,
+		Redis:          rdb,
+		Cache:          cli,
+		LLM:            llmCli,
+		ADK:            adkRunner,
+		Auth:           authH,
+		Version:        Version,
+		AdminPool:      adminPool,
+		Origins:        origins,
+		ProjectConfigs: projectCfgs,
+		BadProjects:    badProjects,
 	})
 
 	// Background reclaim for chat-generated .xlsx (not on the

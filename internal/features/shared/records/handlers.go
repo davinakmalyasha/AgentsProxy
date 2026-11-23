@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
 
@@ -100,8 +99,8 @@ func (h *Handler) Routes(vertical string) http.Handler {
 
 func (h *Handler) create(vertical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cm := requireClient(w, r)
-		if cm == nil {
+		caller := requireActor(w, r)
+		if caller == nil {
 			return
 		}
 		var req recordWriteReq
@@ -126,22 +125,22 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 			return
 		}
 		var id string
-		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
+		err := withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
 			return tx.QueryRow(r.Context(),
 				`INSERT INTO tenant_records (tenant_id, vertical, kind, title, slug, payload, status)
 				 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id::text`,
-				cm.TenantID, vertical, kind, req.Title, req.Slug, []byte(req.Payload), status,
+				caller.TenantID, vertical, kind, req.Title, req.Slug, []byte(req.Payload), status,
 			).Scan(&id)
 		})
 		if err != nil {
-			slog.Error("create record", "err", err, "tenant", cm.TenantID, "vertical", vertical)
+			slog.Error("create record", "err", err, "tenant", caller.TenantID, "vertical", vertical)
 			writeJSONError(w, http.StatusInternalServerError, "internal")
 			return
 		}
 		mctx, mcancel := detachedCtx(r.Context())
 		defer mcancel()
-		if err := usage.Record(mctx, h.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
-			slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
+		if err := usage.Record(mctx, h.Pool, nil, caller.ClientID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
+			slog.Warn("usage record failed", "client_id", caller.ClientID, "err", err)
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	}
@@ -149,8 +148,8 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 
 func (h *Handler) list(vertical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cm := requireClient(w, r)
-		if cm == nil {
+		caller := requireActor(w, r)
+		if caller == nil {
 			return
 		}
 		// One parse: url.ParseQuery is not cached, so every
@@ -178,7 +177,7 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 			lastTs time.Time
 			lastID string
 		)
-		err = withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
+		err = withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
 			var sb strings.Builder
 			sb.Grow(256)
 			sb.WriteString(`SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
@@ -218,7 +217,7 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 			// still bounded by the authenticated client.
 			sb.WriteString(" AND tenant_id = $")
 			sb.WriteString(strconv.Itoa(idx))
-			args = append(args, cm.TenantID)
+			args = append(args, caller.TenantID)
 			idx++
 			sb.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $")
 			sb.WriteString(strconv.Itoa(idx))
@@ -284,8 +283,8 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 
 func (h *Handler) getOne(vertical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cm := requireClient(w, r)
-		if cm == nil {
+		caller := requireActor(w, r)
+		if caller == nil {
 			return
 		}
 		id := chi.URLParam(r, "id")
@@ -293,13 +292,13 @@ func (h *Handler) getOne(vertical string) http.HandlerFunc {
 		var rec recordResp
 		var payload []byte
 		var createdAt, updatedAt time.Time
-		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
+		err := withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
 			sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 			        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`
 			if !includeDeleted {
 				sql += " AND status != 'deleted'"
 			}
-			row := tx.QueryRow(r.Context(), sql, id, vertical, cm.TenantID)
+			row := tx.QueryRow(r.Context(), sql, id, vertical, caller.TenantID)
 			return row.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
 		})
 		if err != nil {
@@ -323,8 +322,8 @@ func (h *Handler) getOne(vertical string) http.HandlerFunc {
 
 func (h *Handler) patch(vertical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cm := requireClient(w, r)
-		if cm == nil {
+		caller := requireActor(w, r)
+		if caller == nil {
 			return
 		}
 		id := chi.URLParam(r, "id")
@@ -364,12 +363,12 @@ func (h *Handler) patch(vertical string) http.HandlerFunc {
 			args = append(args, *req.Status)
 			idx++
 		}
-		args = append(args, id, vertical, cm.TenantID)
+		args = append(args, id, vertical, caller.TenantID)
 		sql := fmt.Sprintf("UPDATE tenant_records SET %s WHERE id = $%d::uuid AND vertical = $%d AND tenant_id = $%d",
 			strings.Join(set, ", "), idx, idx+1, idx+2)
 
 		var affected int64
-		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
+		err := withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
 			tag, err := tx.Exec(r.Context(), sql, args...)
 			if err != nil {
 				return err
@@ -392,17 +391,17 @@ func (h *Handler) patch(vertical string) http.HandlerFunc {
 
 func (h *Handler) del(vertical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cm := requireClient(w, r)
-		if cm == nil {
+		caller := requireActor(w, r)
+		if caller == nil {
 			return
 		}
 		id := chi.URLParam(r, "id")
 		var affected int64
-		err := withTenantTx(r.Context(), h.Pool, cm.TenantID, func(tx pgx.Tx) error {
+		err := withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
 			tag, err := tx.Exec(r.Context(),
 				`UPDATE tenant_records SET status = 'deleted', updated_at = now()
 				  WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`,
-				id, vertical, cm.TenantID,
+				id, vertical, caller.TenantID,
 			)
 			if err != nil {
 				return err
@@ -423,15 +422,21 @@ func (h *Handler) del(vertical string) http.HandlerFunc {
 	}
 }
 
-// requireClient reads the cached client from context. It writes a
-// 401 and returns nil if the auth middleware was bypassed (which
-// must not happen, but the check is cheap).
-func requireClient(w http.ResponseWriter, r *http.Request) *cache.ClientModel {
-	cm := clientFromCtx(r.Context())
-	if cm == nil {
-		writeJSONError(w, http.StatusUnauthorized, "client not resolved")
+// requireActor reads the resolved caller from context. It writes a 401 and
+// returns nil if the auth middleware was bypassed. A public landing identity
+// is read-only: GET/HEAD pass, every write is refused before a transaction
+// opens.
+func requireActor(w http.ResponseWriter, r *http.Request) *caller {
+	c := callerFromCtx(r.Context())
+	if c == nil {
+		writeJSONError(w, http.StatusUnauthorized, "identity not resolved")
+		return nil
 	}
-	return cm
+	if c.Public && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeJSONError(w, http.StatusForbidden, "read only")
+		return nil
+	}
+	return c
 }
 
 func uuidFromString(s string) (uuid.UUID, error) {

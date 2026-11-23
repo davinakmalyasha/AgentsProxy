@@ -77,6 +77,7 @@ func BuildVerticalRouter(deps BuilderDeps, vertical string) http.Handler {
 	// /v1/p/<slug>; this gate is what makes that true even when a platform
 	// tenant of the same vertical is live.
 	r.Use(RequirePlatformTenant)
+	r.Use(RequirePlatformVertical(vertical))
 	// Quarantine fence: after identity (401 first, no oracle for
 	// unauthenticated callers), before rate-limit and feature gates (no
 	// quota burn, no 403 masking). Covers /records and every feature.

@@ -4,7 +4,6 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,6 +41,11 @@ type Deps struct {
 	// Projects is the provisioning catalog. Nil uses the embedded project
 	// folders; tests inject a fixture catalog.
 	Projects ProjectCatalog
+	// ProjectConfigs/BadProjects are the one boot-time manifest snapshot.
+	// Nil loads the embedded folders (tests); cmd/server passes the same
+	// maps it validated so the router cannot disagree with the agent loader.
+	ProjectConfigs map[string]*agentconfig.Project
+	BadProjects    map[string]error
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -65,8 +69,8 @@ func NewRouter(d Deps) http.Handler {
 
 	// AdminPool for the admin surface below and the report-jobs
 	// worker (cross-tenant claim). Fallback when the caller doubles
-	// them (see Deps.AdminPool). The agency plane below reuses it:
-	// agency tables grant app_runtime, and admin ops need no tenant GUC.
+	// them (see Deps.AdminPool). The agency plane below reuses it because
+	// agency tables are deliberately not granted to app_runtime (082).
 	adminPool := d.AdminPool
 	if adminPool == nil {
 		adminPool = d.Pool
@@ -153,7 +157,10 @@ func NewRouter(d Deps) http.Handler {
 		// Project-scoped APIs for every project. Each project owns its
 		// handlers and its schema; /v1/p/<slug>/... cannot reach another
 		// project's router or data.
-		projectCfgs, badProjects := agentconfig.LoadCollect()
+		projectCfgs, badProjects := d.ProjectConfigs, d.BadProjects
+		if projectCfgs == nil {
+			projectCfgs, badProjects = agentconfig.LoadCollect()
+		}
 		badProjectSet := make(map[string]bool, len(badProjects))
 		for slug, err := range badProjects {
 			badProjectSet[slug] = true
@@ -170,20 +177,25 @@ func NewRouter(d Deps) http.Handler {
 		for slug, p := range projectCfgs {
 			r.Mount("/p/"+slug, features.BuildProjectRouter(slug, p.Schema, bDeps, p.Vertical))
 		}
-		for _, project := range features.RegisteredProjects() {
-			project := project
-			if _, mounted := projectCfgs[project]; mounted {
-				continue
+		// Registry-only projects are a test/dev fallback. Production passes
+		// ProjectConfigs from the boot snapshot and refuses to boot when a
+		// compiled project has no manifest (cmd/server checks this).
+		if d.ProjectConfigs == nil {
+			for _, project := range features.RegisteredProjects() {
+				project := project
+				if _, mounted := projectCfgs[project]; mounted {
+					continue
+				}
+				if badProjectSet[project] {
+					continue // already fenced with 503 above
+				}
+				vertical := features.ProjectVertical(project)
+				if vertical == "" {
+					slog.Warn("project features registered without a vertical", "project", project)
+					continue
+				}
+				r.Mount("/p/"+project, features.BuildProjectRouter(project, features.ProjectSchema(project), bDeps, vertical))
 			}
-			if badProjectSet[project] {
-				continue // already fenced with 503 above
-			}
-			vertical := features.ProjectVertical(project)
-			if vertical == "" {
-				slog.Warn("project features registered without a vertical", "project", project)
-				continue
-			}
-			r.Mount("/p/"+project, features.BuildProjectRouter(project, features.ProjectSchema(project), bDeps, vertical))
 		}
 
 		// The admin surface WRITES to clients (POST /clients), and
@@ -198,7 +210,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Use((&AdminAudit{Pool: adminPool}).Middleware)
 			projects := d.Projects
 			if projects == nil {
-				projects = newEmbeddedProjectCatalog(adminPool)
+				if d.ProjectConfigs != nil {
+					projects = newSnapshotProjectCatalog(d.ProjectConfigs, d.BadProjects, adminPool)
+				} else {
+					projects = newEmbeddedProjectCatalog(adminPool)
+				}
 			}
 			adm := &Admin{Pool: adminPool, Cache: d.Cache, Projects: projects, Auth: d.Auth}
 			r.Post("/clients", adm.Create)
@@ -212,7 +228,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Delete("/origins", adm.OriginsDelete)
 			r.Post("/origin-suffixes", adm.SuffixCreate)
 			r.Delete("/origin-suffixes", adm.SuffixDelete)
-			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool}
+			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool, RestFenced: badProjects}
 			r.Get("/tenant-health", TenantHealth(thDeps))
 			r.Post("/tenant-health/reload", TenantReload(thDeps))
 		})
@@ -223,11 +239,12 @@ func NewRouter(d Deps) http.Handler {
 	// keep booting unchanged.
 	agencyDeps := agency.Deps{
 		Pool:               adminPool,
+		Redis:              d.Redis,
 		Logger:             nil, // agency falls back to slog.Default (JSON, redacting)
 		Env:                d.Cfg.Env,
 		JWTSecret:          d.Cfg.AgencyJWTSecret,
 		JWTTTL:             d.Cfg.AgencyJWTTTL,
-		SecureCookie:       strings.EqualFold(d.Cfg.Env, "production"),
+		SecureCookie:       d.Cfg.SecureCookies(),
 		FrontendURL:        d.Cfg.AgencyFrontend,
 		AgencyWhatsapp:     d.Cfg.AgencyWhatsapp,
 		GoogleClientID:     d.Cfg.GoogleClientID,

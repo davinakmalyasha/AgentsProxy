@@ -24,10 +24,21 @@ const (
 // Identity is the resolved per-request principal.
 type Identity struct {
 	Client *cache.ClientModel // set when authed via X-Client-Token
-	UserID string             // set when authed via X-Session-Token
-	Email  string
-	Role   string // owner | pegawai | client | public
-	Tenant string
+	// ClientID is the tenant's clients.id, for usage attribution. It is
+	// set for both client-token and staff-session identities. Client is
+	// the full model only when the caller presented a client token; a
+	// staff session must not be turned into one just to reach a handler.
+	ClientID string
+	UserID   string // set when authed via X-Session-Token
+	Email    string
+	Role     string // owner | pegawai | client | public
+	Tenant   string
+	// Vertical and Features are the tenant entitlement at identity
+	// resolution. They exist on the identity so every principal (client
+	// token, staff session, public landing read) passes the same feature
+	// gate without a second DB lookup.
+	Vertical string
+	Features []string
 	// DBSchema is the tenant's business schema at the time the identity was
 	// resolved: "public" for a platform tenant, "project_<slug>" for a
 	// project tenant. The platform and project route gates compare it with
@@ -97,17 +108,11 @@ func From(ctx context.Context) *Identity {
 func WithClient(ctx context.Context, m *cache.ClientModel) context.Context {
 	return With(ctx, &Identity{
 		Client:   m,
+		ClientID: m.ID,
 		Role:     RoleClient,
 		Tenant:   m.TenantID,
+		Vertical: m.Vertical,
+		Features: m.Features,
 		DBSchema: m.DBSchema,
 	})
-}
-
-// ClientFromContext returns the *cache.ClientModel for legacy callers
-// (records feature's clientFromCtx).
-func ClientFromContext(ctx context.Context) *cache.ClientModel {
-	if id := From(ctx); id != nil {
-		return id.Client
-	}
-	return nil
 }

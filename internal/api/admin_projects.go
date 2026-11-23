@@ -14,9 +14,9 @@ import (
 // build. A project schema cannot be provisioned without one.
 var ErrProjectNotFound = errors.New("project folder not found")
 
-// ProjectCatalog is the admin provisioning view of the build-time project
-// tree plus its applied migration ledger. Production uses the embedded
-// folders; tests inject a fixture catalog.
+// ProjectCatalog is the admin provisioning view of a project manifest plus
+// its applied migration ledger. Production uses the boot snapshot; tests
+// inject a fixture catalog.
 type ProjectCatalog interface {
 	// Get returns the project declaration for a tenant slug.
 	Get(slug string) (*agentconfig.Project, error)
@@ -33,6 +33,35 @@ func newEmbeddedProjectCatalog(pool *pgxpool.Pool) ProjectCatalog {
 	return &embeddedProjectCatalog{pool: pool}
 }
 
+// snapshotProjectCatalog is the boot-time manifest snapshot. Production uses
+// this so the admin surface, REST router, agent loader, and boot validation
+// all answer from the same parsed tree. A project that failed to load is
+// returned with its load error, not as "not found": the difference decides
+// whether admin treats the tenant as a platform tenant.
+type snapshotProjectCatalog struct {
+	projects map[string]*agentconfig.Project
+	bad      map[string]error
+	pool     *pgxpool.Pool
+}
+
+func newSnapshotProjectCatalog(projects map[string]*agentconfig.Project, bad map[string]error, pool *pgxpool.Pool) ProjectCatalog {
+	return &snapshotProjectCatalog{projects: projects, bad: bad, pool: pool}
+}
+
+func (c *snapshotProjectCatalog) Get(slug string) (*agentconfig.Project, error) {
+	if p, ok := c.projects[slug]; ok {
+		return p, nil
+	}
+	if err, ok := c.bad[slug]; ok {
+		return nil, err
+	}
+	return nil, ErrProjectNotFound
+}
+
+func (c *snapshotProjectCatalog) Ready(ctx context.Context, p *agentconfig.Project) (bool, error) {
+	return projectReady(ctx, c.pool, p)
+}
+
 func (c *embeddedProjectCatalog) Get(slug string) (*agentconfig.Project, error) {
 	dir, err := agentconfig.DirForSlug(slug)
 	if err != nil {
@@ -46,8 +75,14 @@ func (c *embeddedProjectCatalog) Get(slug string) (*agentconfig.Project, error) 
 }
 
 func (c *embeddedProjectCatalog) Ready(ctx context.Context, p *agentconfig.Project) (bool, error) {
+	return projectReady(ctx, c.pool, p)
+}
+
+// projectReady is the shared schema/ledger check; both the embedded catalog
+// and the boot snapshot must use one definition of provisionable.
+func projectReady(ctx context.Context, pool *pgxpool.Pool, p *agentconfig.Project) (bool, error) {
 	var schemaExists bool
-	if err := c.pool.QueryRow(ctx,
+	if err := pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, p.Schema).
 		Scan(&schemaExists); err != nil {
 		return false, fmt.Errorf("inspect project schema: %w", err)
@@ -59,7 +94,7 @@ func (c *embeddedProjectCatalog) Ready(ctx context.Context, p *agentconfig.Proje
 	// still have rows from the old schema; require the records table the
 	// project router always mounts.
 	var hasRecords bool
-	if err := c.pool.QueryRow(ctx,
+	if err := pool.QueryRow(ctx,
 		`SELECT to_regclass(format('%I.tenant_records', $1::text)) IS NOT NULL`, p.Schema).
 		Scan(&hasRecords); err != nil {
 		return false, fmt.Errorf("inspect project objects: %w", err)
@@ -68,7 +103,7 @@ func (c *embeddedProjectCatalog) Ready(ctx context.Context, p *agentconfig.Proje
 		return false, nil
 	}
 	var applied, otherSchema int
-	if err := c.pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE db_schema = $2),
 		       count(*) FILTER (WHERE db_schema <> $2)
 		  FROM public.project_migrations

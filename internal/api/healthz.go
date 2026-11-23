@@ -24,9 +24,10 @@ type healthzResponse struct {
 	Version string `json:"version"`
 	DB      bool   `json:"db"`
 	Redis   bool   `json:"redis"`
-	// Tenants maps quarantined slug → reason. Absent slugs are healthy
-	// (or unknown). No prompt bodies, no contacts — status only.
-	Tenants map[string]string `json:"tenants,omitempty"`
+	// TenantsFenced is an aggregate only. Public health must not expose
+	// tenant slugs or internal config reasons; the admin tenant-health
+	// endpoint carries the detailed view.
+	TenantsFenced int `json:"tenants_fenced,omitempty"`
 }
 
 func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,12 +51,7 @@ func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
-	for slug, e := range tenanthealth.Snapshot() {
-		if resp.Tenants == nil {
-			resp.Tenants = map[string]string{}
-		}
-		resp.Tenants[slug] = e.Reason
-	}
+	resp.TenantsFenced = len(tenanthealth.Snapshot())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)

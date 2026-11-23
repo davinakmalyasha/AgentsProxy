@@ -141,6 +141,15 @@ func bootstrapAppRuntime(ctx context.Context, admin *pgxpool.Pool) error {
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_records TO app_runtime`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON usage TO app_runtime`,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_runtime`,
+		// The admin audit trail is owner-only (migration 087). The blanket
+		// sequence grant above is test bootstrap convenience, not a tenant
+		// capability; undo it for this sequence so the contract test sees
+		// the production ACL.
+		`DO $$ BEGIN
+			IF to_regclass('public.admin_audit_log_id_seq') IS NOT NULL THEN
+				REVOKE ALL ON SEQUENCE public.admin_audit_log_id_seq FROM app_runtime;
+			END IF;
+		END $$`,
 	}
 	for _, s := range stmts {
 		if _, err := admin.Exec(ctx, s); err != nil {

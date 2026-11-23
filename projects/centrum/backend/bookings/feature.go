@@ -28,6 +28,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
+	"github.com/davinakmalyasha/agents-proxy/internal/projecthooks"
 	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/pricing"
 )
 
@@ -39,15 +40,6 @@ const featureName = "bookings"
 const SchemaVersion = 1
 
 func init() { Register() }
-
-// NotifyFunc is called after a booking is created/updated. The
-// sports feature wires this to the notify queue in main.go; tests
-// can leave it nil. The tenant is passed explicitly because the
-// enqueue happens outside this request's transaction, so there is no
-// ambient tenant context to read. The context is the caller's request
-// context; implementations must detach it (context.WithoutCancel +
-// timeout) so a client disconnect after commit cannot drop the job.
-var NotifyFunc func(ctx context.Context, tenantID, to, text string)
 
 // Register registers the bookings feature. Safe to call from tests
 // after features.ResetForTest().
@@ -519,8 +511,8 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if NotifyFunc != nil && status == "confirmed" {
-		NotifyFunc(r.Context(), idn.TenantID(), req.CustomerPhone, fmt.Sprintf(
+	if projecthooks.BookingNotify != nil && status == "confirmed" {
+		projecthooks.BookingNotify(r.Context(), idn.TenantID(), req.CustomerPhone, fmt.Sprintf(
 			"Booking confirmed: %s at %s, %s %s-%s",
 			req.CustomerName, facility, date.Format("Mon Jan 2"), req.StartTime, req.EndTime))
 	}

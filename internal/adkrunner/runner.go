@@ -78,6 +78,7 @@ type Runner struct {
 	// (tenant, role, WIB date). The date rides the key because the
 	// prompt carries today's date; UpdateProject evicts the tenant.
 	cacheMu  sync.RWMutex
+	cacheGen uint64
 	toolSets map[string]*cachedTools
 	prompts  map[string]string
 }
@@ -96,39 +97,35 @@ func cacheKey(parts ...string) string {
 }
 
 // cachedSet returns the adapted tool set for (tenant, toolsRole),
-// building and caching it on first use. Maps are lazily initialised
-// so test-constructed Runners (which bypass New) work too.
-func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
+// building and caching it on first use. The build (including external MCP
+// discovery) runs without the global cache lock; only the final map write
+// is locked. The generation check prevents an in-flight build from
+// repopulating a key after an admin UpdateProject evicted it.
+func (r *Runner) cachedSet(ctx context.Context, tenantID, toolsRole string) (*cachedTools, error) {
 	key := cacheKey(tenantID, toolsRole)
+	p := r.projectFor(tenantID)
+
 	// An MCP server that failed at first use is retried after a short
 	// backoff. The registry half is static, but the MCP half is not, so
 	// drop the cached set when the manager says a reconnect is due.
-	if r.mcp != nil {
-		if p := r.projectFor(tenantID); p != nil && r.mcp.RefreshDue(tenantID, toolsRole, p.Agent.MCP) {
-			r.cacheMu.Lock()
-			delete(r.toolSets, key)
-			r.cacheMu.Unlock()
-		}
+	if r.mcp != nil && p != nil && r.mcp.RefreshDue(tenantID, toolsRole, p.Agent.MCP) {
+		r.cacheMu.Lock()
+		delete(r.toolSets, key)
+		r.cacheMu.Unlock()
 	}
 	r.cacheMu.RLock()
 	ct, ok := r.toolSets[key]
+	gen := r.cacheGen
 	r.cacheMu.RUnlock()
 	if ok {
 		return ct, nil
 	}
-	r.cacheMu.Lock()
-	defer r.cacheMu.Unlock()
-	if r.toolSets == nil {
-		r.toolSets = map[string]*cachedTools{}
-	}
-	if ct, ok := r.toolSets[key]; ok {
-		return ct, nil
-	}
+
 	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
-	if p := r.projectFor(tenantID); p != nil && len(p.Agent.Tools) > 0 {
+	if p != nil && len(p.Agent.Tools) > 0 {
 		ts = ts.Only(p.Agent.Tools)
 	}
-	ts = r.withMCP(ts, tenantID, toolsRole)
+	ts = r.withMCP(ctx, ts, p, tenantID, toolsRole)
 	names := ts.Names()
 	adapted := make([]tool.Tool, 0, len(names))
 	for _, name := range names {
@@ -151,7 +148,14 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 		adapted = append(adapted, at)
 	}
 	ct = &cachedTools{names: names, adapted: adapted, defs: ts.Definitions()}
-	r.toolSets[key] = ct
+	r.cacheMu.Lock()
+	if r.cacheGen == gen {
+		if r.toolSets == nil {
+			r.toolSets = map[string]*cachedTools{}
+		}
+		r.toolSets[key] = ct
+	}
+	r.cacheMu.Unlock()
 	return ct, nil
 }
 
@@ -159,8 +163,7 @@ func (r *Runner) cachedSet(tenantID, toolsRole string) (*cachedTools, error) {
 // native tool allow-list (agent.tools) is applied before this step, so it
 // keeps meaning "native tools only"; the MCP server's own tools list is the
 // remote allow-list.
-func (r *Runner) withMCP(native *agentstools.ToolSet, tenantID, role string) *agentstools.ToolSet {
-	p := r.projectFor(tenantID)
+func (r *Runner) withMCP(ctx context.Context, native *agentstools.ToolSet, p *agentconfig.Project, tenantID, role string) *agentstools.ToolSet {
 	if r.mcp == nil || p == nil || len(p.Agent.MCP) == 0 {
 		return native
 	}
@@ -183,7 +186,7 @@ func (r *Runner) withMCP(native *agentstools.ToolSet, tenantID, role string) *ag
 	if len(servers) == 0 {
 		return native
 	}
-	for _, remote := range r.mcp.Tools(context.Background(), tenantID, role, servers) {
+	for _, remote := range r.mcp.Tools(ctx, tenantID, role, servers) {
 		if !remote.Allowed(role) {
 			continue
 		}
@@ -292,6 +295,9 @@ func (r *Runner) UpdateProject(p *agentconfig.Project) {
 	}
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
+	// Invalidate in-flight cachedSet builds: they may have started with
+	// the previous project snapshot and must not repopulate the cache.
+	r.cacheGen++
 	prefix := p.Slug + "\x00"
 	for k := range r.prompts {
 		if strings.HasPrefix(k, prefix) {
@@ -470,7 +476,7 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 
-	ts, err := r.cachedSet(tenantID, toolsRole)
+	ts, err := r.cachedSet(ctx, tenantID, toolsRole)
 	if err != nil {
 		return "", err
 	}

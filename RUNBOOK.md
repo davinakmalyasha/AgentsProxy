@@ -575,6 +575,9 @@ Do not restore production data into staging. Staging is synthetic.
 - [x] Outbound Web Push endpoint allowlist (`internal/pushsafe`; enforced on subscribe and send)
 - [x] Admin audit trail (`087_admin_audit_log.sql`; pre-insert, key fingerprint, no request bodies)
 - [x] Report capability tokens redacted from logs, Sentry breadcrumbs, and panic reports
+- [x] One caller-IP trust boundary (`internal/requestip`) for platform and agency rate limits, history, and audit rows
+- [x] Agency public-write limiter is Redis-backed (serverless instances do not share memory)
+- [x] Agency session cookies are `Secure` on staging and Vercel preview
 - [x] `Server{ReadHeaderTimeout: 5s, ReadTimeout: 10s, IdleTimeout: 120s}`
 - [x] `govulncheck` in CI
 
@@ -584,6 +587,9 @@ Do not restore production data into staging. Staging is synthetic.
   automatically after `LOGIN_LOCKOUT_MINUTES`. To release one immediately,
   delete `auth:login:fail:<sha256(tenant + NUL + email)>` and the matching
   `auth:login:rate:*` bucket from Redis. The raw email is never a Redis key.
+- Project verticals are fixed by `project.json`; admin PATCH rejects a
+  vertical change. A platform tenant's vertical may change only if every
+  existing feature remains valid for the new vertical.
 - Admin actions are recorded in `public.admin_audit_log` (owner-only). Inspect
   with:
   `select occurred_at, actor, action, target, status from admin_audit_log order by id desc limit 50;`

@@ -62,20 +62,25 @@ func WithIdentity(deps IdentityDeps) func(http.Handler) http.Handler {
 					writeJSONError(w, http.StatusInternalServerError, "internal")
 					return
 				}
-				schema := u.DBSchema
-				if schema == "" && deps.Pool != nil {
-					// A provider that predates the schema field still gets
-					// the route gate correct. The provider should set this;
-					// this is a single indexed fallback.
+				schema, vertical, features := u.DBSchema, u.Vertical, u.Features
+				clientID := u.ClientID
+				if (schema == "" || vertical == "" || features == nil || clientID == "") && deps.Pool != nil {
+					// An older provider may not set these fields. One indexed
+					// fallback keeps the staff identity on the same live
+					// tenant row as the provider.
 					_ = deps.Pool.QueryRow(r.Context(),
-						`SELECT db_schema FROM clients WHERE tenant_id = $1`,
-						u.TenantID).Scan(&schema)
+						`SELECT id::text, db_schema, vertical, features
+						   FROM public.clients WHERE tenant_id = $1`,
+						u.TenantID).Scan(&clientID, &schema, &vertical, &features)
 				}
 				id := &clientctx.Identity{
 					UserID:   u.ID,
 					Email:    u.Email,
 					Role:     u.Role,
 					Tenant:   u.TenantID,
+					ClientID: clientID,
+					Vertical: vertical,
+					Features: features,
 					DBSchema: schema,
 				}
 				ctx := clientctx.With(r.Context(), id)
@@ -296,5 +301,11 @@ func publicIdentity(w http.ResponseWriter, r *http.Request, deps IdentityDeps) *
 		writeJSONError(w, http.StatusBadRequest, "unknown tenant")
 		return nil
 	}
-	return &clientctx.Identity{Role: "public", Tenant: tenant, DBSchema: info.Schema}
+	return &clientctx.Identity{
+		Role:     "public",
+		Tenant:   tenant,
+		Vertical: info.Vertical,
+		Features: info.Features,
+		DBSchema: info.Schema,
+	}
 }

@@ -20,6 +20,16 @@ type User struct {
 	Role     string `json:"role"`
 	FullName string `json:"full_name"`
 	Phone    string `json:"phone,omitempty"`
+	// Vertical and Features are the live tenant entitlement, resolved by
+	// the project provider from public.clients. The feature gate must not
+	// rely on a stale cached role/profile; a disabled feature takes effect
+	// on the next request.
+	Vertical string   `json:"vertical,omitempty"`
+	Features []string `json:"features,omitempty"`
+	// ClientID is the tenant's clients.id, used to attribute staff
+	// business writes to the same client the tenant's token belongs to.
+	// It is internal and not part of /auth/me.
+	ClientID string `json:"-"`
 	// DBSchema is the tenant's business schema, resolved by the project
 	// provider. Route gates compare it with the mounted surface.
 	DBSchema string `json:"db_schema,omitempty"`

@@ -156,3 +156,66 @@ func TestRequireFeature_PublicRoleIsNotStaffBypass(t *testing.T) {
 		t.Fatalf("public identity status=%d, want 403", rr.Code)
 	}
 }
+
+func TestRequireFeature_StaffStillNeedsEntitlement(t *testing.T) {
+	ResetForTest()
+	Register(Feature{Name: "x", Kind: "x"})
+	h := RequireFeature("x")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+
+	ctx := clientctx.With(context.Background(), &clientctx.Identity{
+		Role: clientctx.RoleOwner, Tenant: "acme", Vertical: "fnb", Features: []string{"records"},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil).WithContext(ctx))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("staff without feature = %d, want 403", rec.Code)
+	}
+
+	ctx = clientctx.With(context.Background(), &clientctx.Identity{
+		Role: clientctx.RoleOwner, Tenant: "acme", Vertical: "fnb", Features: []string{"x"},
+	})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil).WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("staff with feature = %d, want 200", rec.Code)
+	}
+}
+
+func TestRequireProjectFeature_PublicReadStillNeedsEntitlement(t *testing.T) {
+	h := RequireProjectFeature("acme", "x", true)(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
+	)
+	public := &clientctx.Identity{Role: clientctx.RolePublic, Tenant: "acme", Vertical: "fnb"}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil).WithContext(
+		clientctx.With(context.Background(), public)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("public without entitlement = %d, want 403", rec.Code)
+	}
+
+	public.Features = []string{"x"}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil).WithContext(
+		clientctx.With(context.Background(), public)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public with entitlement = %d, want 200", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/x", nil).WithContext(
+		clientctx.With(context.Background(), public)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("public write = %d, want 403", rec.Code)
+	}
+
+	staff := &clientctx.Identity{
+		Role: clientctx.RoleStaff, Tenant: "acme", Vertical: "fnb", Features: []string{"records"},
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil).WithContext(
+		clientctx.With(context.Background(), staff)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("staff without entitlement = %d, want 403", rec.Code)
+	}
+}

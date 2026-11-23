@@ -188,6 +188,12 @@ func (a *Admin) Create(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	normalized, err := features.NormalizeFeatureNames(req.Features)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Features = normalized
 	for _, f := range req.Features {
 		if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(req.TenantID, f) {
 			writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
@@ -460,21 +466,88 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "no fields to update")
 		return
 	}
-	// Read current row for cache eviction + cross-field validation.
+	// Read the current row for cache eviction + cross-field validation.
 	var (
-		hash     string
-		curVert  string
-		tenantID string
+		hash        string
+		curVert     string
+		tenantID    string
+		curFeatures []string
 	)
 	if err := a.Pool.QueryRow(r.Context(),
-		`SELECT token_hash, vertical, tenant_id FROM clients WHERE id = $1::uuid`, id,
-	).Scan(&hash, &curVert, &tenantID); err != nil {
+		`SELECT token_hash, vertical, tenant_id, features FROM clients WHERE id = $1::uuid`, id,
+	).Scan(&hash, &curVert, &tenantID, &curFeatures); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "not found")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "internal")
 		return
+	}
+
+	// A project tenant's vertical is manifest-owned. Patch must not be able
+	// to move it away from project.json: the router, project features and
+	// business tables were built for that vertical. Platform tenants may
+	// change vertical, but their existing feature set must remain valid.
+	var project *agentconfig.Project
+	if a.Projects != nil {
+		p, err := a.Projects.Get(tenantID)
+		switch {
+		case err == nil:
+			if err := agentconfig.Validate(p, agentconfig.DefaultBudget()); err != nil {
+				slog.Error("admin project config", "tenant", tenantID, "err", err)
+				writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+				return
+			}
+			project = p
+		case errors.Is(err, ErrProjectNotFound):
+			// Platform tenant.
+		default:
+			// The catalog only returns a non-not-found error for a project
+			// whose manifest failed boot validation. That is a caller-facing
+			// config problem, not an internal fault.
+			slog.Error("admin project config", "tenant", tenantID, "err", err)
+			writeJSONError(w, http.StatusBadRequest, "project.json is invalid")
+			return
+		}
+	}
+
+	effectiveVert := curVert
+	if req.Vertical != nil {
+		if !features.IsAllowedVertical(*req.Vertical) {
+			writeJSONError(w, http.StatusBadRequest, "unknown vertical: "+*req.Vertical)
+			return
+		}
+		if project != nil && *req.Vertical != project.Vertical {
+			writeJSONError(w, http.StatusBadRequest,
+				"vertical is fixed by project.json for tenant "+tenantID)
+			return
+		}
+		effectiveVert = *req.Vertical
+	}
+	effectiveFeatures := curFeatures
+	if req.Features != nil {
+		normalized, err := features.NormalizeFeatureNames(*req.Features)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.Features = &normalized
+		effectiveFeatures = normalized
+	}
+	// Validate the effective set, not just an explicitly supplied one: a
+	// vertical change on a platform tenant must invalidate a feature that is
+	// no longer allowed. This also keeps project features on a project's
+	// manifest vertical.
+	for _, f := range effectiveFeatures {
+		if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(tenantID, f) {
+			writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
+			return
+		}
+		if !featureAllowedForClient(tenantID, effectiveVert, f) {
+			writeJSONError(w, http.StatusBadRequest,
+				"feature "+f+" not allowed for vertical "+effectiveVert)
+			return
+		}
 	}
 
 	q := `UPDATE clients SET updated_at = now()`
@@ -505,29 +578,12 @@ func (a *Admin) Patch(w http.ResponseWriter, r *http.Request) {
 		idx++
 	}
 	if req.Vertical != nil {
-		if !features.IsAllowedVertical(*req.Vertical) {
-			writeJSONError(w, http.StatusBadRequest, "unknown vertical: "+*req.Vertical)
-			return
-		}
 		q += fmt.Sprintf(", vertical = $%d", idx)
 		args = append(args, *req.Vertical)
 		idx++
 		curVert = *req.Vertical
 	}
 	if req.Features != nil {
-		// Validate names + per-vertical allow-list. A project-owned feature
-		// is valid for its own tenant even though it is not in the global
-		// registry.
-		for _, f := range *req.Features {
-			if !features.IsKnownFeature(f) && !features.IsKnownProjectFeature(tenantID, f) {
-				writeJSONError(w, http.StatusBadRequest, "unknown feature: "+f)
-				return
-			}
-			if !featureAllowedForClient(tenantID, curVert, f) {
-				writeJSONError(w, http.StatusBadRequest, "feature "+f+" not allowed for vertical "+curVert)
-				return
-			}
-		}
 		q += fmt.Sprintf(", features = $%d", idx)
 		args = append(args, *req.Features)
 		idx++
