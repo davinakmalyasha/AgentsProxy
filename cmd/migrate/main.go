@@ -215,6 +215,15 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 				"project %q: clients.vertical is %q but project.json declares %q",
 				tenant, vertical, p.Vertical))
 		}
+		// An empty entitlement is almost always an un-migrated row: every
+		// gated feature is denied, including public landing reads, while the
+		// always-on records surface still works and hides the problem. Require
+		// an explicit list (records alone is valid) so a deploy cannot silently
+		// turn a project's features off.
+		if len(feats) == 0 {
+			issues = append(issues, fmt.Sprintf(
+				"project %q: clients.features is empty; gated features are denied (set at least the project.json defaults)", tenant))
+		}
 		// project.json.features is the default for new tenants, not a
 		// minimum entitlement: a tenant may intentionally run a subset.
 		// What must not drift is the meaning of a name that IS present.
