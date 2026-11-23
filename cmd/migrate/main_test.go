@@ -28,7 +28,9 @@ func TestProjectMetadataIssuesFlagsEmptyEntitlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	// Cleanups run LIFO after the test function returns, so the row delete
+	// must be registered AFTER the pool close to run BEFORE it.
+	t.Cleanup(pool.Close)
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
