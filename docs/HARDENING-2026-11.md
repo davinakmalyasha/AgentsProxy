@@ -297,3 +297,16 @@ architecture work above.
   `go test ./internal/reminder -run TestPushSender` — pass;
   `go test ./internal/db -run TestAgencyTablesAreNotRuntimeAccessible` — pass.
 - Security-polish full suite: `go test -p 1 ./... -count=1` — `exit=0`.
+- Security-polish rollout: PR #80 (`ci` run 45089473953; `gitleaks` run
+  45089473965) is merged. Production `db-migrate` run 45088915444 applied
+  `087_admin_audit_log.sql`; staging applied the same migration through
+  `scripts/migrate-staging.sh`. Both ledgers contain `087`; production and
+  staging have `public.admin_audit_log` present with RLS enabled, zero
+  policies, and no `app_runtime` table or sequence privileges. The live admin
+  key is a Vercel Sensitive value and cannot be read by the CLI, so a manual
+  admin request was not automated; the middleware path is covered by
+  `TestAdminAuditWritesRow` and the production/staging grant checks.
+- Post-deploy checks: production `01e2c9c` and staging `b703acc` report
+  `{"status":"ok","db":true,"redis":true}`; `/v1/sports/facilities` is 404
+  and `/v1/p/centrum/facilities` is 200. `schema-check` run 45090823801,
+  `smoke` run 45090823917, and backup/restore run 45090982743 passed.
