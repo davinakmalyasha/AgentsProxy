@@ -1,4 +1,4 @@
-# R18: nightly logical backup (ops/backup.sh) + restore smoke.
+# R18: two-hourly logical backup (ops/backup.sh) + restore smoke.
 #
 # Independent of the platform's WAL-G daily backups (pitr_enabled=false
 # as of 2026-10-18): this dump is restorable anywhere, and the smoke job
@@ -13,9 +13,10 @@ name: backup
 
 on:
   schedule:
-    # Every 6 hours: the free plan has no PITR, so the logical dump is the
-    # recovery point. 01:00/07:00/13:00/19:00 Asia/Jakarta.
-    - cron: "0 18,0,6,12 * * *"
+    # Every two hours: the free plan has no PITR, so the logical dump is the
+    # recovery point. GitHub's scheduler is best-effort; PITR is the only
+    # guaranteed RPO option.
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 permissions:

@@ -520,14 +520,15 @@ in production.
 
 ## 9a. Backup and recovery
 
-`backup.yml` runs every 6 hours (01:00/07:00/13:00/19:00 Asia/Jakarta),
-dumps through `ops/backup.sh`, and restores the dump into a scratch
-`postgres:17` in the same workflow. Artifacts are retained for 30 days.
+`backup.yml` runs every 2 hours, dumps through `ops/backup.sh`, and
+restores the dump into a scratch `postgres:17` in the same workflow.
+Artifacts are retained for 30 days.
 
-* **RPO:** up to 6 hours. The free Supabase plan has no PITR
-  (`pitr_enabled=false`); the logical dump is the recovery point. Supabase
-  PITR is available as a $100/month add-on (7-day retention) but is not
-  enabled; enabling it is a budget decision.
+* **RPO:** up to 2 hours when the scheduler runs; GitHub's scheduler is
+  best-effort and can be delayed or skipped. The free Supabase plan has no
+  PITR (`pitr_enabled=false`); the logical dump is the recovery point.
+  Supabase PITR is available as a $100/month add-on (7-day retention) but is
+  not enabled; enabling it is a budget decision.
 * **RTO:** pre-create the roles with `scripts/restore-roles.sql`, install
   `btree_gist`, restore the newest artifact, then verify as `app_runtime`
   (the workflow does exactly this and asserts non-zero platform and project
