@@ -89,6 +89,7 @@ jobs:
         # run while it is still inside a usable recovery window.
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           ts=$(gh run list --workflow=backup.yml --branch=main --status=success --limit=1 --json createdAt --jq '.[0].createdAt')
