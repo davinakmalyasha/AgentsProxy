@@ -200,12 +200,17 @@ is recorded in the verification log.
   `npm audit --omit=dev` is clean, `npm run check` is 14 files/159 tests, and
   `npm run build` passes.
 - [~] Backup RPO: the logical dump remains 6-hourly (RPO up to 6h).
-  Restore correctness is fixed and the drill is green. PITR or a reliable
-  2-hour scheduler is a budget/scheduler decision; GitHub's schedule is
-  best-effort, so do not claim a tighter RPO without it.
-- [~] DFD origin: the two hardcoded copies now import
-  `client/api-origin.mjs`; the production pin and preview fail-closed
-  behavior are unchanged. Adding `api.dfdagency.com` is a DNS decision.
+  Restore correctness is fixed and the drill is green. Supabase PITR is
+  available as a paid add-on ($100/mo for 7-day retention) but is not
+  enabled; a reliable 2-hour scheduler remains a budget/scheduler decision.
+  GitHub's schedule is best-effort, so do not claim a tighter RPO without
+  PITR or an external scheduler.
+- [~] DFD origin: the shared `client/api-origin.mjs` change is in place and
+  the production pin/preview fail-closed behavior is unchanged. DNS check:
+  `dfdagency.com` uses Afternic nameservers (parked), `api.dfdagency.com`
+  has no usable A/CNAME/TLS record, and the domain is not in the Vercel
+  account. Adding the custom domain needs domain-owner/DNS action, not a
+  code change.
 - [-] GitHub reviewer: accepted risk for now. The repository is private on
   Free and has one maintainer; the enforced controls are the three required
   checks, strict branch updates, and `enforce_admins`. A required reviewer

@@ -127,8 +127,9 @@ Supabase-side delivery are required rather than optional.
   (auth/storage/vault) are Supabase-managed and covered by the platform's
   daily WAL-G backups; including them breaks portable restores and drags
   platform PII (auth password hashes) into the artifact. Platform PITR is
-  off (`pitr_enabled=false`); the four-times-daily dump is the independent,
-  off-platform copy. RPO is up to 6 hours.
+  off (`pitr_enabled=false`); the six-hourly dump is the independent,
+  off-platform copy. RPO is up to 6 hours. Supabase PITR (7-day retention)
+  is available as a $100/month add-on but is not enabled.
 - Verify: `gh run list --workflow backup.yml --limit 3`, then download
   `db-backup` and restore into a scratch database:
   `psql <scratch> -f scripts/restore-roles.sql`, then

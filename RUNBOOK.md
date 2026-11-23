@@ -525,7 +525,9 @@ dumps through `ops/backup.sh`, and restores the dump into a scratch
 `postgres:17` in the same workflow. Artifacts are retained for 30 days.
 
 * **RPO:** up to 6 hours. The free Supabase plan has no PITR
-  (`pitr_enabled=false`); the logical dump is the recovery point.
+  (`pitr_enabled=false`); the logical dump is the recovery point. Supabase
+  PITR is available as a $100/month add-on (7-day retention) but is not
+  enabled; enabling it is a budget decision.
 * **RTO:** pre-create the roles with `scripts/restore-roles.sql`, install
   `btree_gist`, restore the newest artifact, then verify as `app_runtime`
   (the workflow does exactly this and asserts non-zero platform and project
