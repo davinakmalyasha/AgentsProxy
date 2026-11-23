@@ -4,16 +4,19 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/adkrunner"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
@@ -45,8 +48,8 @@ func TenantHealth(deps TenantHealthDeps) http.HandlerFunc {
 // quarantine reason. This is the fix-forward path that avoids a redeploy.
 func TenantReload(deps TenantHealthDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if deps.ADK == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "agent runner unavailable")
+		if deps.ADK == nil || deps.Pool == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "agent runner or admin pool unavailable")
 			return
 		}
 		var req struct {
@@ -85,6 +88,40 @@ func TenantReload(deps TenantHealthDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+
+		// A valid agent manifest is not enough to release a fence: the live
+		// clients row is the entitlement source the feature gate reads. If it
+		// is empty or inconsistent, keep the tenant fenced instead of
+		// returning to a silent 403 world.
+		var client features.ClientEntitlement
+		err = deps.Pool.QueryRow(r.Context(),
+			`SELECT tenant_id, db_schema, vertical, features, status
+			   FROM public.clients WHERE tenant_id = $1`, slug).
+			Scan(&client.TenantID, &client.DBSchema, &client.Vertical, &client.Features, &client.Status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			fenceTenant(r.Context(), deps.Pool, slug, "reload: tenant is not provisioned in clients")
+			writeJSONError(w, http.StatusUnprocessableEntity, "tenant is not provisioned")
+			return
+		}
+		if err != nil {
+			slog.Error("tenant reload entitlement lookup", "tenant", slug, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "entitlement lookup failed")
+			return
+		}
+		if client.Status != "active" {
+			reason := "reload: tenant status is " + client.Status
+			fenceTenant(r.Context(), deps.Pool, slug, reason)
+			writeJSONError(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
+		if issues := features.ValidateClientEntitlement(client, p); len(issues) > 0 {
+			reason := "reload: entitlement: " + strings.Join(issues, "; ")
+			fenceTenant(r.Context(), deps.Pool, slug, reason)
+			slog.Warn("tenant reload refused: entitlement invalid", "tenant", slug, "issues", issues)
+			writeJSONError(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
+
 		if names := agentstools.NewToolSetFor(nil, slug, "owner").Names(); len(names) == 0 {
 			fenceTenant(r.Context(), deps.Pool, slug, "reload: no tools registered")
 			writeJSONError(w, http.StatusUnprocessableEntity, "no tools registered")

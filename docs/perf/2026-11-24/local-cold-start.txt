@@ -1,0 +1,5 @@
+run 1: 31705 ms
+run 2: 1751 ms
+run 3: 1301 ms
+run 4: 6061 ms
+run 5: 782 ms

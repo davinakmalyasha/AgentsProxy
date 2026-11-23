@@ -87,6 +87,7 @@ make run                                    # :8080; RUN_MIGRATIONS=true is loca
 node --env-file=.env scripts/seed-dev.mjs   # tenant "centrum", vertical "sports"
 curl -s http://localhost:8080/healthz
 make test                                   # TEST_* from .env.test; never DATABASE_URL
+make bench                                  # fresh bench DB + pprof/EXPLAIN evidence
 ```
 
 `ENV=development` refuses any database host other than localhost. Staging is
@@ -96,7 +97,10 @@ other previews carry no production secrets.
 
 DB-backed tests read `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`, and
 `TEST_REDIS_URL` only. `make test` requires all three to be loopback, and the
-test helpers refuse a remote target even on a direct `go test` run.
+test helpers refuse a remote target even on a direct `go test` run. Each run
+creates a fresh `agents_proxy_test_*` database and drops it on exit; Redis DB
+15 is reserved for tests. `scripts/bench.sh` uses a separate
+`agents_proxy_bench_*` database and Redis DB 14.
 
 ## How one backend serves many frontends
 

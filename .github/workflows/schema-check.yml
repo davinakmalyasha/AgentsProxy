@@ -1,10 +1,10 @@
 # schema-check.yml — read-only production drift monitor.
 #
-# The deploy workflow applies DDL; this one proves the result stayed true.
-# It never writes: cmd/migrate check runs in a READ ONLY transaction and
-# exits non-zero on pending, checksum drift, missing files, schema/client
-# mismatch, duplicate project schemas, or a project table without
-# ENABLE+FORCE RLS.
+# The deploy workflow hard-gates on this same check; this scheduled run
+# proves the result stayed true. It never writes: cmd/migrate check runs in a
+# READ ONLY transaction and exits non-zero on pending, checksum drift,
+# missing files, schema/client mismatch, duplicate project schemas, or a
+# project table without ENABLE+FORCE RLS.
 #
 # Uses the same admin DSN as db-migrate because the inspection reads both
 # ledgers. It is read-only by construction, so it does not need the manual

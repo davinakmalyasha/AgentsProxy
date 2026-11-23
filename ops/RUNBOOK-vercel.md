@@ -56,16 +56,25 @@ Set in the dashboard, never in git.
 
 ## Deploy
 
+Production promotion is controlled by `.github/workflows/deploy.yml`, not
+Vercel Git auto-deploy (`vercel.json` sets `git.deploymentEnabled.main =
+false`). A merge to `main` runs CI; a successful CI run triggers the deploy
+workflow, which:
+
+1. runs `cmd/migrate check` against production (read-only hard gate);
+2. builds a production artifact and deploys it with `--prod --skip-domain`
+   so the alias does not move yet;
+3. runs `cmd/smoke` against the staged URL (version, Centrum public reads,
+   unauthenticated records 401, CORS preflight, retired alias 404);
+4. promotes the staged deployment and runs the same smoke on the production
+   alias; a post-promotion failure rolls back.
+
 ```bash
-npx vercel link      # once
-npx vercel env add BACKGROUND_TICKERS production      # "false"
-npx vercel env add RUN_MIGRATIONS production          # "false"
-npx vercel env add RUN_MIGRATIONS preview             # "false"
-npx vercel env add RUN_MIGRATIONS development         # "false"
-npx vercel deploy --prod
+gh workflow run deploy.yml --ref main
 ```
 
-Production DDL is a separate, auditable step:
+The deploy workflow never applies DDL. Production DDL remains a separate,
+auditable step:
 
 ```bash
 gh workflow run db-migrate.yml -f command=apply
@@ -78,6 +87,14 @@ add them. It applies platform migrations and every `projects/<slug>/`
 migration, verifies the ledger is clean, then prints both ledgers. Never run
 `cmd/migrate` from a laptop against production; the local `.env` has no remote
 credentials and `ENV=development` refuses them.
+
+Required deploy configuration: `VERCEL_TOKEN` and
+`PROD_DATABASE_ADMIN_URL` as `production` environment secrets;
+`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF` as variables. If the
+staged deployment URL is protected, add `VERCEL_AUTOMATION_BYPASS_SECRET`.
+
+A dashboard redeploy bypasses the gate. Use it only as break-glass, after
+running `cmd/migrate check` against production.
 
 Fluid Compute defaults to a 300s cap on every plan (Hobby maximum).
 It comfortably covers one agent turn (`adkrunner.TurnTimeout` 80s +

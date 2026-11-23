@@ -17,9 +17,12 @@ import (
 // hides the mistake. migrate check must fail instead.
 func TestProjectMetadataIssuesFlagsEmptyEntitlement(t *testing.T) {
 	testsafety.RequireLocal(t)
-	dsn := os.Getenv("TEST_DATABASE_URL")
+	dsn := os.Getenv("TEST_DATABASE_ADMIN_URL")
 	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping integration test")
+		dsn = os.Getenv("TEST_DATABASE_URL")
+	}
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_ADMIN_URL / TEST_DATABASE_URL not set — skipping integration test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

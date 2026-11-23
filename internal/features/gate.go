@@ -5,30 +5,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/davinakmalyasha/agents-proxy/internal/cache"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/clientctx"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 )
 
 // DONE: PRD 6.5 (feature gate) / STANDARDS D, F
-
-// HasFeatureOnClient reports whether the named feature is in the
-// client's `features` list AND the feature is allowed for the
-// client's vertical.
-func HasFeatureOnClient(name string, m *cache.ClientModel) bool {
-	if m == nil {
-		return false
-	}
-	if !AllowedForVertical(name, m.Vertical) {
-		return false
-	}
-	for _, f := range m.Features {
-		if f == name {
-			return true
-		}
-	}
-	return false
-}
 
 // RequireTenantHealthy returns middleware that fails closed for
 // quarantined tenants: 503 with a distinct body, before any handler

@@ -1,0 +1,146 @@
+[
+  {
+    "name": "health",
+    "requests": 34993,
+    "errors": 0,
+    "rps": 6994.188345759029,
+    "p50_ms": 1.827,
+    "p90_ms": 3.598,
+    "p95_ms": 4.828,
+    "p99_ms": 9.716,
+    "min_ms": 0,
+    "max_ms": 133.18,
+    "status_codes": {
+      "200": 34993
+    },
+    "elapsed_ms": 5003
+  },
+  {
+    "name": "public-facilities",
+    "requests": 7170,
+    "errors": 0,
+    "rps": 1433.6928743124647,
+    "p50_ms": 9.474,
+    "p90_ms": 16.541,
+    "p95_ms": 20.857,
+    "p99_ms": 43.977,
+    "min_ms": 3.5,
+    "max_ms": 170.388,
+    "status_codes": {
+      "200": 7170
+    },
+    "elapsed_ms": 5001
+  },
+  {
+    "name": "public-availability",
+    "requests": 9849,
+    "errors": 0,
+    "rps": 1964.0255292609093,
+    "p50_ms": 6.419,
+    "p90_ms": 13.831,
+    "p95_ms": 18.366,
+    "p99_ms": 30.441,
+    "min_ms": 1.95,
+    "max_ms": 77.885,
+    "status_codes": {
+      "200": 9849
+    },
+    "elapsed_ms": 5014
+  },
+  {
+    "name": "public-pricing",
+    "requests": 8323,
+    "errors": 0,
+    "rps": 1664.2510065639237,
+    "p50_ms": 8.937,
+    "p90_ms": 13.431,
+    "p95_ms": 15.646,
+    "p99_ms": 22.606,
+    "min_ms": 3.392,
+    "max_ms": 62.706,
+    "status_codes": {
+      "200": 8323
+    },
+    "elapsed_ms": 5001
+  },
+  {
+    "name": "records-list",
+    "requests": 4307,
+    "errors": 0,
+    "rps": 861.0860824577792,
+    "p50_ms": 15.446,
+    "p90_ms": 28.094,
+    "p95_ms": 37.203,
+    "p99_ms": 71.216,
+    "min_ms": 5.882,
+    "max_ms": 330.777,
+    "status_codes": {
+      "200": 4307
+    },
+    "elapsed_ms": 5001
+  },
+  {
+    "name": "records-create-delete",
+    "requests": 1592,
+    "errors": 0,
+    "rps": 318.3140679342205,
+    "p50_ms": 37.61,
+    "p90_ms": 77.699,
+    "p95_ms": 137.595,
+    "p99_ms": 161.002,
+    "min_ms": 17.343,
+    "max_ms": 630.632,
+    "status_codes": {
+      "201": 1592
+    },
+    "elapsed_ms": 5001
+  },
+  {
+    "name": "staff-login",
+    "requests": 276,
+    "errors": 0,
+    "rps": 55.176979060796256,
+    "p50_ms": 269.276,
+    "p90_ms": 360.986,
+    "p95_ms": 385.542,
+    "p99_ms": 471.902,
+    "min_ms": 144.273,
+    "max_ms": 521.003,
+    "status_codes": {
+      "200": 276
+    },
+    "elapsed_ms": 5002
+  },
+  {
+    "name": "admin-clients",
+    "requests": 2486,
+    "errors": 0,
+    "rps": 497.1094664239749,
+    "p50_ms": 22.058,
+    "p90_ms": 39.587,
+    "p95_ms": 99.516,
+    "p99_ms": 256.923,
+    "min_ms": 10.51,
+    "max_ms": 283.38,
+    "status_codes": {
+      "200": 2486
+    },
+    "elapsed_ms": 5000
+  },
+  {
+    "name": "admin-tenant-health",
+    "requests": 5661,
+    "errors": 0,
+    "rps": 1131.5367384254046,
+    "p50_ms": 12.75,
+    "p90_ms": 18.104,
+    "p95_ms": 22.697,
+    "p99_ms": 40.901,
+    "min_ms": 5.853,
+    "max_ms": 65.565,
+    "status_codes": {
+      "200": 5661
+    },
+    "elapsed_ms": 5002
+  }
+]

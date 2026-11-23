@@ -9,6 +9,7 @@
 bin/
 *.exe
 /tmp/
+/.tmp/
 
 # Logs
 *.log

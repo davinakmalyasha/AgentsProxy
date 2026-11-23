@@ -31,6 +31,7 @@ import (
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/promo"
 	_ "github.com/davinakmalyasha/agents-proxy/internal/features/shared/review"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
+	_ "github.com/davinakmalyasha/agents-proxy/internal/projectsgen"
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
 	"github.com/davinakmalyasha/agents-proxy/internal/testsafety"
 	_ "github.com/davinakmalyasha/agents-proxy/projects/centrum/agent/tools"
@@ -766,6 +767,24 @@ func TestAdmin_TenantHealthAndReload(t *testing.T) {
 	h := setup(t)
 	srv := httptest.NewServer(h.router)
 	defer srv.Close()
+
+	// Reload now checks the live clients row as well as the agent manifest.
+	// Seed the project tenant the embedded folder describes.
+	ctx := context.Background()
+	cleanup := func() {
+		_, _ = h.pool.Exec(ctx, `DELETE FROM clients WHERE tenant_id='centrum'`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
+		 VALUES ('Centrum Reload','centrum',$1,500000,'active','sports',
+		         ARRAY['records','availability','bookings','courtblocks','customers','expenses','facilities','inventory','kantin','members','payments','pricing','series','users'],
+		         'project_centrum')`,
+		auth.HashToken("tok-centrum-reload")); err != nil {
+		t.Fatal(err)
+	}
+
 	adminH := func(method, path, body string) *http.Response {
 		var req *http.Request
 		if body != "" {
@@ -784,12 +803,36 @@ func TestAdmin_TenantHealthAndReload(t *testing.T) {
 		t.Fatalf("health status=%d body=%s", resp.StatusCode, raw)
 	}
 	// Reload the healthy embedded tenant: exercises LoadSingle + Validate
-	// + tool proof + hot-swap for real.
+	// + entitlement + tool proof + hot-swap for real.
 	resp2 := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"centrum"}`)
 	raw2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Fatalf("reload status=%d body=%s", resp2.StatusCode, raw2)
+	}
+	// A valid manifest must not release a tenant whose live entitlement was
+	// wiped. The reload must stay fenced with the entitlement reason.
+	if _, err := h.pool.Exec(ctx, `UPDATE clients SET features='{}' WHERE tenant_id='centrum'`); err != nil {
+		t.Fatal(err)
+	}
+	respEmpty := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"centrum"}`)
+	rawEmpty, _ := io.ReadAll(respEmpty.Body)
+	respEmpty.Body.Close()
+	if respEmpty.StatusCode != 422 {
+		t.Fatalf("reload empty entitlement status=%d body=%s want 422", respEmpty.StatusCode, rawEmpty)
+	}
+	if !strings.Contains(string(rawEmpty), "clients.features is empty") {
+		t.Fatalf("reload empty entitlement body=%s, want empty-feature reason", rawEmpty)
+	}
+	// Fixing the row makes the same reload path release the fence.
+	if _, err := h.pool.Exec(ctx, `UPDATE clients SET features=ARRAY['records','facilities'] WHERE tenant_id='centrum'`); err != nil {
+		t.Fatal(err)
+	}
+	respFix := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"centrum"}`)
+	rawFix, _ := io.ReadAll(respFix.Body)
+	respFix.Body.Close()
+	if respFix.StatusCode != 200 {
+		t.Fatalf("reload fixed status=%d body=%s want 200", respFix.StatusCode, rawFix)
 	}
 	// Unknown slug → 400, never quarantine-by-typo.
 	resp3 := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"nope"}`)

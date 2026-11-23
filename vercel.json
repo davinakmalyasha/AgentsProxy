@@ -1,6 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "go",
-  "buildCommand": "go build -trimpath -ldflags=\"-s -w -X main.Version=$VERCEL_GIT_COMMIT_SHA\" -o server ./cmd/server",
-  "regions": ["sin1"]
+  "buildCommand": "go build -trimpath -ldflags=\"-s -w -X main.Version=${VERCEL_GIT_COMMIT_SHA:-${GITHUB_SHA:-dev}}\" -o server ./cmd/server",
+  "regions": ["sin1"],
+  "git": {
+    "deploymentEnabled": {
+      "main": false
+    }
+  }
 }

@@ -1,0 +1,77 @@
+facilities list
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=9.51..9.52 rows=2 width=180) (actual time=0.148..0.149 rows=8.00 loops=1)
+   Sort Key: name
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=5
+   ->  Bitmap Heap Scan on sports_facilities  (cost=4.16..9.50 rows=2 width=180) (actual time=0.098..0.101 rows=8.00 loops=1)
+         Recheck Cond: (tenant_id = 'centrum'::text)
+         Heap Blocks: exact=1
+         Buffers: shared hit=2
+         ->  Bitmap Index Scan on sports_facilities_tenant_idx  (cost=0.00..4.16 rows=2 width=0) (actual time=0.048..0.048 rows=8.00 loops=1)
+               Index Cond: (tenant_id = 'centrum'::text)
+               Index Searches: 1
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=173
+ Planning Time: 7.707 ms
+ Execution Time: 0.192 ms
+(16 rows)
+
+pricing list
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=9.51..9.52 rows=2 width=100) (actual time=0.097..0.098 rows=12.00 loops=1)
+   Sort Key: valid_from DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=5
+   ->  Bitmap Heap Scan on sports_pricing_rules  (cost=4.16..9.50 rows=2 width=100) (actual time=0.057..0.062 rows=12.00 loops=1)
+         Recheck Cond: (tenant_id = 'centrum'::text)
+         Heap Blocks: exact=1
+         Buffers: shared hit=2
+         ->  Bitmap Index Scan on sports_pricing_rules_tenant_id_valid_from_key  (cost=0.00..4.16 rows=2 width=0) (actual time=0.015..0.016 rows=12.00 loops=1)
+               Index Cond: (tenant_id = 'centrum'::text)
+               Index Searches: 1
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=80
+ Planning Time: 5.942 ms
+ Execution Time: 0.146 ms
+(16 rows)
+
+records list
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=120.29..120.42 rows=50 width=69) (actual time=1.841..1.849 rows=50.00 loops=1)
+   Buffers: shared hit=57
+   ->  Sort  (cost=120.29..123.92 rows=1450 width=69) (actual time=1.838..1.842 rows=50.00 loops=1)
+         Sort Key: created_at DESC
+         Sort Method: top-N heapsort  Memory: 31kB
+         Buffers: shared hit=57
+         ->  Seq Scan on tenant_records  (cost=0.00..72.12 rows=1450 width=69) (actual time=0.031..1.178 rows=2756.00 loops=1)
+               Filter: (tenant_id = 'centrum'::text)
+               Buffers: shared hit=54
+ Planning:
+   Buffers: shared hit=159
+ Planning Time: 13.597 ms
+ Execution Time: 1.896 ms
+(13 rows)
+
+clients admin list
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=22.10..22.23 rows=50 width=184) (actual time=0.051..0.052 rows=1.00 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=22.10..22.80 rows=280 width=184) (actual time=0.050..0.051 rows=1.00 loops=1)
+         Sort Key: created_at DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1
+         ->  Seq Scan on clients  (cost=0.00..12.80 rows=280 width=184) (actual time=0.038..0.038 rows=1.00 loops=1)
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=90
+ Planning Time: 9.177 ms
+ Execution Time: 0.080 ms
+(12 rows)
+
