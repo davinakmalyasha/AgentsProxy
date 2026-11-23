@@ -50,8 +50,10 @@ func (p *Provider) Authenticate(ctx context.Context, tenantID, email string) (au
 			return err
 		}
 		return tx.QueryRow(ctx,
-			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
-			Scan(&c.User.DBSchema)
+			`SELECT id::text, db_schema, vertical, features
+			   FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&c.User.ClientID, &c.User.DBSchema, &c.User.Vertical,
+				&c.User.Features)
 	})
 	if errors.Is(err, pgx.ErrNoRows) ||
 		errors.Is(err, tenantdb.ErrUnknownTenant) ||
@@ -79,8 +81,9 @@ func (p *Provider) Profile(ctx context.Context, tenantID, userID string) (authap
 			return err
 		}
 		return tx.QueryRow(ctx,
-			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
-			Scan(&u.DBSchema)
+			`SELECT id::text, db_schema, vertical, features
+			   FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&u.ClientID, &u.DBSchema, &u.Vertical, &u.Features)
 	})
 	if errors.Is(err, pgx.ErrNoRows) ||
 		errors.Is(err, tenantdb.ErrUnknownTenant) ||
@@ -115,8 +118,9 @@ func (p *Provider) Register(ctx context.Context, tenantID string, in authapi.Reg
 			return err
 		}
 		return tx.QueryRow(ctx,
-			`SELECT db_schema FROM public.clients WHERE tenant_id = $1`, tenantID).
-			Scan(&u.DBSchema)
+			`SELECT id::text, db_schema, vertical, features
+			   FROM public.clients WHERE tenant_id = $1`, tenantID).
+			Scan(&u.ClientID, &u.DBSchema, &u.Vertical, &u.Features)
 	})
 	if isUniqueViolation(err) {
 		return authapi.User{}, authapi.ErrEmailTaken

@@ -60,6 +60,14 @@ func TestPlatformSurfaceRejectsProjectTenant(t *testing.T) {
 	if code := req("/v1/klinik/records", "tok-delta"); code != http.StatusOK {
 		t.Fatalf("new platform vertical /v1/klinik/records = %d, want 200", code)
 	}
+	// A platform tenant is pinned to its one vertical. Charlie is fnb;
+	// delta is klinik. Neither may use the other's records surface.
+	if code := req("/v1/klinik/records", "tok-charlie"); code != http.StatusNotFound {
+		t.Fatalf("fnb platform token on /v1/klinik/records = %d, want 404", code)
+	}
+	if code := req("/v1/fnb/records", "tok-delta"); code != http.StatusNotFound {
+		t.Fatalf("klinik platform token on /v1/fnb/records = %d, want 404", code)
+	}
 }
 
 // TestProjectRouteRejectsWrongSchema pins the URL-to-schema boundary: a

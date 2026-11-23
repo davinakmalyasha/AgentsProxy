@@ -258,6 +258,17 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// SecureCookies reports whether session cookies must carry the Secure flag.
+// Production and staging are HTTPS by definition; a Vercel preview is HTTPS
+// even when its ENV label is development. Only a process explicitly labelled
+// development and not running on Vercel may use plain HTTP.
+func (c *Config) SecureCookies() bool {
+	if c == nil {
+		return false
+	}
+	return c.Env != "development" || strings.TrimSpace(os.Getenv("VERCEL")) != ""
+}
+
 // normalizeEnv makes ENV forgiving about case and stray whitespace while
 // still rejecting unknown values. "prod" is not production; it is a typo.
 func normalizeEnv(s string) string {

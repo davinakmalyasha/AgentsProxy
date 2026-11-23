@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/redisx"
+	"github.com/davinakmalyasha/agents-proxy/internal/requestip"
 )
 
 // Rate limiting comes in two halves, and the split is the whole point:
@@ -132,14 +132,10 @@ func verifiedClientKey(r *http.Request) string {
 	return "ip:" + remoteIP(r)
 }
 
-// remoteIP reads the socket peer only. Forwarded headers are NOT
-// consulted here: internal/api/clientip.go owns that, including the
-// TRUSTED_PROXY_CIDRS check, and duplicating it here would let a caller
-// choose their own bucket by sending X-Forwarded-For.
+// remoteIP uses the one shared trust boundary. A direct caller cannot
+// choose its bucket with X-Forwarded-For; a configured proxy or Vercel can
+// pass the real client through. Keeping this identical to the memory/audit
+// paths is the point.
 func remoteIP(r *http.Request) string {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
-	return ip
+	return requestip.ClientIP(r)
 }

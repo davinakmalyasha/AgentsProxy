@@ -24,9 +24,10 @@ var ErrTenantLookup = errors.New("tenant lookup failed")
 // TenantInfo is the routing identity of an active tenant. The schema is the
 // value the route gates and tenant transactions must agree on.
 type TenantInfo struct {
-	Active   bool   `json:"active"`
-	Schema   string `json:"schema"`
-	Vertical string `json:"vertical"`
+	Active   bool     `json:"active"`
+	Schema   string   `json:"schema"`
+	Vertical string   `json:"vertical"`
+	Features []string `json:"features"`
 }
 
 // LookupTenantInfo reports an active client's schema and vertical. A missing
@@ -39,8 +40,8 @@ func LookupTenantInfo(ctx context.Context, q Querier, tenantID string) (TenantIn
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	err := q.QueryRow(cctx,
-		`SELECT db_schema, vertical FROM clients WHERE tenant_id=$1 AND status='active'`,
-		tenantID).Scan(&info.Schema, &info.Vertical)
+		`SELECT db_schema, vertical, features FROM clients WHERE tenant_id=$1 AND status='active'`,
+		tenantID).Scan(&info.Schema, &info.Vertical, &info.Features)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return info, nil
 	}
@@ -64,7 +65,7 @@ func CheckTenant(ctx context.Context, q Querier, tenantID string) (bool, error) 
 // (see EvictTenantKnown); the TTL is the backstop, not the mechanism.
 const (
 	knownTenantKeyPrefix = "tknown:"
-	tenantInfoKeyPrefix  = "tinfo:"
+	tenantInfoKeyPrefix  = "tinfo:v2:"
 )
 
 // CheckTenantInfoCached is LookupTenantInfo with a 30s Redis cache. The

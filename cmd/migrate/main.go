@@ -170,20 +170,13 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 		if err := agentconfig.Validate(p, agentconfig.DefaultBudget()); err != nil {
 			issues = append(issues, fmt.Sprintf("project %q: %v", slug, err))
 		}
-		for _, f := range p.Features {
-			if f == "records" {
-				continue
-			}
-			if !features.IsKnownProjectFeature(slug, f) {
-				issues = append(issues, fmt.Sprintf(
-					"project %q: project.json feature %q is not registered in the project registry", slug, f))
-				continue
-			}
-			if !features.ProjectFeatureAllowed(slug, f, p.Vertical) {
-				issues = append(issues, fmt.Sprintf(
-					"project %q: project.json feature %q is not allowed for vertical %q", slug, f, p.Vertical))
-			}
-		}
+	}
+	for slug, err := range features.ValidateProjectDeclarations(projects) {
+		issues = append(issues, fmt.Sprintf("project %q: %v", slug, err))
+	}
+	for _, slug := range features.UnmanifestedProjects(projects, bad) {
+		issues = append(issues, fmt.Sprintf(
+			"project %q has compiled features but no projects/%s/project.json", slug, slug))
 	}
 
 	rows, err := pool.Query(ctx,

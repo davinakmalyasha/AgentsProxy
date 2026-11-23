@@ -22,6 +22,10 @@ import (
 type TenantHealthDeps struct {
 	ADK  *adkrunner.Runner
 	Pool *pgxpool.Pool // admin pool: quarantine rows are fenced here too
+	// RestFenced is the boot-time bad-project set. TenantReload hot-swaps
+	// only the ADK config; a REST router that was fenced at boot remains a
+	// 503 until a deploy rebuilds it, and the response must say so.
+	RestFenced map[string]error
 }
 
 // TenantHealth lists quarantined tenants (slug → reason) plus serving
@@ -88,8 +92,14 @@ func TenantReload(deps TenantHealthDeps) http.HandlerFunc {
 		}
 		deps.ADK.UpdateProject(p)
 		releaseTenant(r.Context(), deps.Pool, slug)
-		slog.Info("tenant reloaded", "tenant", slug)
-		writeJSON(w, http.StatusOK, map[string]any{"tenant": slug, "status": "serving", "cold_prefix": true})
+		rest := "serving"
+		if deps.RestFenced[slug] != nil {
+			rest = "deploy_required"
+		}
+		slog.Info("tenant reloaded", "tenant", slug, "rest", rest)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tenant": slug, "status": "agent_serving", "rest": rest, "cold_prefix": true,
+		})
 	}
 }
 

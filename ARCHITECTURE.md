@@ -7,12 +7,14 @@ One deployed Go binary serves two planes over one chi router:
 * **Client plane** (`/v1/*`) — per-project runtime for client businesses.
   Every **business capability** is a feature (`internal/features/`): core
   `records` (always on), platform features (`menu/booking/review/article/promo`,
-  gated per client), and project features (`projects/<slug>/backend/*`, mounted
+  gated per tenant), and project features (`projects/<slug>/backend/*`, mounted
   at `/v1/p/<slug>/*`, isolation test required). Shared services (`/v1/chat`,
   `/v1/agent`, `/v1/auth`, `/v1/reports`, `/v1/push`) are not features; they
   are tenant-scoped platform services and keep their own auth gates.
-  Gate = in-memory check `name ∈ client.features ∧ AllowedForVertical`; a
-  project gate also pins the tenant to the project named in the URL.
+  Gate = in-memory check `name ∈ tenant.features ∧ AllowedForVertical` on the
+  resolved identity (client token, staff session, or public read), plus a
+  vertical pin; a project gate also pins the tenant to the project named in
+  the URL.
 * **Agency plane** (`/api/v1/*`, `/mcp`) — DFD's own backend: public catalog,
   intake (leads/orders), client portal, back-office admin, machine agent API.
   Single-tenant tables (`users/leads/orders/projects/...`), no RLS needed —
@@ -65,7 +67,9 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   tenant, and the usage insert is bound to `app.client_id` (086). Project
   tenants are reachable only under `/v1/p/<slug>/...`.
   `/v1/{vertical}` is reserved for platform tenants in `public`; a project
-  tenant never creates a vertical alias. Centrum's frontend uses
+  tenant never creates a vertical alias. A platform tenant is also pinned to
+  its own `clients.vertical`: a token for `fnb` cannot call
+  `/v1/klinik/records`. Centrum's frontend uses
   `/v1/p/centrum/...`, and the old `/v1/sports/...` surface was removed after
   its stability window. The data boundary is project-scoped.
   The database enforces the namespace: `clients.db_schema` is `public` (the
@@ -74,13 +78,21 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   `projects/<slug>/project.json` folder and a complete project migration
   ledger; a platform tenant uses `public` and needs no folder. The admin API
   creates rows, not DDL: `migrate apply` creates the schema and tables before
-  the client exists. Admin provisioning turns a unique violation into a 409;
+  the client exists. A project's vertical/schema are manifest-owned; admin
+  `PATCH` cannot move them. Boot loads one manifest snapshot, validates its
+  feature list against the compiled project registry, and passes the same
+  snapshot to the REST router, agent loader, and admin provisioning catalog.
+  Admin provisioning turns a unique violation into a 409;
   `migrate check` also requires the index, reconciles the client's vertical
   and feature entitlement with `project.json`, and reports historical drift.
   `project_migrations` records the schema each version ran in, so a project
   that changes its schema fails loudly instead of silently skipping every
   applied migration. `migrate check` also audits ENABLE+FORCE RLS on every
   table in every project schema.
+  Feature entitlement is tenant-level, not identity-level: client tokens,
+  staff sessions, and public landing reads all check the live
+  `clients.features` and `clients.vertical`. `PublicRead` means "safe without
+  a session", not "enabled without an entitlement".
   Staff sessions are platform auth state in `public.staff_sessions`; staff
   users remain project data in each schema. `internal/authapi` owns the session
   directory, token primitives, and the `/v1/auth` route shell, but knows no
@@ -141,13 +153,18 @@ Google never links a staff account. Web orders require a session and bind
 `orders.user_id`; the legacy `users.lead_id` link still grants portal access.
 
 bcrypt passwords, `subtle.ConstantTimeCompare` on hashes, JWT ≥32 chars,
-cookies `HttpOnly` + `SameSite=Strict` (`Secure` in prod), no token/secret in logs
+cookies `HttpOnly` + `SameSite=Strict` (`Secure` outside explicit local development), no token/secret in logs
 (slog + Sentry redactors share one sensitive-key list).
 
 ## 5. Cache / delivery / ops
 
 Redis is a hot layer, never source of truth: `ck:{hash}` 15m (evicted on
 PATCH), `rl:{id}:{min}` 60s (fail-open when down), `quota:{id}:{month}` 30s.
+Caller IPs come from one trust-boundary-aware resolver (`internal/requestip`)
+used by platform rate limits, public history, agency limits, and audit rows.
+The agency public-write limiter is Redis-backed; a per-process map would not
+survive Vercel's multiple instances. Public `/healthz` exposes only an
+aggregate fence count; tenant-level quarantine detail is admin-only.
 Delivery is claim-based so both deploys work: Go tickers
 (`BACKGROUND_TICKERS=true`, Railway/VPS) or `pg_cron` + Edge Functions
 (`false`, Vercel) — atomic claim means exactly one driver sends each row.

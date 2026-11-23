@@ -18,6 +18,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/docs"
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/response"
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/worker"
+	"github.com/davinakmalyasha/agents-proxy/internal/requestip"
 )
 
 // Handler serves back-office routes.
@@ -775,15 +776,7 @@ func (h *Handler) audit(r *http.Request, action, target string, details map[stri
 	}
 }
 
-func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if i := strings.Index(fwd, ","); i >= 0 {
-			return strings.TrimSpace(fwd[:i])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	return r.RemoteAddr
-}
+func clientIP(r *http.Request) string { return requestip.ClientIP(r) }
 
 func itoa64(n int64) string {
 	return strconv.FormatInt(n, 10)

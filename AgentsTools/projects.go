@@ -48,6 +48,14 @@ func LoadProjects(all []Tool) (map[string]*agentconfig.Project, error) {
 // stays fatal for every tenant.
 func LoadProjectsCollect(all []Tool) (good map[string]*agentconfig.Project, bad map[string]string, err error) {
 	projects, badLoad := agentconfig.LoadCollect()
+	return LoadProjectsSnapshot(projects, badLoad, all)
+}
+
+// LoadProjectsSnapshot is the same validation against an already-loaded
+// manifest snapshot. Boot parses once, then passes the same map to the REST
+// router, the ADK runner, and this tool check; a second independent parse
+// could disagree with what the process actually mounted.
+func LoadProjectsSnapshot(projects map[string]*agentconfig.Project, badLoad map[string]error, all []Tool) (good map[string]*agentconfig.Project, bad map[string]string, err error) {
 	bad = map[string]string{}
 	for dir, lerr := range badLoad {
 		bad[dir] = fmt.Errorf("load agent projects: %w", lerr).Error()
@@ -55,7 +63,10 @@ func LoadProjectsCollect(all []Tool) (good map[string]*agentconfig.Project, bad 
 	if len(projects) == 0 {
 		return nil, bad, fmt.Errorf("load agent projects: no projects")
 	}
-	good = projects
+	good = make(map[string]*agentconfig.Project, len(projects))
+	for slug, p := range projects {
+		good[slug] = p
+	}
 
 	// Group by registering tenant. Empty-Tenant tools (hand-built sets in
 	// tests) belong to every tenant.

@@ -143,6 +143,42 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
 
 ---
 
+## Architecture closure — post-release hardening
+
+- [x] **A-1 Platform vertical pin.** `RequirePlatformVertical` now requires
+  the resolved tenant's `vertical` to equal the mounted `/v1/{vertical}`
+  surface, so a platform tenant with one vertical cannot use another
+  vertical's records routes.
+- [x] **A-2 Uniform feature entitlement.** Public landing reads and staff
+  sessions are checked against the tenant's live `clients.features`; the
+  `PublicRead` marker now only removes authentication, never entitlement.
+- [x] **A-3 Project manifest immutability.** Admin `PATCH /clients/{id}`
+  rejects a project vertical change; a vertical change on a platform tenant
+  revalidates the effective feature set.
+- [x] **A-4 One IP trust boundary.** Platform rate limits, public history,
+  agency limits, and audit rows use `internal/requestip`; the agency limiter
+  moved from per-process memory to Redis and no longer trusts a raw
+  `X-Forwarded-For`.
+- [x] **A-5 Secure agency cookies.** Staging and Vercel preview set the
+  `Secure` flag; only an explicitly local development process may omit it.
+- [x] **A-6 One project catalog.** Boot loads one manifest snapshot, validates
+  project features against the compiled registry, and passes the same map to
+  the REST router, the agent loader, and the admin provisioning catalog.
+  Production no longer mounts a project from the compiled registry without a
+  folder; boot and `migrate check` reject a compiled project whose
+  `project.json` is missing.
+- [x] **A-7 Project hooks without platform coupling.** Booking notifications
+  go through `internal/projecthooks`; `cmd/server` no longer imports a
+  Centrum package.
+- [x] **A-8 ADK cache lock safety.** Tool-set builds no longer hold the global
+  cache lock across MCP network calls, use the caller's context, and use a
+  generation counter so an in-flight build cannot repopulate after
+  `UpdateProject`.
+- [x] **A-9 Public health detail.** `/healthz` reports only an aggregate
+  fence count; tenant slugs and internal reasons stay on the admin endpoint.
+
+---
+
 ## Security polish — post-hardening controls
 
 These are additive controls on top of the P0/P1/P2 invariants. They are
@@ -252,6 +288,11 @@ architecture work above.
 - Production ADK smoke after `085`: `POST /v1/agent/client-chat` returned a
   reply (the session service set `app.tenant_id` and the scoped policies
   allowed the write/read).
+- Architecture-closure local suite: `go test -p 1 ./... -count=1` — pass;
+  `go vet ./...` clean. Targeted API tests cover the platform vertical pin,
+  project-vertical immutability, platform feature revalidation, canonical
+  feature writes, public feature entitlement, and the aggregate-only
+  `/healthz` body.
 - Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
   `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
   DFD frontends healthy.
@@ -292,6 +333,15 @@ architecture work above.
 | S-2 | `internal/pushsafe/*`, `internal/api/push.go`, `internal/reminder/push_sender.go` |
 | S-3 | `internal/db/migrations/087_admin_audit_log.sql`, `internal/api/admin_audit.go`, `internal/auth/admin.go`, `internal/api/router.go`, `internal/db/contract_test.go` |
 | S-4 | `internal/middleware/{logging,recovery}.go`, `internal/api/report_jobs.go` |
+| A-1 | `internal/features/{builder,gate}.go`, `internal/api/platform_routes_isolation_test.go` |
+| A-2 | `internal/features/{gate.go,clientctx/clientctx.go}`, `internal/features/shared/records/{identity,tenant,client_ctx}.go`, `internal/authapi/provider.go`, `projects/centrum/backend/auth/provider.go` |
+| A-3 | `internal/api/admin.go`, `internal/api/admin_patch_test.go` |
+| A-4 | `internal/requestip/*`, `internal/middleware/ratelimit.go`, `internal/agency/ratelimit/*`, `internal/agency/admin/handler.go` |
+| A-5 | `internal/config/{config,secure_cookies_test}.go`, `internal/api/router.go` |
+| A-6 | `cmd/server/main.go`, `internal/api/{router,admin_projects}.go`, `internal/features/validate.go`, `AgentsTools/projects.go`, `internal/db/project_migrations.go`, `cmd/migrate/main.go` |
+| A-7 | `internal/projecthooks/*`, `projects/centrum/backend/bookings/feature.go`, `projects/centrum/agent/tools/book_slot.go`, `cmd/server/main.go` |
+| A-8 | `internal/adkrunner/runner.go` |
+| A-9 | `internal/api/healthz.go`, `internal/api/api_test.go` |
 - P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
   GUC sees only its app, cross-tenant insert rejected) and
   `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with

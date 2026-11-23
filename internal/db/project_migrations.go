@@ -161,10 +161,7 @@ func readProjectDoc(fsys fs.FS, dir string) (projectMigrationDoc, error) {
 	var doc projectMigrationDoc
 	raw, err := fs.ReadFile(fsys, path.Join("projects", dir, "project.json"))
 	if err != nil {
-		if strings.Contains(err.Error(), "file does not exist") {
-			return doc, nil
-		}
-		return doc, fmt.Errorf("project %q: read project.json: %w", dir, err)
+		return doc, fmt.Errorf("project %q: project.json is required: %w", dir, err)
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return doc, fmt.Errorf("project %q: project.json is not valid JSON: %w", dir, err)

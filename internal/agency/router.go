@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/admin"
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/agent"
@@ -33,11 +34,12 @@ import (
 // adapter replaces it, mirroring the DFD design).
 type Notifier = notify.Service
 
-// Deps wires the agency plane. Pool is the app pool (agency tables grant
-// app_runtime); AdminKey is unused here (agency uses JWT/bearer, never the
-// proxy admin key).
+// Deps wires the agency plane. Pool is the admin pool: agency tables are
+// deliberately not granted to app_runtime (migration 082), and agency
+// authorization is JWT/bearer, never the proxy admin key.
 type Deps struct {
 	Pool         *pgxpool.Pool
+	Redis        *redis.Client
 	Logger       *slog.Logger
 	Env          string
 	JWTSecret    string
@@ -82,12 +84,12 @@ func NewRouter(d Deps) chi.Router {
 
 	// Intake: public lead capture, authenticated web orders.
 	intakeH := intake.NewHandler(intake.NewStore(d.Pool), d.Pool, logger)
-	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(3, time.Hour), cookieAuth)
+	intakeH.RegisterRoutes(r, ratelimit.NewRateLimiter(d.Redis, 3, time.Hour, "intake"), cookieAuth)
 
 	// Human auth.
 	authH := authmod.NewHandler(authmod.NewStore(d.Pool), d.Pool, logger, d.JWTSecret, d.JWTTTL, d.SecureCookie, d.Env, d.GoogleClientID, notifier, d.SignupEnabled)
 	r.Route("/auth", func(r chi.Router) {
-		authH.RegisterRoutes(r, ratelimit.NewRateLimiter(5, 15*time.Minute))
+		authH.RegisterRoutes(r, ratelimit.NewRateLimiter(d.Redis, 5, 15*time.Minute, "auth"))
 	})
 	superGuard := func(next http.Handler) http.Handler {
 		return cookieAuth(agencyauth.RequireRole("SUPERADMIN")(next))

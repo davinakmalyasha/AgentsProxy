@@ -12,6 +12,7 @@ import (
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
+	"github.com/davinakmalyasha/agents-proxy/internal/projecthooks"
 	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/bookings"
 	"github.com/davinakmalyasha/agents-proxy/projects/centrum/backend/pricing"
 	"github.com/jackc/pgx/v5"
@@ -214,7 +215,7 @@ func bookSlotTool(pool *pgxpool.Pool) agentstools.Tool {
 				}
 				return "error: " + err.Error()
 			}
-			if notify := bookings.NotifyFunc; notify != nil {
+			if notify := projecthooks.BookingNotify; notify != nil {
 				notify(ctx, tenantID, p.CustomerPhone, fmt.Sprintf(
 					"Booking confirmed: %s at %s, %s %s-%s",
 					p.CustomerName, facName, p.Date, p.StartTime, p.EndTime))

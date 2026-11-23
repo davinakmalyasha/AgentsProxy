@@ -248,6 +248,11 @@ func TestHealthz(t *testing.T) {
 	if m["db"] != true || m["redis"] != true {
 		t.Errorf("db=%v redis=%v", m["db"], m["redis"])
 	}
+	// Public health may report an aggregate fence count, never tenant slugs
+	// or internal config reasons; those belong to the admin endpoint.
+	if _, exposed := m["tenants"]; exposed {
+		t.Error("/healthz leaked tenant quarantine details")
+	}
 }
 
 func TestChat_MissingToken(t *testing.T) {

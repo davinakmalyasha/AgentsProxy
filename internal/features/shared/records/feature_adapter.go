@@ -69,8 +69,8 @@ type featurePatchReq struct {
 }
 
 func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
-	cm := requireClient(w, r)
-	if cm == nil {
+	caller := requireActor(w, r)
+	if caller == nil {
 		return
 	}
 	vertical := a.Vertical
@@ -89,11 +89,11 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var id string
-	err := withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
+	err := withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(),
 			`INSERT INTO tenant_records (tenant_id, vertical, kind, title, slug, payload, status)
 			 VALUES ($1, $2, $3, $4, $5, $6, 'active') RETURNING id::text`,
-			cm.TenantID, vertical, a.Spec.Kind, req.Title, req.Slug, []byte(req.Payload),
+			caller.TenantID, vertical, a.Spec.Kind, req.Title, req.Slug, []byte(req.Payload),
 		).Scan(&id)
 	})
 	if err != nil {
@@ -109,15 +109,15 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 	// to fail the CHECK on every call and silently drop the metering row.
 	// If per-feature metering is ever wanted, add a dedicated column —
 	// do not overload kind.
-	if err := usage.Record(mctx, a.Pool, nil, cm.ID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
-		slog.Warn("usage record failed", "client_id", cm.ID, "err", err)
+	if err := usage.Record(mctx, a.Pool, nil, caller.ClientID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
+		slog.Warn("usage record failed", "client_id", caller.ClientID, "err", err)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
 func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
-	cm := requireClient(w, r)
-	if cm == nil {
+	caller := requireActor(w, r)
+	if caller == nil {
 		return
 	}
 	vertical := a.Vertical
@@ -144,7 +144,7 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 	var items = make([]recordResp, 0, limit+1)
 	var lastTs time.Time
 	var lastID string
-	err = withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
+	err = withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 		        FROM tenant_records WHERE vertical = $1 AND kind = $2 AND status = $3`
 		args := []any{vertical, kind, status}
@@ -155,7 +155,7 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 			idx = 6
 		}
 		sql += " AND tenant_id = $" + strconv.Itoa(idx)
-		args = append(args, cm.TenantID)
+		args = append(args, caller.TenantID)
 		idx++
 		sql += " ORDER BY created_at DESC, id DESC LIMIT $" + strconv.Itoa(idx)
 		args = append(args, limit+1)
@@ -202,8 +202,8 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *FeatureAdapter) getOne(w http.ResponseWriter, r *http.Request) {
-	cm := requireClient(w, r)
-	if cm == nil {
+	caller := requireActor(w, r)
+	if caller == nil {
 		return
 	}
 	vertical := a.Vertical
@@ -216,13 +216,13 @@ func (a *FeatureAdapter) getOne(w http.ResponseWriter, r *http.Request) {
 	var rec recordResp
 	var payload []byte
 	var createdAt, updatedAt time.Time
-	err := withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
+	err := withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
 		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 		        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND kind = $3 AND tenant_id = $4`
 		if !includeDeleted {
 			sql += " AND status != 'deleted'"
 		}
-		row := tx.QueryRow(r.Context(), sql, id, vertical, kind, cm.TenantID)
+		row := tx.QueryRow(r.Context(), sql, id, vertical, kind, caller.TenantID)
 		return row.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
 	})
 	if err != nil {
@@ -244,8 +244,8 @@ func (a *FeatureAdapter) getOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *FeatureAdapter) patch(w http.ResponseWriter, r *http.Request) {
-	cm := requireClient(w, r)
-	if cm == nil {
+	caller := requireActor(w, r)
+	if caller == nil {
 		return
 	}
 	vertical := a.Vertical
@@ -287,12 +287,12 @@ func (a *FeatureAdapter) patch(w http.ResponseWriter, r *http.Request) {
 		args = append(args, []byte(req.Payload))
 		idx++
 	}
-	args = append(args, id, vertical, kind, cm.TenantID)
+	args = append(args, id, vertical, kind, caller.TenantID)
 	sql := "UPDATE tenant_records SET " + strings.Join(sets, ", ") +
 		" WHERE id = $" + strconv.Itoa(idx) + "::uuid AND vertical = $" + strconv.Itoa(idx+1) +
 		" AND kind = $" + strconv.Itoa(idx+2) + " AND tenant_id = $" + strconv.Itoa(idx+3)
 	var affected int64
-	err := withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
+	err := withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(r.Context(), sql, args...)
 		if err != nil {
 			return err
@@ -313,8 +313,8 @@ func (a *FeatureAdapter) patch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *FeatureAdapter) del(w http.ResponseWriter, r *http.Request) {
-	cm := requireClient(w, r)
-	if cm == nil {
+	caller := requireActor(w, r)
+	if caller == nil {
 		return
 	}
 	vertical := a.Vertical
@@ -324,11 +324,11 @@ func (a *FeatureAdapter) del(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	var affected int64
-	err := withTenantTx(r.Context(), a.Pool, cm.TenantID, func(tx pgx.Tx) error {
+	err := withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(r.Context(),
 			`UPDATE tenant_records SET status = 'deleted', updated_at = now()
 			   WHERE id = $1::uuid AND vertical = $2 AND kind = $3 AND tenant_id = $4`,
-			id, vertical, kind, cm.TenantID,
+			id, vertical, kind, caller.TenantID,
 		)
 		if err != nil {
 			return err

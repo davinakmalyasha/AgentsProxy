@@ -58,28 +58,15 @@ func RequireTenantHealthy(next http.Handler) http.Handler {
 	})
 }
 
-// RequireFeature returns middleware that rejects requests whose
-// client (in ctx) does not have the named feature enabled. 403 with
-// a stable JSON error. Staff identities (session token) bypass the
-// feature gate — they're already inside the tenant.
+// RequireFeature returns middleware that rejects requests whose principal
+// does not have the named feature enabled. Entitlement is tenant-level, so
+// staff and public identities are checked too; being inside a tenant does
+// not grant a feature the tenant was not provisioned for.
 func RequireFeature(name string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := clientctx.From(r.Context())
-			if id == nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
-				return
-			}
-			// Staff users (owner/pegawai) are inside the tenant already.
-			// A public identity is not a staff identity: it must still pass
-			// the entitlement check below.
-			if id.Role == clientctx.RoleOwner || id.Role == clientctx.RoleStaff {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if !HasFeatureOnClient(name, id.Client) {
+			if id == nil || !identityHasGlobalFeature(id, name) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
@@ -88,6 +75,47 @@ func RequireFeature(name string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequirePlatformVertical pins the platform surface to the tenant's one
+// provisioned vertical. Without this, a platform tenant of vertical A could
+// call /v1/B/records and write rows under B using its valid token.
+func RequirePlatformVertical(vertical string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := clientctx.From(r.Context())
+			if id == nil || id.DBSchema != "public" || !strings.EqualFold(id.Vertical, vertical) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"not found"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// identityHasGlobalFeature is the platform feature check. It uses the same
+// live entitlement carried on every identity: client token, staff session,
+// or public landing read.
+func identityHasGlobalFeature(id *clientctx.Identity, name string) bool {
+	if id == nil {
+		return false
+	}
+	features, vertical := id.Features, id.Vertical
+	if id.Client != nil {
+		features, vertical = id.Client.Features, id.Client.Vertical
+	}
+	return AllowedForVertical(name, vertical) && containsFeature(features, name)
+}
+
+func containsFeature(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }
 
 // RequirePlatformTenant rejects a request whose resolved tenant is not a
@@ -148,39 +176,37 @@ func RequireProject(project, schema string) func(http.Handler) http.Handler {
 // The feature lives in the project registry, not the global one, so the
 // global AllowedForVertical check does not apply. The project router already
 // pinned the tenant and vertical before this gate runs.
+//
+// PublicRead means "safe for an unauthenticated landing read"; it does not
+// mean "enabled without entitlement". A public GET still requires the
+// feature in the tenant's live features list.
 func RequireProjectFeature(project, name string, publicRead bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := clientctx.From(r.Context())
 			if id == nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
+				writeFeatureDenied(w)
 				return
 			}
-			if id.Role == clientctx.RoleOwner || id.Role == clientctx.RoleStaff {
-				next.ServeHTTP(w, r)
+			if id.Role == clientctx.RolePublic && (!publicRead || r.Method != http.MethodGet) {
+				writeFeatureDenied(w)
 				return
 			}
-			if id.Role == clientctx.RolePublic && publicRead && r.Method == http.MethodGet {
-				next.ServeHTTP(w, r)
+			features := id.Features
+			if id.Client != nil {
+				features = id.Client.Features
+			}
+			if !containsFeature(features, name) {
+				writeFeatureDenied(w)
 				return
 			}
-			if id.Client == nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
-				return
-			}
-			for _, f := range id.Client.Features {
-				if f == name {
-					next.ServeHTTP(w, r)
-					return
-				}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
+			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func writeFeatureDenied(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"feature not enabled for this client"}`))
 }
