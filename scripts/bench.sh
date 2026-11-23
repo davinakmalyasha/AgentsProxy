@@ -56,7 +56,8 @@ trap cleanup EXIT INT TERM
 
 if [ -n "${BENCH_BASE_URL:-}" ]; then
     SCENARIOS="${BENCH_SCENARIOS:-health,public-facilities,public-availability,public-pricing}"
-    echo "remote benchmark: $BENCH_BASE_URL scenarios=$SCENARIOS"
+    REMOTE_CONC="${BENCH_CONCURRENCY:-1}"
+    echo "remote benchmark: $BENCH_BASE_URL scenarios=$SCENARIOS concurrency=$REMOTE_CONC"
     set +e
     go run ./cmd/bench \
         -base-url "$BENCH_BASE_URL" \
@@ -64,7 +65,7 @@ if [ -n "${BENCH_BASE_URL:-}" ]; then
         -client-token "${BENCH_CLIENT_TOKEN:-}" \
         -staff-token "${BENCH_STAFF_TOKEN:-}" \
         -admin-key "${BENCH_ADMIN_KEY:-}" \
-        -concurrency "$CONC" -warmup "$WARMUP" -duration "$DURATION" \
+        -concurrency "$REMOTE_CONC" -warmup "$WARMUP" -duration "$DURATION" \
         -rps "${BENCH_RPS:-0.5}" \
         -scenarios "$SCENARIOS" \
         -json "$OUT/results.json" -markdown "$OUT/results.md"

@@ -320,10 +320,10 @@ architecture work above.
   feature writes, public feature entitlement, and the aggregate-only
   `/healthz` body.
 - Exit-gate local verification (2026-11-24):
-  - `bash scripts/test-local.sh -count=1` created a fresh
-    `agents_proxy_test_*` database, applied the embedded chain, ran the full
-    suite, and exited 0; the database was dropped and no
-    `agents_proxy_test_*` remained.
+  - `bash scripts/test-local.sh -count=1` was run twice consecutively. Both
+    runs created a fresh `agents_proxy_test_*` database, applied the embedded
+    chain, ran the full suite, exited 0, dropped the database, and left no
+    `agents_proxy_test_*` database or lock behind.
   - `go test -p 1 ./internal/features ./internal/api ./cmd/migrate ./cmd/smoke ./cmd/testdb ./cmd/bench ./cmd/server`
     — pass. New coverage includes `TestValidateClientEntitlement`,
     `TestAuditProjectEntitlementsFencesEmptyProject`,
