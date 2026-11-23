@@ -89,6 +89,17 @@ Rules: identity middleware before rate-limit (limiter buckets on identity);
   `tenantdb.WithActiveTx`, so RLS and the project schema apply exactly as they
   do for every other feature. Adding staff auth to a project is a provider
   package, not a platform function edit.
+  Login is throttled per tenant/email in Redis (default 10 attempts/min, then
+  5 failed password checks lock the account for 15 minutes); the key is a
+  SHA-256 of tenant+email, unknown users still pay a bcrypt comparison, and a
+  Redis outage fails open so an operator is not locked out by the cache.
+  The `/v1/admin` surface writes an append-only `public.admin_audit_log` row
+  before each handler runs; the actor is an `ADMIN_API_KEY` fingerprint and
+  request bodies are never stored. Report capabilities
+  (`/v1/reports/{token}`, `/v1/reports/jobs/{id}`) are redacted from
+  application logs, Sentry breadcrumbs, and panic reports. Outbound Web Push
+  endpoints are restricted to the browser push services in
+  `internal/pushsafe`, both on subscribe and immediately before each send.
   Production runs PostgreSQL 17 (the CI and compose images match).
 * Agency: `users/leads/packages/orders/payments/projects/hosting/articles/
   contracts/order_milestones/client_requests/audit_logs/api_keys/

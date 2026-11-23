@@ -95,6 +95,7 @@ func TestAgencyTablesAreNotRuntimeAccessible(t *testing.T) {
 	}
 
 	var usersSelect, usersInsert, keysSelect, otpSelect, signupSelect, clientsSelect, recordsInsert bool
+	var auditSelect, auditInsert, auditSequence bool
 	if err := pool.QueryRow(ctx, `
 		SELECT has_table_privilege('app_runtime','public.users','SELECT'),
 		       has_table_privilege('app_runtime','public.users','INSERT'),
@@ -102,13 +103,21 @@ func TestAgencyTablesAreNotRuntimeAccessible(t *testing.T) {
 		       has_table_privilege('app_runtime','public.login_otps','SELECT'),
 		       has_table_privilege('app_runtime','public.signup_requests','SELECT'),
 		       has_table_privilege('app_runtime','public.clients','SELECT'),
-		       has_table_privilege('app_runtime','public.tenant_records','INSERT')
-	`).Scan(&usersSelect, &usersInsert, &keysSelect, &otpSelect, &signupSelect, &clientsSelect, &recordsInsert); err != nil {
+		       has_table_privilege('app_runtime','public.tenant_records','INSERT'),
+		       has_table_privilege('app_runtime','public.admin_audit_log','SELECT'),
+		       has_table_privilege('app_runtime','public.admin_audit_log','INSERT'),
+		       has_sequence_privilege('app_runtime','public.admin_audit_log_id_seq','USAGE')
+	`).Scan(&usersSelect, &usersInsert, &keysSelect, &otpSelect, &signupSelect,
+		&clientsSelect, &recordsInsert, &auditSelect, &auditInsert, &auditSequence); err != nil {
 		t.Fatal(err)
 	}
 	if usersSelect || usersInsert || keysSelect || otpSelect || signupSelect {
 		t.Fatalf("app_runtime reaches agency tables: usersSelect=%v usersInsert=%v keys=%v otp=%v signup=%v",
 			usersSelect, usersInsert, keysSelect, otpSelect, signupSelect)
+	}
+	if auditSelect || auditInsert || auditSequence {
+		t.Fatalf("app_runtime reaches the admin audit trail: select=%v insert=%v sequence=%v",
+			auditSelect, auditInsert, auditSequence)
 	}
 	if !clientsSelect || !recordsInsert {
 		t.Fatalf("app_runtime lost its tenant grants: clients=%v recordsInsert=%v", clientsSelect, recordsInsert)

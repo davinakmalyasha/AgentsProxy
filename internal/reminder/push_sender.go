@@ -11,6 +11,8 @@ import (
 
 	"github.com/SherClockHolmes/webpush-go"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/pushsafe"
 )
 
 // PushSender delivers reminders via Web Push (VAPID) to the PWA
@@ -37,6 +39,9 @@ type PushSender struct {
 	Subject string
 	// HTTP is swappable in tests (httptest server as push service).
 	HTTP *http.Client
+	// allowEndpoint overrides the outbound URL policy in tests. Nil means
+	// pushsafe.ValidateEndpoint, the production SSRF boundary.
+	allowEndpoint func(string) error
 }
 
 type pushPayload struct {
@@ -48,6 +53,16 @@ type pushPayload struct {
 // errNoSubscriptions is transient: addressability may arrive later
 // (user subscribes a new device), so the row must wait, not die.
 var errNoSubscriptions = errors.New("no push subscriptions for recipient")
+
+// validateEndpoint applies the outbound push-service allowlist. Tests that
+// point at an httptest server override allowEndpoint; production always uses
+// pushsafe.ValidateEndpoint.
+func (s *PushSender) validateEndpoint(raw string) error {
+	if s.allowEndpoint != nil {
+		return s.allowEndpoint(raw)
+	}
+	return pushsafe.ValidateEndpoint(raw)
+}
 
 // Send delivers text to every live subscription for the recipient.
 func (s *PushSender) Send(ctx context.Context, tenantID, recipientRef, text string) error {
@@ -91,10 +106,24 @@ func (s *PushSender) Send(ctx context.Context, tenantID, recipientRef, text stri
 	}
 	client := s.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+		client = pushsafe.NewHTTPClient(8 * time.Second)
 	}
 	sent, failed := 0, 0
 	for _, e := range subs {
+		if err := s.validateEndpoint(e.endpoint); err != nil {
+			// The row predates the allowlist or was written by a bad
+			// actor. Never dial it; prune it so the worker does not
+			// retry an SSRF target on every tick.
+			slog.Warn("push endpoint rejected",
+				"tenant", tenantID, "endpoint_host", pushsafe.Host(e.endpoint), "err", err)
+			if _, derr := s.Pool.Exec(ctx,
+				`DELETE FROM push_subscriptions WHERE tenant_id = $1 AND endpoint = $2`,
+				tenantID, e.endpoint); derr != nil {
+				slog.Warn("push invalid subscription prune failed", "err", derr)
+			}
+			failed++
+			continue
+		}
 		resp, err := webpush.SendNotificationWithContext(ctx, body,
 			&webpush.Subscription{
 				Endpoint: e.endpoint,
@@ -108,7 +137,7 @@ func (s *PushSender) Send(ctx context.Context, tenantID, recipientRef, text stri
 				VAPIDPrivateKey: s.VAPIDPrivate,
 			})
 		if err != nil {
-			slog.Warn("push send error", "tenant", tenantID, "endpoint", e.endpoint, "err", err)
+			slog.Warn("push send error", "tenant", tenantID, "endpoint_host", pushsafe.Host(e.endpoint), "err", err)
 			failed++
 			continue
 		}
@@ -125,7 +154,7 @@ func (s *PushSender) Send(ctx context.Context, tenantID, recipientRef, text stri
 		case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
 			// Endpoint rotated (app data cleared, resubscribed elsewhere):
 			// prune so future ticks stop paying for a dead address.
-			slog.Info("push subscription gone, pruning", "tenant", tenantID, "endpoint", e.endpoint)
+			slog.Info("push subscription gone, pruning", "tenant", tenantID, "endpoint_host", pushsafe.Host(e.endpoint))
 			if _, derr := s.Pool.Exec(ctx,
 				`DELETE FROM push_subscriptions WHERE tenant_id = $1 AND endpoint = $2`,
 				tenantID, e.endpoint); derr != nil {
@@ -133,7 +162,7 @@ func (s *PushSender) Send(ctx context.Context, tenantID, recipientRef, text stri
 			}
 			failed++
 		default:
-			slog.Warn("push send status", "tenant", tenantID, "endpoint", e.endpoint, "status", resp.StatusCode)
+			slog.Warn("push send status", "tenant", tenantID, "endpoint_host", pushsafe.Host(e.endpoint), "status", resp.StatusCode)
 			failed++
 		}
 	}

@@ -183,6 +183,8 @@ live in a local `.env`; the app refuses a remote database in development.
 | `ADMIN_API_KEY` | required | 32+ bytes; the only thing that can call `/v1/admin/*` |
 | `MAX_TOKENS_PER_REQUEST` | 2048 | |
 | `RATE_LIMIT_PER_MINUTE` | 60 | per `client_id` post-auth; per `ip` pre-auth (`/v1/chat`) |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | 10 | per tenant/email staff-login attempts per minute (Redis) |
+| `LOGIN_LOCKOUT_FAILURES` / `LOGIN_LOCKOUT_MINUTES` | 5 / 15 | failed password checks before lockout, and the lockout window |
 | `ALLOW_ORIGINS` | * | CSV; production: explicit origin list |
 | `SENTRY_DSN` | empty | empty = no-op (Sentry disabled) |
 | `SENTRY_ENV` | development | |
@@ -560,8 +562,24 @@ Do not restore production data into staging. Staging is synthetic.
 - [x] slog redaction: `Authorization` + any `*password*` / `*secret*` keys → `[REDACTED]`
 - [x] Sentry BeforeSend: same redaction
 - [x] Rate limit + quota
+- [x] Staff-login per-account rate limit + lockout (`authapi`, Redis; fail-open on cache outage)
+- [x] Outbound Web Push endpoint allowlist (`internal/pushsafe`; enforced on subscribe and send)
+- [x] Admin audit trail (`087_admin_audit_log.sql`; pre-insert, key fingerprint, no request bodies)
+- [x] Report capability tokens redacted from logs, Sentry breadcrumbs, and panic reports
 - [x] `Server{ReadHeaderTimeout: 5s, ReadTimeout: 10s, IdleTimeout: 120s}`
 - [x] `govulncheck` in CI
+
+### Login lockout and admin audit operations
+
+- A locked staff account returns `429` with `Retry-After`; it unlocks
+  automatically after `LOGIN_LOCKOUT_MINUTES`. To release one immediately,
+  delete `auth:login:fail:<sha256(tenant + NUL + email)>` and the matching
+  `auth:login:rate:*` bucket from Redis. The raw email is never a Redis key.
+- Admin actions are recorded in `public.admin_audit_log` (owner-only). Inspect
+  with:
+  `select occurred_at, actor, action, target, status from admin_audit_log order by id desc limit 50;`
+  The table is append-only by convention and has no automatic retention job;
+  archive/purge is an explicit operator action.
 
 ---
 

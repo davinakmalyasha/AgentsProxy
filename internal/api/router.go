@@ -195,6 +195,7 @@ func NewRouter(d Deps) http.Handler {
 		// doubles them (adminPool computed above).
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(auth.RequireAdmin(d.Cfg.AdminAPIKey))
+			r.Use((&AdminAudit{Pool: adminPool}).Middleware)
 			projects := d.Projects
 			if projects == nil {
 				projects = newEmbeddedProjectCatalog(adminPool)

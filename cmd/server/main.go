@@ -344,6 +344,11 @@ func main() {
 		slog.Info("agency worker disabled (JWT_SECRET unset or BACKGROUND_TICKERS=false)")
 	}
 
+	authH := authapi.New(pool, rdb)
+	authH.LoginRatePerMinute = cfg.LoginRateLimitPerMinute
+	authH.LoginLockoutFailures = cfg.LoginLockoutFailures
+	authH.LoginLockout = time.Duration(cfg.LoginLockoutMinutes) * time.Minute
+
 	router := api.NewRouter(api.Deps{
 		Cfg:       cfg,
 		Pool:      pool,
@@ -351,7 +356,7 @@ func main() {
 		Cache:     cli,
 		LLM:       llmCli,
 		ADK:       adkRunner,
-		Auth:      authapi.New(pool),
+		Auth:      authH,
 		Version:   Version,
 		AdminPool: adminPool,
 		Origins:   origins,
