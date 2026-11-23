@@ -201,10 +201,13 @@ is recorded in the verification log.
   `npm run build` passes.
 - [~] Backup RPO: the logical dump is now scheduled every 2 hours
   (best-effort), down from 6 hours. Restore correctness is fixed and the
-  drill is green. Supabase PITR is available as a paid add-on ($100/mo for
-  7-day retention) but is not enabled. GitHub's scheduler can delay or skip
-  runs, so a guaranteed 2-hour RPO still needs PITR or an external
-  scheduler; do not claim the guarantee from the cron alone.
+  drill is green. The 30-minute smoke workflow also fails if the latest
+  successful backup is older than 4 hours, so a skipped dump becomes
+  visible before the window widens much further. Supabase PITR is available
+  as a paid add-on ($100/mo for 7-day retention) but is not enabled.
+  GitHub's scheduler can delay or skip runs, so a guaranteed 2-hour RPO
+  still needs PITR or an external scheduler; do not claim the guarantee
+  from the cron alone.
 - [~] DFD origin: the shared `client/api-origin.mjs` change is in place and
   the production pin/preview fail-closed behavior is unchanged. DNS check:
   `dfdagency.com` uses Afternic nameservers (parked), `api.dfdagency.com`
@@ -315,5 +318,6 @@ architecture work above.
   `{"status":"ok","db":true,"redis":true}`; `/v1/sports/facilities` is 404
   and `/v1/p/centrum/facilities` is 200. `schema-check` run 45090823801,
   `smoke` run 45090823917, and backup/restore run 45090982743 passed. The
-  backup schedule was tightened to every 2 hours in PR #82; run 45090982743
-  proves the dump/restore path used by the schedule.
+  backup schedule was tightened to every 2 hours and `smoke` now checks
+  backup freshness (4-hour threshold) in PR #82; run 45090982743 proves the
+  dump/restore path used by the schedule.

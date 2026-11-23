@@ -75,3 +75,30 @@ jobs:
           probe "centrum health" "$CENTRUM_URL/api/health" '"configured":true'
           probe "centrum availability" "$CENTRUM_URL/api/availability?date=$(date -u +%F)" '"facilities"'
           probe "dfd catalog" "$DFD_URL/id" ""
+
+  backup-freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: verify latest successful backup is under four hours old
+        # The schedule is every two hours, but GitHub's scheduler is
+        # best-effort. This turns a silently skipped dump into a red smoke
+        # run while it is still inside a usable recovery window.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ts=$(gh run list --workflow=backup.yml --branch=main --status=success --limit=1 --json createdAt --jq '.[0].createdAt')
+          if [ -z "$ts" ] || [ "$ts" = "null" ]; then
+            echo "no successful backup run found" >&2
+            exit 1
+          fi
+          age=$(( $(date -u +%s) - $(date -u -d "$ts" +%s) ))
+          echo "latest successful backup: $ts (age ${age}s)"
+          if [ "$age" -gt 14400 ]; then
+            echo "backup is older than four hours; RPO is at risk" >&2
+            exit 1
+          fi

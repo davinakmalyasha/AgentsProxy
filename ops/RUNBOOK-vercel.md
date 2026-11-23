@@ -138,6 +138,7 @@ Supabase-side delivery are required rather than optional.
   ownership and ACLs; the roles must exist first. The smoke job does exactly
   this on every run, connects as `app_runtime`, and asserts non-zero
   `clients` and `project_centrum.sports_facilities` rows.
-- Scheduled workflows are best-effort. Observed backup runs have been less
-  frequent than the cron suggests; enable Supabase PITR or an external
-  scheduler if a guaranteed sub-2-hour RPO is required.
+- Scheduled workflows are best-effort. `smoke.yml` now fails when the latest
+  successful backup is more than four hours old, so missed dumps are visible.
+  Enable Supabase PITR or an external scheduler if a guaranteed sub-2-hour
+  RPO is required.

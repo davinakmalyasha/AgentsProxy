@@ -538,9 +538,10 @@ Artifacts are retained for 30 days.
   and ACLs. Roles are cluster-level and are pre-created by the restore
   script; hosted extensions (`pg_cron`, `pg_net`) are recreated by the host.
 * **RPO caveat:** GitHub's scheduled workflow is best-effort; observed runs
-  can be delayed or skipped. For a tighter RPO, enable Supabase PITR or use
-  an external scheduler. The logical dump remains the portable/off-platform
-  copy.
+  can be delayed or skipped. `smoke.yml` fails if the latest successful
+  backup is older than 4 hours, so a skipped dump is visible. For a
+  guaranteed tighter RPO, enable Supabase PITR or use an external scheduler.
+  The logical dump remains the portable/off-platform copy.
 
 Do not restore production data into staging. Staging is synthetic.
 
