@@ -128,7 +128,7 @@ pending · `[ ]` open · `[-]` accepted residual, documented.
 
 - [x] **P2-1** `README.md` no longer advertises `/v1/sports`.
 - [x] **P2-2** Rollback boundary covers Centrum `0009`–`0011`.
-- [x] **P2-3** Backup comments say 6-hourly, not nightly/unscheduled.
+- [x] **P2-3** Backup comments say 2-hourly, not nightly/unscheduled.
 - [x] **P2-4** `ops/schedule-delivery.sql` is clearly historical or removed.
 - [x] **P2-5** Dead scripts (`seed_centrum_exhaustive.mjs`, stale
       `setup-staging.sh`) removed or fixed; `seed-dev.mjs` verification
@@ -199,13 +199,21 @@ is recorded in the verification log.
 - [x] Centrum `next`/`eslint-config-next` → 16.4.6; Dependabot #16 closed.
   `npm audit --omit=dev` is clean, `npm run check` is 14 files/159 tests, and
   `npm run build` passes.
-- [~] Backup RPO: the logical dump remains 6-hourly (RPO up to 6h).
-  Restore correctness is fixed and the drill is green. PITR or a reliable
-  2-hour scheduler is a budget/scheduler decision; GitHub's schedule is
-  best-effort, so do not claim a tighter RPO without it.
-- [~] DFD origin: the two hardcoded copies now import
-  `client/api-origin.mjs`; the production pin and preview fail-closed
-  behavior are unchanged. Adding `api.dfdagency.com` is a DNS decision.
+- [~] Backup RPO: the logical dump is now scheduled every 2 hours
+  (best-effort), down from 6 hours. Restore correctness is fixed and the
+  drill is green. The 30-minute smoke workflow also fails if the latest
+  successful backup is older than 4 hours, so a skipped dump becomes
+  visible before the window widens much further. Supabase PITR is available
+  as a paid add-on ($100/mo for 7-day retention) but is not enabled.
+  GitHub's scheduler can delay or skip runs, so a guaranteed 2-hour RPO
+  still needs PITR or an external scheduler; do not claim the guarantee
+  from the cron alone.
+- [~] DFD origin: the shared `client/api-origin.mjs` change is in place and
+  the production pin/preview fail-closed behavior is unchanged. DNS check:
+  `dfdagency.com` uses Afternic nameservers (parked), `api.dfdagency.com`
+  has no usable A/CNAME/TLS record, and the domain is not in the Vercel
+  account. Adding the custom domain needs domain-owner/DNS action, not a
+  code change.
 - [-] GitHub reviewer: accepted risk for now. The repository is private on
   Free and has one maintainer; the enforced controls are the three required
   checks, strict branch updates, and `enforce_admins`. A required reviewer
@@ -309,4 +317,7 @@ architecture work above.
 - Post-deploy checks: production `01e2c9c` and staging `b703acc` report
   `{"status":"ok","db":true,"redis":true}`; `/v1/sports/facilities` is 404
   and `/v1/p/centrum/facilities` is 200. `schema-check` run 45090823801,
-  `smoke` run 45090823917, and backup/restore run 45090982743 passed.
+  `smoke` run 45090823917, and backup/restore run 45090982743 passed. The
+  backup schedule was tightened to every 2 hours and `smoke` now checks
+  backup freshness (4-hour threshold) in PR #82; run 45090982743 proves the
+  dump/restore path used by the schedule.

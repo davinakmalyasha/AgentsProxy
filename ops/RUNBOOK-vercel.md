@@ -127,8 +127,10 @@ Supabase-side delivery are required rather than optional.
   (auth/storage/vault) are Supabase-managed and covered by the platform's
   daily WAL-G backups; including them breaks portable restores and drags
   platform PII (auth password hashes) into the artifact. Platform PITR is
-  off (`pitr_enabled=false`); the four-times-daily dump is the independent,
-  off-platform copy. RPO is up to 6 hours.
+  off (`pitr_enabled=false`); the two-hourly dump is the independent,
+  off-platform copy. RPO is up to 2 hours when the scheduler runs; GitHub
+  schedules are best-effort. Supabase PITR (7-day retention) is available as
+  a $100/month add-on but is not enabled.
 - Verify: `gh run list --workflow backup.yml --limit 3`, then download
   `db-backup` and restore into a scratch database:
   `psql <scratch> -f scripts/restore-roles.sql`, then
@@ -136,6 +138,7 @@ Supabase-side delivery are required rather than optional.
   ownership and ACLs; the roles must exist first. The smoke job does exactly
   this on every run, connects as `app_runtime`, and asserts non-zero
   `clients` and `project_centrum.sports_facilities` rows.
-- Scheduled workflows are best-effort. Observed backup runs have been less
-  frequent than the cron suggests; enable Supabase PITR or an external
-  scheduler if a sub-6-hour RPO is required.
+- Scheduled workflows are best-effort. `smoke.yml` now fails when the latest
+  successful backup is more than four hours old, so missed dumps are visible.
+  Enable Supabase PITR or an external scheduler if a guaranteed sub-2-hour
+  RPO is required.

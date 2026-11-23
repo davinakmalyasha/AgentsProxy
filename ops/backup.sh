@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/backup.sh — a portable pg_dump of the application schemas.
 #
-# The workflow in .github/workflows/backup.yml runs this every 6 hours and
+# The workflow in .github/workflows/backup.yml runs this every 2 hours and
 # restores the artifact into a scratch postgres:17 before it is accepted.
 # Nothing here is scheduled by itself.
 #
