@@ -406,6 +406,11 @@ for `/healthz` to report the new version, then run `db-migrate apply`. The
 new binary works under the old permissive policies during that window; the
 reverse order would break live traffic.
 
+**Migration 087 (admin audit).** Apply `087_admin_audit_log.sql` before the
+binary that writes audit rows: the middleware fails closed without the table.
+The migration is additive and safe with the old binary, so it is the one
+schema change that goes before its code.
+
 The schema-clone/auth release follows the expand/contract order:
 
 1. Apply `077`–`079` and Centrum `0004`/`0006`. The auth functions keep the

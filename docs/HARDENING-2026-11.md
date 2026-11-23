@@ -1,12 +1,12 @@
 # Architecture hardening — November 2026
 
-Status: **P0/P1 and security-polish controls implemented and verified; residual ops items are marked**. This
+Status: **P0/P1/P2 and security-polish controls implemented and verified; residual ops items are marked**. This
 document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
 docs/ops/CI). An item is only marked `[x]` when the code is merged and
 the named verification passes.
 
-Legend: `[x]` implemented and verified · `[~]` implemented, verification
-pending · `[ ]` open · `[-]` accepted residual, documented.
+Legend: `[x]` implemented and verified · `[~]` partially implemented /
+external decision pending · `[ ]` open · `[-]` accepted residual, documented.
 
 ---
 
