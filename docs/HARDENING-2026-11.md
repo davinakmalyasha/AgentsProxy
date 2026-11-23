@@ -1,12 +1,12 @@
 # Architecture hardening — November 2026
 
-Status: **P0/P1 and security-polish controls implemented and verified; residual ops items are marked**. This
+Status: **P0/P1/P2 and security-polish controls implemented and verified; residual ops items are marked**. This
 document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
 docs/ops/CI). An item is only marked `[x]` when the code is merged and
 the named verification passes.
 
-Legend: `[x]` implemented and verified · `[~]` implemented, verification
-pending · `[ ]` open · `[-]` accepted residual, documented.
+Legend: `[x]` implemented and verified · `[~]` partially implemented /
+external decision pending · `[ ]` open · `[-]` accepted residual, documented.
 
 ---
 
@@ -317,7 +317,10 @@ architecture work above.
 - Post-deploy checks: production `01e2c9c` and staging `b703acc` report
   `{"status":"ok","db":true,"redis":true}`; `/v1/sports/facilities` is 404
   and `/v1/p/centrum/facilities` is 200. `schema-check` run 45090823801,
-  `smoke` run 45090823917, and backup/restore run 45090982743 passed. The
-  backup schedule was tightened to every 2 hours and `smoke` now checks
-  backup freshness (4-hour threshold) in PR #82; run 45090982743 proves the
-  dump/restore path used by the schedule.
+  `smoke` run 45090823917, and backup/restore run 45090982743 passed.
+- Backup cadence/monitor: PR #82 tightened the logical dump to every 2 hours
+  and added a `smoke` backup-freshness check (4-hour threshold); PR #83
+  fixed the check's repository discovery. Post-change `smoke` run 45163919556
+  passed with the freshness job, and backup run 45164000513 passed the dump
+  and restore smoke. PITR remains the only guaranteed RPO option and is not
+  enabled.
