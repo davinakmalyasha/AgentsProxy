@@ -1,0 +1,26 @@
+[
+  {
+    "name": "health",
+    "requests": 40,
+    "errors": 0,
+    "rps": 13.275542242841794,
+    "p50_ms": 77.719,
+    "p90_ms": 869.043,
+    "p95_ms": 1676.89,
+    "p99_ms": 1685.605,
+    "min_ms": 62.043,
+    "max_ms": 1685.605,
+    "server_p50_ms": 2.744,
+    "server_p95_ms": 3.476,
+    "server_p99_ms": 25.011,
+    "instances": 4,
+    "cold_requests": 4,
+    "cold_p95_ms": 1670.545,
+    "warm_requests": 36,
+    "warm_p95_ms": 1682.519,
+    "status_codes": {
+      "200": 40
+    },
+    "elapsed_ms": 3013
+  }
+]

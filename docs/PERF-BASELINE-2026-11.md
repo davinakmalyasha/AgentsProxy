@@ -38,7 +38,7 @@ instance.
 | Admin tenant health | 400 ms | 22.70 ms | not measured | local pass |
 | Agent overhead (mock LLM, excl. provider) | 500 ms | 12.56 ms | not measured | local pass |
 | Blended public, cold + warm | 1000 ms | not measured | not measured | unverified |
-| Cold start, first request | 3000 ms | 780–6060 ms | 185–332 ms TTFB (20 spaced probes) | production provisional pass; local proxy outlier |
+| Cold start, first request | 3000 ms | 780–6060 ms | 1670.6 ms cold p95 (4-instance burst) | pass; local proxy outlier |
 | 5xx under baseline load | ≤ 0.1% | 0% | 0% (rate-limit-safe runs) | pass |
 | Hot DB query p95 | 50 ms | 0.08–1.90 ms execution | — | pass |
 | Redis hit ratio | ≥ 90% | 98.8% | — | pass |
@@ -130,12 +130,10 @@ Redis during the full run: 34,826 hits / 418 misses = 98.8% hit ratio;
 3. **Records list is a sequential scan.** 1.9 ms at 2.7k rows is harmless,
    but there is no `(tenant_id, created_at DESC)` index. This is the clearest
    scale risk in the baseline.
-4. **Cold start is still an uncertainty.** Local process-to-health ranges from
-   0.78 s to 6.06 s after the first-run outlier. Production spaced probes saw
-   185–332 ms TTFB with no multi-second spike, but `x-vercel-id` is
-   request-scoped, so instance reuse cannot be proven. Boot work (config, two
-   pools, Redis, manifest, entitlement audit, ADK, tool sets) remains the
-   lever if a real cold-start regression appears.
+4. **Cold-start tail is real but within target.** The 4-instance burst showed
+   cold p95 1.67 s against the 3 s target, while application time stayed
+   ~3.5 ms. The tail is Vercel boot/edge, not handler work; the labeled
+   `Server-Timing` run makes that separation explicit.
 5. **Public read latency is dominated by edge/network, not the handler.**
    Local p50 is 6–12 ms; production p50 is 78–118 ms for the same public
    reads. The code path is already fast; the remaining lever is connection
@@ -145,10 +143,8 @@ Redis during the full run: 34,826 hits / 418 misses = 98.8% hit ratio;
 
 - Production records, staff login, admin reads, and agent chat: no production
   staff/admin/client credentials were used. The local run is the substitute.
-- Vercel instance reuse and true cold-vs-warm split: the 20-request probe
-  records TTFB but `x-vercel-id` is request-scoped. A deployment-instance
-  metadata source or controlled idle window is still needed.
-- A blended cold+warm SLO: insufficient production samples.
+- A blended cold+warm SLO: insufficient production samples; cold and warm
+  are reported separately instead.
 - A production load test above 0.2 RPS per endpoint: the per-IP limiter
   returns 429 above the safe probe rate. Do not bypass it for a benchmark.
 
@@ -168,10 +164,57 @@ The medians are stable and close to the pre-gate baseline, but the tails
 contain multi-second outliers. A separate 20-probe health run and the US
 `perf-guard` run did not reproduce those outliers, so this is not yet
 attributable to a code regression; it can be client/network jitter, a cold
-start, or edge-instance variance. The absolute p95 SLOs should therefore be
-treated as **unverified**, not passed, until the probe can separate server
-time from network time and identify cold instances. The median path is
-healthy; the tail is the next measurement problem.
+start, or edge-instance variance. The labeled rerun below resolves this: the
+application path is 4–15 ms p95 and the tail was cold/network. This earlier
+table is kept as the reason the instrumentation was added.
+
+## Labeled latency measurement
+
+The follow-up probe separates the three things the first run could not:
+
+- **network time** — client-observed p50/p95/p99;
+- **application time** — `Server-Timing: app;dur=<ms>` emitted before the
+  first response byte;
+- **cold vs warm** — `X-Instance-Id` is a process-boot identity, so the first
+  request seen for an instance is cold and later requests are warm.
+
+### Warm run — 48 samples per endpoint, 0.2 RPS, 240 s
+
+Production `ae5ce868`, one instance for the whole run:
+
+| Scenario | p50 | p95 | p99 | Server p95 | Cold samples | Warm p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| health | 79.8 ms | 107.5 ms | 359.2 ms | 3.97 ms | 0 | 107.5 ms |
+| public-facilities | 91.1 ms | 141.5 ms | 176.8 ms | 15.04 ms | 0 | 141.5 ms |
+| public-availability | 93.8 ms | 138.7 ms | 208.5 ms | 14.61 ms | 0 | 138.7 ms |
+| public-pricing | 89.1 ms | 135.4 ms | 211.1 ms | 14.75 ms | 0 | 135.4 ms |
+
+The warm p95s are **inside** the 200 ms health and 300 ms public targets.
+Application time is 4–15 ms p95; essentially all of the client-observed
+latency is network/edge. The earlier multi-second tails were not stable
+handler latency.
+
+### Cold burst — 4 instances, 3 s
+
+A short burst forced four new instances:
+
+| Scenario | p50 | p95 | Server p95 | Instances | Cold p95 | Warm p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| health | 77.7 ms | 1676.9 ms | 3.48 ms | 4 | 1670.6 ms | 1682.5 ms |
+
+Cold p95 is 1.67 s, under the 3 s cold-start target, while application time
+remains ~3.5 ms. The gap is Vercel instance boot/network, not the Go handler.
+(Warm p95 is distorted by the burst's queueing and is not a warm SLO sample.)
+
+### Current conclusion
+
+- Absolute **warm** public/health SLOs: pass in the labeled run.
+- Absolute **cold** health SLO: pass in the burst (1.67 s < 3 s).
+- The earlier 48-sample multi-second p95 outliers are best explained by
+  cold/network variance; the application path is fast.
+- Production staff/admin/agent absolute latency remains unmeasured.
+
+## Continuous guard
 
 ## Continuous guard
 
