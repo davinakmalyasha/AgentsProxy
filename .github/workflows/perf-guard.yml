@@ -43,8 +43,13 @@ jobs:
         run: |
           python - <<'PY'
           import json, sys
-          limits = {"health": 200.0, "public-facilities": 300.0,
-                    "public-availability": 300.0, "public-pricing": 300.0}
+          # These are regression ceilings for a US GitHub runner probing the
+          # sin1 deployment. They are deliberately looser than the same-region
+          # SLOs in docs/PERF (health 200 ms, public 300 ms); the runner's
+          # transpacific path adds roughly 100-150 ms. A breach here is a
+          # gross regression, not an absolute SLO verdict.
+          limits = {"health": 500.0, "public-facilities": 600.0,
+                    "public-availability": 600.0, "public-pricing": 600.0}
           rows = json.load(open("perf.json"))
           bad = []
           for r in rows:

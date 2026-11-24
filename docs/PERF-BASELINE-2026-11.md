@@ -156,9 +156,11 @@ Redis during the full run: 34,826 hits / 418 misses = 98.8% hit ratio;
 ## Continuous guard
 
 `.github/workflows/perf-guard.yml` runs the same public probe daily at 0.2 RPS
-and enforces the frozen health/public p95 limits (200/300 ms), opening or
-updating a `[perf-alert]` issue on violation. It is a read-only guard, not a
-replacement for the local staff/admin/agent workloads.
+from a US GitHub runner. It enforces runner-specific regression ceilings
+(health 500 ms, public 600 ms), not the same-region 200/300 ms SLOs; the
+transpacific path adds roughly 100–150 ms. A violation opens or updates a
+`[perf-alert]` issue. It is a read-only guard, not a replacement for the local
+staff/admin/agent workloads or a same-region absolute SLO probe.
 
 ## Optimization queue (not implemented)
 

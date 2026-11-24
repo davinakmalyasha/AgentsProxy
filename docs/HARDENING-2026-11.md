@@ -205,8 +205,9 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
 - [x] **A-15 Free-plan operations guards.** Backup has two two-hourly cron
   offsets, smoke auto-triggers a replacement backup when the latest success
   is over four hours old, and failed smoke/perf probes open or update a
-  single GitHub issue. A daily `perf-guard` workflow enforces the frozen
-  public p95 SLOs at a rate-limit-safe 0.2 RPS. PITR remains intentionally
+  single GitHub issue. A daily `perf-guard` workflow enforces runner-specific
+  public regression ceilings at a rate-limit-safe 0.2 RPS; the absolute
+  same-region SLOs remain the baseline harness. PITR remains intentionally
   disabled on the free plan.
 - [x] **A-16 Supply chain.** GitHub Actions are pinned to commit SHAs with
   version comments, `govulncheck` is pinned, and Dependabot covers Go modules
@@ -377,6 +378,22 @@ architecture work above.
   - Independent `smoke` workflow run 45440953568 was re-run successfully
     after a manual backup (run 45441755905); the earlier failure was the
     backup-freshness check, not the deploy contract.
+  - Strict-feature rollout guard is live: Centrum's `project.json` now sets
+    `strict_features: true`; deploy run 45464744016 passed `migrate check`
+    against production with the full 14-feature set.
+  - Controlled rollback drill run 45470318895 passed:
+    `dpl_DwRFXxjmHAGSLooz8TZqiUL4X8TJ` (8f358d7) → previous
+    `dpl_BQbi7TvdN9nvooXTLs7zSd7x9q6g` (3c67104) and back, with the expected
+    `/healthz` version asserted at each step.
+  - Free-plan guards landed: backup has two cron offsets and smoke triggers a
+    replacement backup when stale; failed smoke/perf probes open a single
+    GitHub issue; daily `perf-guard` was exercised (run 45470792897), and its
+    US-runner ceilings were calibrated after the first probe showed the
+    transpacific path adds ~100–150 ms over the sin1 SLO baseline. The false
+    `[perf-alert]` issue #106 was closed with that explanation.
+  - CI supply chain: Actions are SHA-pinned, `govulncheck` is pinned, and
+    Dependabot opened its first Go/Actions update PRs. Vercel CLI remains
+    pinned to 66.6.0.
 - Production/staging rollout of A-10 and A-13 is complete for production.
   The production token remains project-scoped; team/full-account scope is not
   required because promotion uses the REST API.
@@ -397,12 +414,20 @@ architecture work above.
 - Vercel Production was checked (names only): `BACKGROUND_TICKERS`,
   `DB_USE_SIMPLE_PROTOCOL`, `DB_POOL_MIN`, `DB_POOL_MAX`, and
   `EXPECTED_DB_REF` are present and match the new server-side validation.
-- The hard deploy gate is live on `main`; production is on `dbf8225` after a
+- The hard deploy gate is live on `main`; production is on `8f358d7` after a
   successful gate run. The `production` environment has `VERCEL_TOKEN`,
   `PROD_DATABASE_ADMIN_URL`, `VERCEL_AUTOMATION_BYPASS_SECRET`,
   `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF`.
 - A manual Vercel dashboard redeploy bypasses `deploy.yml`; the runbook marks
   it break-glass and requires `cmd/migrate check` first.
+- The API-based staging-deployment DELETE is implemented but not exercised in
+  a live failure path. Capture now matches `/healthz` by version, so a stale
+  unaliased deployment cannot be mistaken for the current alias; cleanup
+  failure only leaves an unused deployment.
+- GitHub Actions red is still not a pager. Failed smoke/perf jobs now open a
+  persistent issue, but an external on-call integration is still recommended.
+- PITR is intentionally disabled on the free plan. Backup RPO remains
+  best-effort, now with two cron offsets and a stale-backup auto-trigger.
 - The performance baseline is local + read-only production probes. It does
   not measure production staff/admin writes or Vercel function cold start;
   see `docs/PERF-BASELINE-2026-11.md`.
