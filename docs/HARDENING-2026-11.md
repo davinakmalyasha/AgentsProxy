@@ -212,6 +212,12 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
 - [x] **A-16 Supply chain.** GitHub Actions are pinned to commit SHAs with
   version comments, `govulncheck` is pinned, and Dependabot covers Go modules
   and GitHub Actions. Vercel CLI remains pinned to `66.6.0`.
+- [x] **A-17 Cleanup and latency attribution.** Every response carries
+  `X-Instance-Id` and `Server-Timing: app;dur=<ms>`. `cmd/bench` separates
+  network time, application time, and first-seen-instance cold vs warm p95.
+  `cleanup-drill.yml` stages a production-target deployment without an alias,
+  smokes it, deletes it through the project-scoped
+  `DELETE /v13/deployments/{id}`, and requires GET 404.
 
 ---
 
@@ -396,6 +402,16 @@ architecture work above.
     Dependabot opened its first Go/Actions update PRs. Vercel CLI remains
     pinned to 66.6.0. Backup with the pinned actions/upload/download
     artifacts passed in run 45479141585.
+  - Cleanup drill run 45490335250 passed: staged
+    `dpl_F9oHKj7GMim1MYNj2RhwmCDheRnb` behind the production environment,
+    smoked it, deleted it with the project-scoped API token, and confirmed
+    `GET /v13/deployments/{id}` returned 404.
+  - Production responses expose `X-Instance-Id` and
+    `Server-Timing: app;dur=<ms>` (verified on `/healthz`). The labeled
+    240-second run measured warm p95 108–142 ms with server p95 4–15 ms;
+    a 4-instance burst measured cold p95 1.67 s with server p95 3.5 ms. The
+    earlier multi-second tail is cold/network, not handler time. See
+    `docs/PERF-BASELINE-2026-11.md`.
 - Production/staging rollout of A-10 and A-13 is complete for production.
   The production token remains project-scoped; team/full-account scope is not
   required because promotion uses the REST API.
@@ -416,24 +432,23 @@ architecture work above.
 - Vercel Production was checked (names only): `BACKGROUND_TICKERS`,
   `DB_USE_SIMPLE_PROTOCOL`, `DB_POOL_MIN`, `DB_POOL_MAX`, and
   `EXPECTED_DB_REF` are present and match the new server-side validation.
-- The hard deploy gate is live on `main`; production is on `8f511ef` after a
+- The hard deploy gate is live on `main`; production is on `ae5ce868` after a
   successful gate run. The `production` environment has `VERCEL_TOKEN`,
   `PROD_DATABASE_ADMIN_URL`, `VERCEL_AUTOMATION_BYPASS_SECRET`,
   `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF`.
 - A manual Vercel dashboard redeploy bypasses `deploy.yml`; the runbook marks
   it break-glass and requires `cmd/migrate check` first.
-- The API-based staging-deployment DELETE is implemented but not exercised in
-  a live failure path. Capture now matches `/healthz` by version, so a stale
-  unaliased deployment cannot be mistaken for the current alias; cleanup
-  failure only leaves an unused deployment.
+- The API-based staging-deployment DELETE is exercised by
+  `cleanup-drill.yml` (run 45490335250); staged cleanup no longer has an
+  unverified path.
 - GitHub Actions red is still not a pager. Failed smoke/perf jobs now open a
   persistent issue, but an external on-call integration is still recommended.
 - PITR is intentionally disabled on the free plan. Backup RPO remains
   best-effort, now with two cron offsets and a stale-backup auto-trigger.
 - The performance baseline is local + read-only production probes. The
-  post-gate 48-sample spot check had stable medians but multi-second tail
-  outliers; absolute production p95 is unverified until server time and cold
-  instances are separated. See `docs/PERF-BASELINE-2026-11.md`.
+  labeled run measured warm p95 108–142 ms and cold p95 1.67 s; server time
+  is 4–15 ms warm. Production staff/admin writes and agent latency remain
+  unmeasured. See `docs/PERF-BASELINE-2026-11.md`.
 
 ## Implementation map
 
@@ -473,6 +488,7 @@ architecture work above.
 | A-14 | `internal/agentconfig/{config,load}.go`, `internal/features/entitlement.go`, `projects/centrum/project.json` |
 | A-15 | `.github/workflows/{backup,smoke,perf-guard}.yml` |
 | A-16 | `.github/workflows/*.yml`, `.github/dependabot.yml` |
+| A-17 | `internal/middleware/logging.go`, `cmd/bench/*`, `.github/workflows/cleanup-drill.yml`, `scripts/cleanup-drill.sh` |
 - P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
   GUC sees only its app, cross-tenant insert rejected) and
   `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with

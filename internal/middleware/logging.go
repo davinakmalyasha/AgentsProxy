@@ -102,6 +102,10 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // io.Copy (http.ServeContent for .xlsx downloads) falls back to a
 // 32KB-buffer copy loop instead of the fast path.
 func (s *statusRecorder) ReadFrom(r io.Reader) (int64, error) {
+	if s.status == 0 {
+		s.finalizeHeaders()
+		s.status = http.StatusOK
+	}
 	if rf, ok := s.ResponseWriter.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(r)
 		s.bytes += int(n)

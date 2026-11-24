@@ -1,0 +1,90 @@
+[
+  {
+    "name": "health",
+    "requests": 48,
+    "errors": 0,
+    "rps": 0.19999966633389002,
+    "p50_ms": 79.777,
+    "p90_ms": 100.879,
+    "p95_ms": 107.53,
+    "p99_ms": 359.194,
+    "min_ms": 64.328,
+    "max_ms": 359.194,
+    "server_p50_ms": 3.627,
+    "server_p95_ms": 3.974,
+    "server_p99_ms": 4.358,
+    "instances": 1,
+    "warm_requests": 48,
+    "warm_p95_ms": 107.53,
+    "status_codes": {
+      "200": 48
+    },
+    "elapsed_ms": 240000
+  },
+  {
+    "name": "public-facilities",
+    "requests": 48,
+    "errors": 0,
+    "rps": 0.19999563317868105,
+    "p50_ms": 91.108,
+    "p90_ms": 137.172,
+    "p95_ms": 141.542,
+    "p99_ms": 176.758,
+    "min_ms": 66.864,
+    "max_ms": 176.758,
+    "server_p50_ms": 11.248,
+    "server_p95_ms": 15.035,
+    "server_p99_ms": 15.646,
+    "instances": 1,
+    "warm_requests": 48,
+    "warm_p95_ms": 141.542,
+    "status_codes": {
+      "200": 48
+    },
+    "elapsed_ms": 240005
+  },
+  {
+    "name": "public-availability",
+    "requests": 48,
+    "errors": 0,
+    "rps": 0.19999923466959535,
+    "p50_ms": 93.767,
+    "p90_ms": 128.341,
+    "p95_ms": 138.66,
+    "p99_ms": 208.468,
+    "min_ms": 71.917,
+    "max_ms": 208.468,
+    "server_p50_ms": 11.674,
+    "server_p95_ms": 14.614,
+    "server_p99_ms": 29.403,
+    "instances": 1,
+    "warm_requests": 48,
+    "warm_p95_ms": 138.66,
+    "status_codes": {
+      "200": 48
+    },
+    "elapsed_ms": 240000
+  },
+  {
+    "name": "public-pricing",
+    "requests": 48,
+    "errors": 0,
+    "rps": 0.1999997610002856,
+    "p50_ms": 89.048,
+    "p90_ms": 123.991,
+    "p95_ms": 135.409,
+    "p99_ms": 211.068,
+    "min_ms": 66.706,
+    "max_ms": 211.068,
+    "server_p50_ms": 11.077,
+    "server_p95_ms": 14.754,
+    "server_p99_ms": 28.897,
+    "instances": 1,
+    "warm_requests": 48,
+    "warm_p95_ms": 135.409,
+    "status_codes": {
+      "200": 48
+    },
+    "elapsed_ms": 240000
+  }
+]
