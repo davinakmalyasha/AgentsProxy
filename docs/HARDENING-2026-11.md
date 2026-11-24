@@ -387,13 +387,15 @@ architecture work above.
     `/healthz` version asserted at each step.
   - Free-plan guards landed: backup has two cron offsets and smoke triggers a
     replacement backup when stale; failed smoke/perf probes open a single
-    GitHub issue; daily `perf-guard` was exercised (run 45470792897), and its
-    US-runner ceilings were calibrated after the first probe showed the
-    transpacific path adds ~100–150 ms over the sin1 SLO baseline. The false
-    `[perf-alert]` issue #106 was closed with that explanation.
+    GitHub issue; daily `perf-guard` was calibrated and then passed (run 45477061415): US-runner
+    p95 was health 271 ms, facilities 325 ms, availability 316 ms, pricing
+    282 ms, all 0 errors. Those are regression ceilings, not the sin1
+    same-region SLOs; the false `[perf-alert]` issue #106 was closed with that
+    explanation.
   - CI supply chain: Actions are SHA-pinned, `govulncheck` is pinned, and
     Dependabot opened its first Go/Actions update PRs. Vercel CLI remains
-    pinned to 66.6.0.
+    pinned to 66.6.0. Backup with the pinned actions/upload/download
+    artifacts passed in run 45479141585.
 - Production/staging rollout of A-10 and A-13 is complete for production.
   The production token remains project-scoped; team/full-account scope is not
   required because promotion uses the REST API.
@@ -414,7 +416,7 @@ architecture work above.
 - Vercel Production was checked (names only): `BACKGROUND_TICKERS`,
   `DB_USE_SIMPLE_PROTOCOL`, `DB_POOL_MIN`, `DB_POOL_MAX`, and
   `EXPECTED_DB_REF` are present and match the new server-side validation.
-- The hard deploy gate is live on `main`; production is on `8f358d7` after a
+- The hard deploy gate is live on `main`; production is on `8f511ef` after a
   successful gate run. The `production` environment has `VERCEL_TOKEN`,
   `PROD_DATABASE_ADMIN_URL`, `VERCEL_AUTOMATION_BYPASS_SECRET`,
   `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF`.
@@ -428,9 +430,10 @@ architecture work above.
   persistent issue, but an external on-call integration is still recommended.
 - PITR is intentionally disabled on the free plan. Backup RPO remains
   best-effort, now with two cron offsets and a stale-backup auto-trigger.
-- The performance baseline is local + read-only production probes. It does
-  not measure production staff/admin writes or Vercel function cold start;
-  see `docs/PERF-BASELINE-2026-11.md`.
+- The performance baseline is local + read-only production probes. The
+  post-gate 48-sample spot check had stable medians but multi-second tail
+  outliers; absolute production p95 is unverified until server time and cold
+  instances are separated. See `docs/PERF-BASELINE-2026-11.md`.
 
 ## Implementation map
 
