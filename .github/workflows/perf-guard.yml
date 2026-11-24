@@ -1,0 +1,83 @@
+# perf-guard.yml — daily production public-latency guard.
+#
+# The exit-gate smoke proves correctness, not latency. This runs the same
+# read-only harness at a rate-limit-safe rate and fails when the frozen public
+# SLOs regress. Staff/admin/agent production workloads still require
+# credentials and are covered by the local baseline, not this probe.
+name: perf-guard
+
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    env:
+      PROD_URL: https://agents-proxy-nine.vercel.app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: measure public SLOs
+        id: bench
+        continue-on-error: true
+        run: |
+          go run ./cmd/bench \
+            -base-url "$PROD_URL" \
+            -scenarios health,public-facilities,public-availability,public-pricing \
+            -concurrency 1 -rps 0.2 -duration 120s -warmup 5s \
+            -json perf.json
+      - name: assert frozen public SLOs
+        run: |
+          python - <<'PY'
+          import json, sys
+          limits = {"health": 200.0, "public-facilities": 300.0,
+                    "public-availability": 300.0, "public-pricing": 300.0}
+          rows = json.load(open("perf.json"))
+          bad = []
+          for r in rows:
+              limit = limits.get(r["name"])
+              if limit is None:
+                  bad.append(f"{r['name']}: no SLO defined")
+                  continue
+              if r["errors"]:
+                  bad.append(f"{r['name']}: {r['errors']} errors")
+              if r["p95_ms"] > limit:
+                  bad.append(f"{r['name']}: p95 {r['p95_ms']:.1f} ms > {limit:.0f} ms")
+          print(f"{'scenario':28} {'req':>5} {'err':>4} {'p50':>8} {'p95':>8} {'limit':>6}")
+          for r in rows:
+              print(f"{r['name']:28} {r['requests']:5d} {r['errors']:4d} {r['p50_ms']:8.1f} {r['p95_ms']:8.1f} {limits.get(r['name'], 0):6.0f}")
+          if bad:
+              print("\nSLO violations:", file=sys.stderr)
+              for b in bad:
+                  print("  -", b, file=sys.stderr)
+              sys.exit(1)
+          PY
+      - name: open or update the performance alert issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="[perf-alert] Public SLO regression"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body=$(printf 'Daily public SLO probe failed.\n\nRun: %s\n\nSee the job log for the measured p95 and limits.\n' "$run_url")
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

@@ -1,6 +1,6 @@
 # Architecture hardening — November 2026
 
-Status: **P0/P1/P2 and security-polish controls implemented and verified; residual ops items are marked**. The exit-gate work (A-10–A-13) is implemented and locally verified; A-10's live production rollout still needs the Vercel/GitHub environment secrets listed in `RUNBOOK.md`. This document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation, docs/ops/CI). An item is only marked `[x]` when the code is merged and the named verification passes.
+Status: **P0/P1/P2, security-polish, and exit-gate controls are implemented; A-10 is live and verified in production. Remaining accepted risks and operational gaps are marked.** This document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation, docs/ops/CI). An item is only marked `[x]` when the code is merged and the named verification passes.
 
 Legend: `[x]` implemented and verified · `[~]` partially implemented /
 external decision pending · `[ ]` open · `[-]` accepted residual, documented.
@@ -197,6 +197,20 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
   status/error distributions, pprof, Redis stats, and hot-path `EXPLAIN`
   plans. `docs/PERF-BASELINE-2026-11.md` records the first baseline and the
   top five bottlenecks.
+- [x] **A-14 Strict feature rollout.** `project.json` can set
+  `strict_features: true`, which makes its `features` list a minimum
+  entitlement. `cmd/migrate check`, boot audit, and tenant reload then fail
+  if an existing tenant is missing a declared feature. Centrum opts in, so a
+  newly added feature cannot ship without its clients row being backfilled.
+- [x] **A-15 Free-plan operations guards.** Backup has two two-hourly cron
+  offsets, smoke auto-triggers a replacement backup when the latest success
+  is over four hours old, and failed smoke/perf probes open or update a
+  single GitHub issue. A daily `perf-guard` workflow enforces the frozen
+  public p95 SLOs at a rate-limit-safe 0.2 RPS. PITR remains intentionally
+  disabled on the free plan.
+- [x] **A-16 Supply chain.** GitHub Actions are pinned to commit SHAs with
+  version comments, `govulncheck` is pinned, and Dependabot covers Go modules
+  and GitHub Actions. Vercel CLI remains pinned to `66.6.0`.
 
 ---
 
@@ -428,6 +442,9 @@ architecture work above.
 | A-11 | `internal/features/entitlement.go`, `cmd/server/main.go`, `internal/api/tenant_health.go`, `cmd/migrate/main.go` |
 | A-12 | `cmd/testdb/*`, `scripts/test-local.sh`, `.env.test.example`, `.github/workflows/ci.yml` |
 | A-13 | `cmd/bench/*`, `cmd/benchseed/*`, `scripts/bench.sh`, `docs/PERF-BASELINE-2026-11.md` |
+| A-14 | `internal/agentconfig/{config,load}.go`, `internal/features/entitlement.go`, `projects/centrum/project.json` |
+| A-15 | `.github/workflows/{backup,smoke,perf-guard}.yml` |
+| A-16 | `.github/workflows/*.yml`, `.github/dependabot.yml` |
 - P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
   GUC sees only its app, cross-tenant insert rejected) and
   `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with

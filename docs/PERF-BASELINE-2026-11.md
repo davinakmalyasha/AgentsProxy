@@ -153,6 +153,13 @@ Redis during the full run: 34,826 hits / 418 misses = 98.8% hit ratio;
 - A production load test above 0.2 RPS per endpoint: the per-IP limiter
   returns 429 above the safe probe rate. Do not bypass it for a benchmark.
 
+## Continuous guard
+
+`.github/workflows/perf-guard.yml` runs the same public probe daily at 0.2 RPS
+and enforces the frozen health/public p95 limits (200/300 ms), opening or
+updating a `[perf-alert]` issue on violation. It is a read-only guard, not a
+replacement for the local staff/admin/agent workloads.
+
 ## Optimization queue (not implemented)
 
 Ordered by evidence, not intuition:

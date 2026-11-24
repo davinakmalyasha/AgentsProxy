@@ -72,6 +72,13 @@ type Project struct {
 	// per-tenant entitlement and may be a subset. The admin/provision paths
 	// validate every name against the compiled project registry.
 	Features []string
+	// StrictFeatures makes Features a minimum entitlement as well as a
+	// default. When true, cmd/migrate check, boot audit, and tenant reload
+	// fail if any declared feature is missing from clients.features. Use this
+	// for projects where a new feature must be rolled out to every existing
+	// tenant at the same time as the code; leave it false when subsets are a
+	// supported product configuration.
+	StrictFeatures bool `json:"strict_features,omitempty"`
 	// Migrations is the number of SQL files under migrations/. Provisioning
 	// uses it to require the project ledger to be complete before the client
 	// row exists.
@@ -236,6 +243,9 @@ func Validate(p *Project, b Budget) error {
 			add("feature %q is listed twice", f)
 		}
 		seenFeature[f] = true
+	}
+	if p.StrictFeatures && len(p.Features) == 0 {
+		add("strict_features requires at least one feature")
 	}
 
 	for _, s := range p.Skills {

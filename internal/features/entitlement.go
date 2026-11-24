@@ -122,6 +122,20 @@ func ValidateClientEntitlement(c ClientEntitlement, project *agentconfig.Project
 	if len(c.Features) == 0 {
 		issues = append(issues, "clients.features is empty; gated features are denied (set at least the project.json defaults)")
 	}
+	if project.StrictFeatures {
+		have := make(map[string]bool, len(c.Features))
+		for _, f := range c.Features {
+			have[strings.ToLower(strings.TrimSpace(f))] = true
+		}
+		for _, want := range project.Features {
+			name := strings.ToLower(strings.TrimSpace(want))
+			if name == "" || have[name] {
+				continue
+			}
+			issues = append(issues, fmt.Sprintf(
+				"required feature %q is missing from clients.features (strict_features=true)", want))
+		}
+	}
 
 	seen := make(map[string]bool, len(c.Features))
 	for _, raw := range c.Features {

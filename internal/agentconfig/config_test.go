@@ -33,6 +33,9 @@ func TestProjectsLoadFromTheProjectsTree(t *testing.T) {
 	if p.Schema != "project_centrum" {
 		t.Errorf("schema = %q, want project_centrum", p.Schema)
 	}
+	if !p.StrictFeatures {
+		t.Error("centrum must require all manifest features; strict_features should be true")
+	}
 	if !p.Agent.Enabled {
 		t.Error("centrum agent should be enabled")
 	}
@@ -243,6 +246,12 @@ func TestValidateEnforcesProjectIdentity(t *testing.T) {
 	badFeature.Features = []string{"bad/name"}
 	if err := Validate(&badFeature, DefaultBudget()); err == nil {
 		t.Fatal("path-like feature name accepted")
+	}
+
+	strictEmpty := base
+	strictEmpty.StrictFeatures = true
+	if err := Validate(&strictEmpty, DefaultBudget()); err == nil {
+		t.Fatal("strict_features with no features accepted")
 	}
 }
 
