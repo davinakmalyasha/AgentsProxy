@@ -233,10 +233,19 @@ shell history.
 | `postgres` | Vercel Production `DATABASE_ADMIN_URL` | Supabase dashboard → **Reset database password** (not raw SQL; pg_net/internal services) | Vercel Production env, then redeploy | `db-migrate` workflow `check` + admin read |
 | `backup_reader` | GitHub `BACKUP_DATABASE_URL` | `ALTER ROLE` | GitHub secret | run the backup workflow |
 | `delivery_caller` | Edge Function `DELIVERY_DATABASE_URL` | `ALTER ROLE` | Supabase Edge Function secret | next reminder tick / function log |
+| Vercel project token | GitHub `production` / `VERCEL_TOKEN` | Vercel Account Tokens; project scope, 90-day expiry | GitHub production secret | run `deploy.yml` |
+| Vercel bypass | GitHub `production` / `VERCEL_AUTOMATION_BYPASS_SECRET` | Vercel Deployment Protection → Protection Bypass for Automation | GitHub production secret | staged smoke in `deploy.yml` |
 
 Existing pooled sessions survive a password change; new connections fail
 until the consumer has the new value. Do `postgres` last, in a low-traffic
 window.
+
+Create a calendar reminder about 10 days before the Vercel token expires.
+Rotation is: create a new project-scoped token, replace the GitHub environment
+secret, run one gated deploy, then revoke the old token. The Deployment
+Protection bypass secret has no expiry; rotate it the same way, and revoke the
+old bypass after the staged smoke passes. Do not put either value in chat, a
+shell history, or the repository.
 
 Supavisor's **session** pooler (port 5432) can reject a just-changed password
 for roughly 10–20 seconds while it refreshes its credential cache. The
@@ -344,7 +353,13 @@ If the project uses the generic records feature, its `0001_init.sql` must
 create `tenant_records` in the project schema. If it has a custom agent, add
 `projects/<slug>/agent/` and run `go generate ./...` before deploying.
 `project.json.features` is the default entitlement for a new tenant; the
-compiled project registry must also know each name.
+compiled project registry must also know each name. Set
+`"strict_features": true` when the list is also a **minimum** entitlement.
+Centrum does: `migrate check`, boot audit, and tenant reload then fail if an
+active tenant is missing any declared feature. This is the guard for a new
+feature that must be backfilled to every existing tenant at the same time as
+the code. Projects that intentionally support per-tenant feature subsets
+leave it false.
 
 A project's business tables live in its own schema; its frontend uses
 `/v1/p/<slug>/...`. `/v1/{vertical}` is platform-only. Centrum's frontend is
@@ -433,6 +448,17 @@ Required GitHub configuration:
 A manual Vercel dashboard redeploy bypasses this workflow. Treat it as
 break-glass only: run `go run ./cmd/migrate check` against production first,
 and record why in the incident/change note.
+
+Run the controlled rollback drill after changing promotion/rollback code or
+before relying on the failure path:
+
+```bash
+gh workflow run rollback-drill.yml --ref main -f confirm=ROLLBACK-DRILL
+```
+
+It promotes the previous READY deployment, checks `/healthz` and smoke,
+restores the original deployment, and verifies again. It requires the
+`production` environment and `VERCEL_TOKEN`/`VERCEL_PROJECT_ID`.
 
 `go run ./cmd/migrate` applies:
 1. platform migrations in `internal/db/migrations/` (public schema), then
@@ -581,15 +607,15 @@ in production.
 
 ## 9a. Backup and recovery
 
-`backup.yml` runs every 2 hours, dumps through `ops/backup.sh`, and
-restores the dump into a scratch `postgres:17` in the same workflow.
-Artifacts are retained for 30 days.
+`backup.yml` runs every 2 hours at two offsets, dumps through
+`ops/backup.sh`, and restores the dump into a scratch `postgres:17` in the
+same workflow. Artifacts are retained for 30 days.
 
 * **RPO:** up to 2 hours when the scheduler runs; GitHub's scheduler is
   best-effort and can be delayed or skipped. The free Supabase plan has no
   PITR (`pitr_enabled=false`); the logical dump is the recovery point.
-  Supabase PITR is available as a $100/month add-on (7-day retention) but is
-  not enabled; enabling it is a budget decision.
+  Supabase PITR is available as a paid add-on and is intentionally not
+  enabled on the free plan.
 * **RTO:** pre-create the roles with `scripts/restore-roles.sql`, install
   `btree_gist`, restore the newest artifact, then verify as `app_runtime`
   (the workflow does exactly this and asserts non-zero platform and project
@@ -598,13 +624,22 @@ Artifacts are retained for 30 days.
 * **Scope:** the dump includes platform and project schemas plus ownership
   and ACLs. Roles are cluster-level and are pre-created by the restore
   script; hosted extensions (`pg_cron`, `pg_net`) are recreated by the host.
-* **RPO caveat:** GitHub's scheduled workflow is best-effort; observed runs
-  can be delayed or skipped. `smoke.yml` fails if the latest successful
-  backup is older than 4 hours, so a skipped dump is visible. For a
-  guaranteed tighter RPO, enable Supabase PITR or use an external scheduler.
-  The logical dump remains the portable/off-platform copy.
+* **Free-plan guard:** `smoke.yml` checks the latest successful backup every
+  30 minutes. If it is older than 4 hours, it triggers a replacement
+  `backup.yml` run and opens/updates the `[prod-alert]` issue. The run's
+  failure is visible even when GitHub's scheduler skipped a run. PITR is the
+  only guaranteed tighter RPO and remains out of scope on the free plan.
 
 Do not restore production data into staging. Staging is synthetic.
+
+### Performance guard
+
+`perf-guard.yml` runs daily at 03:20 UTC (and on demand) against the public
+production routes at 0.2 RPS. It enforces the frozen p95 targets from
+`docs/PERF-BASELINE-2026-11.md`: health ≤ 200 ms and public reads ≤ 300 ms.
+A violation opens or updates the `[perf-alert]` issue. It is intentionally
+read-only and rate-limit-safe; staff/admin/agent production workloads still
+require credentials and are measured by the local harness.
 
 ---
 

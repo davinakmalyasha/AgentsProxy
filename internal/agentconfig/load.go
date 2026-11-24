@@ -137,7 +137,9 @@ type projectDoc struct {
 	Contact  string   `json:"contact"`
 	Schema   string   `json:"schema"`
 	Features []string `json:"features"`
-	Agent    struct {
+	// StrictFeatures turns the feature list into a minimum entitlement.
+	StrictFeatures bool `json:"strict_features"`
+	Agent          struct {
 		Enabled bool     `json:"enabled"`
 		Model   string   `json:"model"`
 		Persona string   `json:"persona"`
@@ -167,6 +169,7 @@ func loadOne(dir string) (*Project, error) {
 	p.Contact = doc.Contact
 	p.Schema = doc.Schema
 	p.Features = doc.Features
+	p.StrictFeatures = doc.StrictFeatures
 	p.Migrations = countProjectMigrations(dir)
 	if p.Schema == "" {
 		// A new project is isolated by default. Centrum states

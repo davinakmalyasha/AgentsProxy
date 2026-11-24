@@ -54,7 +54,7 @@ jobs:
     environment: production
     steps:
       - name: Checkout target SHA
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
@@ -70,7 +70,7 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
           cache: true
@@ -101,13 +101,13 @@ jobs:
     environment: production
     steps:
       - name: Checkout target SHA
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
           cache: true
@@ -137,22 +137,25 @@ jobs:
           VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
         run: |
           set -euo pipefail
-          # vercel inspect may fail for scoped tokens with "User not found"
-          # because the CLI preflight calls the user endpoint. Prefer the
-          # deployment ID from inspect, then fall back to the deployments API.
+          # The CLI inspect path fails for scoped tokens. The deployments API
+          # is authoritative enough if we match the running /healthz version:
+          # a failed staged deployment has a different SHA, so it cannot be
+          # mistaken for the currently aliased deployment.
+          version=$(curl -fsS "$PROD_URL/healthz" | jq -r '.version // empty')
+          api_out=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=production&limit=20")
           prev=""
-          inspect_out=$(vercel inspect "$PROD_URL" --json --token "$VERCEL_TOKEN" 2>&1) || true
-          prev=$(printf '%s' "$inspect_out" | jq -r '.id // .uid // empty' 2>/dev/null || true)
-          case "$prev" in dpl_*) ;; *) prev="" ;; esac
+          if [ -n "$version" ] && [ "$version" != "dev" ]; then
+            prev=$(printf '%s' "$api_out" | jq -r --arg v "$version" \
+              '[.deployments[] | select(.state == "READY" and (.meta.githubCommitSha // "") == $v)] | (.[0].uid // .[0].id // empty)')
+          fi
           if [ -z "$prev" ]; then
-            echo "inspect did not resolve a deployment ID; trying the deployments API" >&2
-            api_out=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" \
-              "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=production&limit=1" 2>&1) || true
+            echo "no deployment matched /healthz version '$version'; using newest production deployment" >&2
             prev=$(printf '%s' "$api_out" | jq -r '.deployments[0].uid // .deployments[0].id // empty')
           fi
           case "$prev" in dpl_*) ;; *) echo "could not resolve a deployment ID (got '$prev')"; exit 1 ;; esac
           echo "id=$prev" >> "$GITHUB_OUTPUT"
-          echo "current production deployment: $prev"
+          echo "current production deployment: $prev (version $version)"
 
       - name: Stage production deployment (alias unchanged)
         id: stage

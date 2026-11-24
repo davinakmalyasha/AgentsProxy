@@ -27,8 +27,8 @@ jobs:
     env:
       PROD_URL: https://agents-proxy-nine.vercel.app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
           cache: true
@@ -82,13 +82,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: read
+      actions: write
       contents: read
     steps:
       - name: verify latest successful backup is under four hours old
         # The schedule is every two hours, but GitHub's scheduler is
         # best-effort. This turns a silently skipped dump into a red smoke
-        # run while it is still inside a usable recovery window.
+        # run and triggers a replacement backup while still inside a usable
+        # recovery window.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -96,12 +97,50 @@ jobs:
           set -euo pipefail
           ts=$(gh run list --workflow=backup.yml --branch=main --status=success --limit=1 --json createdAt --jq '.[0].createdAt')
           if [ -z "$ts" ] || [ "$ts" = "null" ]; then
-            echo "no successful backup run found" >&2
+            echo "no successful backup run found; triggering backup" >&2
+            gh workflow run backup.yml --ref main || true
             exit 1
           fi
           age=$(( $(date -u +%s) - $(date -u -d "$ts" +%s) ))
           echo "latest successful backup: $ts (age ${age}s)"
           if [ "$age" -gt 14400 ]; then
-            echo "backup is older than four hours; RPO is at risk" >&2
+            echo "backup is older than four hours; triggering a new backup" >&2
+            gh workflow run backup.yml --ref main || true
             exit 1
+          fi
+
+  alert:
+    # GitHub Actions red is visible but not a pager. Keep a single open issue
+    # as the durable, free-plan alert until an external monitor is confirmed.
+    if: |
+      always() && (
+        needs.prod-health.result == 'failure' ||
+        needs.frontend-health.result == 'failure' ||
+        needs.backup-freshness.result == 'failure'
+      )
+    needs: [prod-health, frontend-health, backup-freshness]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: open or update the production alert issue
+        run: |
+          set -euo pipefail
+          title="[prod-alert] Production smoke failing"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body=$(printf 'Smoke workflow failed.\n\nRun: %s\n\nJobs: prod-health=%s frontend-health=%s backup-freshness=%s\n' \
+            "$run_url" "${{ needs.prod-health.result }}" "${{ needs.frontend-health.result }}" "${{ needs.backup-freshness.result }}")
+          number=$(gh issue list --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+            echo "updated issue #$number"
+          else
+            gh issue create --title "$title" --body "$body"
           fi

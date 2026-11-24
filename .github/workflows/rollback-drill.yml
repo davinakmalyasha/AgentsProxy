@@ -1,0 +1,42 @@
+# rollback-drill.yml — controlled production alias drill.
+#
+# Run manually from main only, with the explicit confirmation input. It
+# promotes the previous READY deployment, verifies health + contract smoke,
+# then restores the original deployment. This is the failure-path proof the
+# normal deploy skips when promotion succeeds.
+name: rollback-drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type ROLLBACK-DRILL to move production twice in a controlled drill"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback-drill-production
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      PROD_URL: https://agents-proxy-nine.vercel.app
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: rollback drill
+        run: bash scripts/rollback-drill.sh

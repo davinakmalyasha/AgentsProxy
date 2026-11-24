@@ -20,7 +20,10 @@ func TestValidateClientEntitlement(t *testing.T) {
 
 	project := &agentconfig.Project{
 		Slug: "acme", Vertical: "sports", Schema: "project_acme",
+		Features: []string{"records", "facilities", "pricing"},
 	}
+	strictProject := *project
+	strictProject.StrictFeatures = true
 	base := ClientEntitlement{
 		TenantID: "acme", DBSchema: "project_acme", Vertical: "sports",
 		Features: []string{"records", "facilities", "pricing"}, Status: "active",
@@ -33,6 +36,12 @@ func TestValidateClientEntitlement(t *testing.T) {
 		want    string // empty means valid
 	}{
 		{name: "valid project subset", client: base, project: project},
+		{
+			name:    "strict project requires every manifest feature",
+			client:  ClientEntitlement{TenantID: "acme", DBSchema: "project_acme", Vertical: "sports", Features: []string{"records", "facilities"}},
+			project: &strictProject, want: `required feature "pricing"`,
+		},
+		{name: "strict project accepts full set", client: base, project: &strictProject},
 		{
 			name:    "empty project entitlement",
 			client:  ClientEntitlement{TenantID: "acme", DBSchema: "project_acme", Vertical: "sports"},

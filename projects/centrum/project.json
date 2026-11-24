@@ -5,6 +5,7 @@
   "contact": "0815-9408-136 (Owner)",
   "schema": "project_centrum",
   "auto_grant": false,
+  "strict_features": true,
   "features": [
     "records",
     "availability",

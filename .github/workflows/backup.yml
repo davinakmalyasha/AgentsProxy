@@ -14,9 +14,11 @@ name: backup
 on:
   schedule:
     # Every two hours: the free plan has no PITR, so the logical dump is the
-    # recovery point. GitHub's scheduler is best-effort; PITR is the only
-    # guaranteed RPO option.
+    # recovery point. Two offsets reduce the chance that a single delayed
+    # GitHub schedule leaves a wide gap. PITR remains the only guaranteed RPO
+    # option and is intentionally not enabled on this plan.
     - cron: "0 */2 * * *"
+    - cron: "30 */2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
 
@@ -65,7 +67,7 @@ jobs:
           ls -lh backups/
 
       - name: Upload dump artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: db-backup
           path: backups/*.sql.gz
@@ -90,11 +92,11 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: db-backup
           path: backups
