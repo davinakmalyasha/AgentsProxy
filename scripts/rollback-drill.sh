@@ -36,14 +36,19 @@ health_version() {
 }
 
 wait_version() {
-    local want="$1" i
+    local want="$1" i hits=0
     for i in $(seq 1 60); do
         if [ "$(health_version)" = "$want" ]; then
-            return 0
+            hits=$((hits + 1))
+            if [ "$hits" -ge 2 ]; then
+                return 0
+            fi
+        else
+            hits=0
         fi
         sleep 2
     done
-    echo "timed out waiting for /healthz version $want (got $(health_version))" >&2
+    echo "timed out waiting for a stable /healthz version $want (got $(health_version))" >&2
     return 1
 }
 
@@ -76,7 +81,7 @@ restore() {
         echo "restoring original production deployment $current_id" >&2
         promote "$current_id" || true
         wait_version "$current_version" || true
-        go run ./cmd/smoke -base-url "$PROD_URL" -attempts 5 -retry-delay 5s || true
+        go run ./cmd/smoke -base-url "$PROD_URL" -expect-version "$current_version" -attempts 5 -retry-delay 5s || true
     fi
 }
 trap restore EXIT INT TERM
@@ -85,12 +90,12 @@ echo "step 1/4: promote previous"
 promote "$previous_id"
 rolled_back=1
 wait_version "$previous_version"
-go run ./cmd/smoke -base-url "$PROD_URL" -attempts 5 -retry-delay 5s
+go run ./cmd/smoke -base-url "$PROD_URL" -expect-version "$previous_version" -attempts 5 -retry-delay 5s
 
 echo "step 2/4: restore current"
 promote "$current_id"
 wait_version "$current_version"
-go run ./cmd/smoke -base-url "$PROD_URL" -attempts 5 -retry-delay 5s
+go run ./cmd/smoke -base-url "$PROD_URL" -expect-version "$current_version" -attempts 5 -retry-delay 5s
 rolled_back=0
 
 echo "rollback drill passed: $current_id <-> $previous_id"
