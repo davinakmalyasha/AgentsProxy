@@ -1,0 +1,92 @@
+# cleanup-drill.yml — prove the failed-staged-deployment DELETE path.
+#
+# Runs a manual, explicitly confirmed production-target deployment with the
+# alias withheld, smokes it, then deletes it through the same project-scoped
+# API call deploy.yml uses on a failed staged smoke. GET must return 404.
+name: cleanup-drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type CLEANUP-DRILL to stage and delete a production-target deployment"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cleanup-drill-production
+  cancel-in-progress: false
+
+env:
+  PROD_URL: https://agents-proxy-nine.vercel.app
+  TARGET_SHA: ${{ github.sha }}
+
+jobs:
+  drill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: Install Vercel CLI
+        run: |
+          npm install --global vercel@66.6.0
+          vercel --version
+      - name: Build production artifact
+        env:
+          VERCEL_GIT_COMMIT_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          set -euo pipefail
+          vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+          vercel build --prod --token "$VERCEL_TOKEN"
+      - name: Stage production-target deployment without alias
+        id: stage
+        run: |
+          set -euo pipefail
+          payload=$(vercel deploy --prebuilt --prod --skip-domain --yes --json --token "$VERCEL_TOKEN")
+          url=$(printf '%s' "$payload" | jq -r '.url // .deployment.url // empty')
+          id=$(printf '%s' "$payload" | jq -r '.id // .uid // .deployment.id // .deployment.uid // empty')
+          test -n "$url" || { echo "unexpected deployment response: $payload"; exit 1; }
+          case "$url" in https://*) ;; *) url="https://$url" ;; esac
+          if [ -z "$id" ]; then
+            list=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=production&limit=20")
+            id=$(printf '%s' "$list" | jq -r --arg u "${url#https://}" \
+              '.deployments[] | select(.url == $u) | (.uid // .id) // empty' | head -n 1)
+          fi
+          case "$id" in dpl_*) ;; *) echo "could not resolve deployment ID (url=$url id=$id)"; exit 1 ;; esac
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "staged $url ($id)"
+      - name: Smoke staged deployment
+        run: |
+          set -euo pipefail
+          go run ./cmd/smoke \
+            -base-url "${{ steps.stage.outputs.url }}" \
+            -expect-version "$TARGET_SHA" \
+            -attempts 5 -retry-delay 10s
+      - name: Delete and verify deletion
+        env:
+          DEPLOY_ID: ${{ steps.stage.outputs.id }}
+          DEPLOY_URL: ${{ steps.stage.outputs.url }}
+        run: bash scripts/cleanup-drill.sh
+      - name: Remove staged deployment after failure
+        if: failure() && steps.stage.outcome == 'success'
+        env:
+          DEPLOY_ID: ${{ steps.stage.outputs.id }}
+          DEPLOY_URL: ${{ steps.stage.outputs.url }}
+        run: bash scripts/cleanup-drill.sh || true
