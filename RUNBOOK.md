@@ -636,11 +636,12 @@ Do not restore production data into staging. Staging is synthetic.
 ### Performance guard
 
 `perf-guard.yml` runs daily at 03:20 UTC (and on demand) against the public
-production routes at 0.2 RPS. It enforces the frozen p95 targets from
-`docs/PERF-BASELINE-2026-11.md`: health ≤ 200 ms and public reads ≤ 300 ms.
-A violation opens or updates the `[perf-alert]` issue. It is intentionally
-read-only and rate-limit-safe; staff/admin/agent production workloads still
-require credentials and are measured by the local harness.
+production routes at 0.2 RPS. It enforces runner-specific regression ceilings
+(health ≤ 500 ms, public reads ≤ 600 ms) because GitHub’s US runner crosses
+the Pacific to `sin1`; it is a gross-regression guard, not the absolute
+same-region SLO measurement. A violation opens or updates the `[perf-alert]`
+issue. Staff/admin/agent production workloads still require credentials and
+are measured by the local harness.
 
 ---
 
