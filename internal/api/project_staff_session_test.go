@@ -34,7 +34,8 @@ func TestCentrumStaffSession_FullRouter(t *testing.T) {
 	if _, err := h.pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
 		 VALUES ('Centrum Staff E2E','centrum',$1,500000,'active','sports',
-		         ARRAY['records','expenses'],'project_centrum')`,
+		         ARRAY['records','availability','bookings','courtblocks','customers','expenses','facilities','inventory','kantin','members','payments','pricing','series','users'],
+		         'project_centrum')`,
 		auth.HashToken("tok-centrum-staff-e2e")); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestCentrumStaffSession_FullRouter(t *testing.T) {
 	// Remove the feature from the live tenant row: the next request must be
 	// denied even though the staff session itself is still valid.
 	if _, err := h.pool.Exec(ctx,
-		`UPDATE clients SET features = ARRAY['records'] WHERE tenant_id='centrum'`); err != nil {
+		`UPDATE clients SET features = ARRAY['records','availability','bookings','courtblocks','customers','facilities','inventory','kantin','members','payments','pricing','series','users'] WHERE tenant_id='centrum'`); err != nil {
 		t.Fatal(err)
 	}
 	resp, body = do(http.MethodGet, "/v1/p/centrum/expenses", "X-Session-Token", raw, "")

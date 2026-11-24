@@ -29,7 +29,7 @@ func TestCentrumProjectRoutes(t *testing.T) {
 	if _, err := h.pool.Exec(ctx,
 		`INSERT INTO clients (name, tenant_id, token_hash, monthly_quota_tokens, status, vertical, features, db_schema)
 		 VALUES ('Centrum Test','centrum',$1,500000,'active','sports',
-		         ARRAY['records','booking','facilities','pricing','availability'],'project_centrum')`,
+		         ARRAY['records','availability','bookings','courtblocks','customers','expenses','facilities','inventory','kantin','members','payments','pricing','series','users'],'project_centrum')`,
 		auth.HashToken("tok-centrum-test")); err != nil {
 		t.Fatal(err)
 	}

@@ -112,12 +112,7 @@ jobs:
   alert:
     # GitHub Actions red is visible but not a pager. Keep a single open issue
     # as the durable, free-plan alert until an external monitor is confirmed.
-    if: |
-      always() && (
-        needs.prod-health.result == 'failure' ||
-        needs.frontend-health.result == 'failure' ||
-        needs.backup-freshness.result == 'failure'
-      )
+    if: always() && contains(needs.*.result, 'failure')
     needs: [prod-health, frontend-health, backup-freshness]
     runs-on: ubuntu-latest
     timeout-minutes: 5

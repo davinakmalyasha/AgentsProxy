@@ -407,8 +407,9 @@ points at a shared dev database or the default Redis DB.
 after a successful CI run on `main`:
 
 1. `go run ./cmd/migrate check` against production (read-only). Pending
-   migrations, checksum drift, unknown features, or an active project tenant
-   with an empty entitlement fail the job before any build is staged.
+   migrations, checksum drift, unknown features, an active project tenant
+   with an empty entitlement, or a strict-feature tenant missing a declared
+   feature fail the job before any build is staged.
 2. `vercel build --prod`, then `vercel deploy --prebuilt --prod
    --skip-domain`. The alias still points at the previous deployment.
 3. `cmd/smoke` against the staged URL: exact version match, Centrum public

@@ -825,7 +825,7 @@ func TestAdmin_TenantHealthAndReload(t *testing.T) {
 		t.Fatalf("reload empty entitlement body=%s, want empty-feature reason", rawEmpty)
 	}
 	// Fixing the row makes the same reload path release the fence.
-	if _, err := h.pool.Exec(ctx, `UPDATE clients SET features=ARRAY['records','facilities'] WHERE tenant_id='centrum'`); err != nil {
+	if _, err := h.pool.Exec(ctx, `UPDATE clients SET features=ARRAY['records','availability','bookings','courtblocks','customers','expenses','facilities','inventory','kantin','members','payments','pricing','series','users'] WHERE tenant_id='centrum'`); err != nil {
 		t.Fatal(err)
 	}
 	respFix := adminH("POST", "/v1/admin/tenant-health/reload", `{"tenant_id":"centrum"}`)
