@@ -1,0 +1,7 @@
+PASS health                   http=200 version=68c19969991ce4e009ba6071ade56a0948e6e054
+PASS facilities               http=200
+PASS availability             http=200
+PASS pricing                  http=200
+PASS records-unauthenticated  http=401
+PASS legacy-alias-retired     http=404
+PASS cors-preflight           http=204

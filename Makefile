@@ -1,5 +1,5 @@
 # Makefile — D:\MyProject\AgentsProxy (Laragon dev, Go 1.27)
-.PHONY: run build test vet tidy fmt migrate docker redis-cli healthz compose-up compose-down
+.PHONY: run build test bench vet tidy fmt migrate docker redis-cli healthz compose-up compose-down
 
 run:
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; go run ./cmd/server
@@ -15,8 +15,12 @@ migrate:
 
 test:
 	# DB-backed tests read TEST_DATABASE_* from .env.test (see
-	# .env.test.example). They never read the runtime DATABASE_URL.
+	# .env.test.example). Every run creates and drops a fresh database.
 	bash scripts/test-local.sh
+
+bench:
+	# Fresh bench DB + seeded Centrum + real server + pprof/EXPLAIN evidence.
+	bash scripts/bench.sh
 
 vet:
 	go vet ./...

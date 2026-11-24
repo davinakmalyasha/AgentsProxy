@@ -1,9 +1,6 @@
 # Architecture hardening — November 2026
 
-Status: **P0/P1/P2 and security-polish controls implemented and verified; residual ops items are marked**. This
-document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation,
-docs/ops/CI). An item is only marked `[x]` when the code is merged and
-the named verification passes.
+Status: **P0/P1/P2 and security-polish controls implemented and verified; residual ops items are marked**. The exit-gate work (A-10–A-13) is implemented and locally verified; A-10's live production rollout still needs the Vercel/GitHub environment secrets listed in `RUNBOOK.md`. This document is the single tracker for the four-audit review (routing/layering, database/RLS, auth/isolation, docs/ops/CI). An item is only marked `[x]` when the code is merged and the named verification passes.
 
 Legend: `[x]` implemented and verified · `[~]` partially implemented /
 external decision pending · `[ ]` open · `[-]` accepted residual, documented.
@@ -176,6 +173,30 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
   `UpdateProject`.
 - [x] **A-9 Public health detail.** `/healthz` reports only an aggregate
   fence count; tenant slugs and internal reasons stay on the admin endpoint.
+- [~] **A-10 Deploy-order hard gate.** `deploy.yml` runs `cmd/migrate check`
+  against production before building, stages a production Vercel deployment
+  with `--skip-domain`, runs `cmd/smoke` on the staged URL, promotes it, and
+  runs the same contract on the alias. A post-promotion failure rolls back.
+  Vercel Git auto-deploy for `main` is disabled in `vercel.json`; PR previews
+  remain automatic. The deploy workflow never applies DDL. **Implementation
+  and local contract checks pass; live rollout is pending the production
+  environment secrets listed in `RUNBOOK.md`.**
+- [x] **A-11 Shared entitlement validator + boot audit.** `cmd/migrate`,
+  boot, and `tenant-reload` use `features.ValidateClientEntitlement`. Boot
+  fences active project tenants with empty/unknown/vertical-mismatched
+  entitlements, persists the reason, keeps healthy tenants serving, and
+  reconciles stale boot/reload fences. Reload refuses to release an
+  entitlement fence until the live `clients` row is fixed.
+- [x] **A-12 Fresh test database per run.** `cmd/testdb` creates
+  `agents_proxy_test_*`, `scripts/test-local.sh` applies the chain, runs the
+  suite, and drops the database with `FORCE`. Redis DB 15 is reserved for
+  tests. CI uses the same runner. This removes the stale `project_test_*`
+  schema failure mode.
+- [x] **A-13 Performance baseline.** `cmd/bench`, `cmd/benchseed`, and
+  `scripts/bench.sh` produce per-scenario p50/p90/p95/p99, throughput,
+  status/error distributions, pprof, Redis stats, and hot-path `EXPLAIN`
+  plans. `docs/PERF-BASELINE-2026-11.md` records the first baseline and the
+  top five bottlenecks.
 
 ---
 
@@ -298,6 +319,37 @@ architecture work above.
   project-vertical immutability, platform feature revalidation, canonical
   feature writes, public feature entitlement, and the aggregate-only
   `/healthz` body.
+- Exit-gate local verification (2026-11-24):
+  - `bash scripts/test-local.sh -count=1` was run twice consecutively. Both
+    runs created a fresh `agents_proxy_test_*` database, applied the embedded
+    chain, ran the full suite, exited 0, dropped the database, and left no
+    `agents_proxy_test_*` database or lock behind.
+  - `go test -p 1 ./internal/features ./internal/api ./cmd/migrate ./cmd/smoke ./cmd/testdb ./cmd/bench ./cmd/server`
+    — pass. New coverage includes `TestValidateClientEntitlement`,
+    `TestAuditProjectEntitlementsFencesEmptyProject`,
+    `TestCentrumStaffSession_FullRouter`,
+    `TestAdmin_TenantHealthAndReload` (empty entitlement → 422, fixed → 200),
+    `TestReconcileQuarantineReplacesStaleBootFences`, and the `cmd/smoke`
+    contract table tests.
+  - `bash scripts/bench.sh` local full workload (concurrency 16, 5 s):
+    health p95 4.83 ms, facilities 20.86 ms, availability 18.37 ms, pricing
+    15.65 ms, records list 37.20 ms, records create/delete 137.59 ms, staff
+    login 385.54 ms, admin clients 99.52 ms, admin health 22.70 ms; 0 errors.
+    Agent mock workload: `agent-client-chat` p95 12.56 ms, `chat` p95
+    15.03 ms; 0 errors.
+  - Production read-only baseline at 0.2 RPS: health p95 138.43 ms,
+    facilities 145.38 ms, availability 137.90 ms, pricing 168.43 ms; all 200
+    and 0 unexpected 5xx. Higher probe rates produced expected 429s from the
+    per-IP limiter and were excluded from latency results.
+  - Local cold-start proxy (5 process starts): 31,705 / 1,751 / 1,301 / 6,061
+    / 782 ms. The first run is OS file-cache dominated; Vercel function cold
+    start remains unmeasured and is called out in the baseline report.
+  - YAML parse of `deploy.yml`, `smoke.yml`, `ci.yml`, and `schema-check.yml`
+    — pass; `bash -n scripts/test-local.sh scripts/bench.sh` — pass.
+- Production/staging rollout of A-10 and A-13 is pending: it requires
+  `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and the production
+  environment secrets described in `RUNBOOK.md`. The workflows are committed
+  but not yet exercised against the live alias.
 - Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
   `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
   DFD frontends healthy.
@@ -315,6 +367,15 @@ architecture work above.
 - Vercel Production was checked (names only): `BACKGROUND_TICKERS`,
   `DB_USE_SIMPLE_PROTOCOL`, `DB_POOL_MIN`, `DB_POOL_MAX`, and
   `EXPECTED_DB_REF` are present and match the new server-side validation.
+- The hard deploy gate is implemented but not yet live until this branch is
+  merged and the `production` environment has `VERCEL_TOKEN`,
+  `PROD_DATABASE_ADMIN_URL`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and
+  `PROD_DB_REF`. Until then, Vercel auto-deploy remains the only path.
+- A manual Vercel dashboard redeploy bypasses `deploy.yml`; the runbook marks
+  it break-glass and requires `cmd/migrate check` first.
+- The performance baseline is local + read-only production probes. It does
+  not measure production staff/admin writes or Vercel function cold start;
+  see `docs/PERF-BASELINE-2026-11.md`.
 
 ## Implementation map
 
@@ -347,6 +408,10 @@ architecture work above.
 | A-7 | `internal/projecthooks/*`, `projects/centrum/backend/bookings/feature.go`, `projects/centrum/agent/tools/book_slot.go`, `cmd/server/main.go` |
 | A-8 | `internal/adkrunner/runner.go` |
 | A-9 | `internal/api/healthz.go`, `internal/api/api_test.go` |
+| A-10 | `.github/workflows/deploy.yml`, `vercel.json`, `cmd/smoke/*`, `.github/workflows/smoke.yml`, `RUNBOOK.md`, `ops/RUNBOOK-vercel.md` |
+| A-11 | `internal/features/entitlement.go`, `cmd/server/main.go`, `internal/api/tenant_health.go`, `cmd/migrate/main.go` |
+| A-12 | `cmd/testdb/*`, `scripts/test-local.sh`, `.env.test.example`, `.github/workflows/ci.yml` |
+| A-13 | `cmd/bench/*`, `cmd/benchseed/*`, `scripts/bench.sh`, `docs/PERF-BASELINE-2026-11.md` |
 - P1-2 regression: `TestADKSessionsTenantRLS` (unset GUC sees 0, matched
   GUC sees only its app, cross-tenant insert rejected) and
   `TestRecord_UsesClientGUC` (usage insert as `app_runtime` works only with

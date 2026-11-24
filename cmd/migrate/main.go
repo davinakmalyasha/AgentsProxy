@@ -179,75 +179,35 @@ func projectMetadataIssues(ctx context.Context, pool *pgxpool.Pool) ([]string, e
 			"project %q has compiled features but no projects/%s/project.json", slug, slug))
 	}
 
-	rows, err := pool.Query(ctx,
-		`SELECT tenant_id, db_schema, vertical, features FROM public.clients`)
+	clients, err := features.LoadClientEntitlements(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var tenant, schema, vertical string
-		var feats []string
-		if err := rows.Scan(&tenant, &schema, &vertical, &feats); err != nil {
-			return nil, err
-		}
-		p, ok := projects[tenant]
+	for _, c := range clients {
+		p, ok := projects[c.TenantID]
 		if !ok {
 			// A client without a folder is a platform tenant (or the
 			// undeclared-schema issue db already reports). Platform
 			// tenants may only enable global features allowed for their
-			// vertical.
-			for _, f := range feats {
-				if !features.IsKnownFeature(f) || !features.AllowedForVertical(f, vertical) {
-					issues = append(issues, fmt.Sprintf(
-						"client %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
-				}
+			// vertical, and may legitimately have an empty set.
+			for _, issue := range features.ValidateClientEntitlement(c, nil) {
+				issues = append(issues, fmt.Sprintf("client %q: %s", c.TenantID, issue))
 			}
 			continue
 		}
-		if p.Schema != schema {
+		if p.Schema != c.DBSchema {
 			// db.InspectMigrations reports the schema mismatch with the
 			// project ledger context; do not duplicate it.
 			continue
 		}
-		if p.Vertical != vertical {
-			issues = append(issues, fmt.Sprintf(
-				"project %q: clients.vertical is %q but project.json declares %q",
-				tenant, vertical, p.Vertical))
-		}
 		// An empty entitlement is almost always an un-migrated row: every
 		// gated feature is denied, including public landing reads, while the
-		// always-on records surface still works and hides the problem. Require
-		// an explicit list (records alone is valid) so a deploy cannot silently
-		// turn a project's features off.
-		if len(feats) == 0 {
-			issues = append(issues, fmt.Sprintf(
-				"project %q: clients.features is empty; gated features are denied (set at least the project.json defaults)", tenant))
+		// always-on records surface still works and hides the problem. The
+		// shared validator also catches unknown, duplicate, or vertical-
+		// mismatched names so boot and migrate check cannot drift.
+		for _, issue := range features.ValidateClientEntitlement(c, p) {
+			issues = append(issues, fmt.Sprintf("project %q: %s", c.TenantID, issue))
 		}
-		// project.json.features is the default for new tenants, not a
-		// minimum entitlement: a tenant may intentionally run a subset.
-		// What must not drift is the meaning of a name that IS present.
-		for _, f := range feats {
-			if features.IsKnownProjectFeature(tenant, f) {
-				if !features.ProjectFeatureAllowed(tenant, f, vertical) {
-					issues = append(issues, fmt.Sprintf(
-						"project %q: project feature %q is not allowed for vertical %q", tenant, f, vertical))
-				}
-				continue
-			}
-			if features.IsKnownFeature(f) {
-				if !features.AllowedForVertical(f, vertical) {
-					issues = append(issues, fmt.Sprintf(
-						"project %q: feature %q is not allowed for vertical %q", tenant, f, vertical))
-				}
-				continue
-			}
-			issues = append(issues, fmt.Sprintf(
-				"project %q: clients.features contains unknown feature %q", tenant, f))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	sort.Strings(issues)
 	return issues, nil

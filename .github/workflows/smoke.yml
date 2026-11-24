@@ -1,9 +1,10 @@
 # Post-deploy / uptime smoke (postmortem 2026-10-14).
 #
 # The Oct 10 CORS outage sat red for 4 days because nothing watches prod.
-# This pings the public health endpoint on a schedule plus on demand.
-# It asserts HTTP 200 AND status ok: boot crashes yield Vercel's 500 page
-# (no JSON), degraded DB/Redis yields 500 with status degraded — both fail.
+# This runs the shared Go contract checker on a schedule, on demand, and
+# after every successful deploy. It asserts health, Centrum public reads,
+# the unauthenticated records boundary, CORS preflight, and the retired
+# platform alias — the exact surfaces that broke before.
 #
 # If the production alias ever changes, update PROD_URL below (and only
 # there). The endpoint is public and returns status only, no PII.
@@ -13,31 +14,32 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+  workflow_run:
+    workflows: [deploy]
+    types: [completed]
+    branches: [main]
 
 jobs:
   prod-health:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     env:
       PROD_URL: https://agents-proxy-nine.vercel.app
     steps:
-      - name: probe /healthz (3 attempts, 20s apart)
-        # Retries are load-bearing, not politeness: a single sample can
-        # catch a cold start mid-wiring (observed once: redis:false on an
-        # otherwise healthy deploy, green on immediate re-probe). Three
-        # spaced samples distinguish a flap from an outage before paging.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: contract smoke (3 attempts, 20s apart)
+        # Retries are load-bearing: a single sample can catch a cold start
+        # mid-wiring. The checker itself retries each surface independently.
         run: |
-          set -euo pipefail
-          ok=0
-          for i in 1 2 3; do
-            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 "$PROD_URL/healthz") || code="000"
-            if [ "$code" = "200" ] && grep -q '"status":"ok"' /tmp/health.json; then ok=1; break; fi
-            echo "attempt $i: http=$code — retrying in 20s"
-            sleep 20
-          done
-          cat /tmp/health.json
-          echo "http=$code attempts_used=$i"
-          test "$ok" = "1"
+          go run ./cmd/smoke \
+            -base-url "$PROD_URL" \
+            -tenant centrum \
+            -attempts 3 -retry-delay 20s
 
   frontend-health:
     runs-on: ubuntu-latest

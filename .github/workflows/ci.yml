@@ -64,7 +64,7 @@ jobs:
       # Tests read TEST_* only; DATABASE_* belongs to the server/migrate step.
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
       TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/agents_proxy_ci?sslmode=disable
-      TEST_REDIS_URL: localhost:6379
+      TEST_REDIS_URL: redis://localhost:6379/15
       REDIS_URL: localhost:6379
       # Tests skip if these aren't set; provide a dummy so the integration
       # tests actually run.
@@ -149,15 +149,13 @@ jobs:
             exit 1
           fi
 
-      - name: go test (with coverage)
-        # -p 1: DB-backed packages share one Postgres service; parallel
-        # execution races across packages. Mirrors `make test`.
-        #
-        # mockllm is started here rather than in its own step so the process
-        # shares this step's lifetime: the spike tests are skipped when
-        # LLM_BASE_URL is unset, but the dummy values above exist to make the
-        # integration tests run, so without a server they fail on a refused
-        # connection instead.
+      - name: go test (fresh database, with coverage)
+        # The runner creates agents_proxy_test_<timestamp>, applies the
+        # embedded chain, runs the suite, and drops it with FORCE. -p 1 is
+        # inside scripts/test-local.sh. mockllm is started here so the
+        # process shares this step's lifetime; the spike tests are skipped
+        # when LLM_BASE_URL is unset, but the dummy values above exist to
+        # make the integration tests run.
         run: |
           go build -o /tmp/mockllm ./cmd/mockllm
           /tmp/mockllm &
@@ -165,7 +163,7 @@ jobs:
             (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break
             sleep 0.5
           done
-          go test -p 1 ./... -cover -count=1
+          bash scripts/test-local.sh -count=1
 
       - name: Coverage summary
         if: always()

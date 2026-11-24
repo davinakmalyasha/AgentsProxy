@@ -128,7 +128,8 @@ git log --oneline -20
 git revert <bad-sha>
 git push origin main
 
-# 3. Wait for CI to pass; Vercel deploys main automatically.
+# 3. Wait for CI to pass; the deploy workflow stages the build, smokes it,
+#    then promotes it. Vercel auto-deploy for main is disabled.
 #    For an immediate binary rollback, promote the last known-good
 #    production deployment (Vercel dashboard → Deployments → Promote, or):
 vercel ls agents-proxy
@@ -199,7 +200,7 @@ live in a local `.env`; the app refuses a remote database in development.
 | `REPORT_BUCKET` / `REPORT_MAX_BYTES` | reports / 15000000 | report storage bucket and upload cap |
 | `TEST_DATABASE_URL` | empty | tests only; local throwaway DB as `app_runtime` |
 | `TEST_DATABASE_ADMIN_URL` | empty | tests only; local throwaway DB as `postgres` |
-| `TEST_REDIS_URL` | empty | tests only; local Redis |
+| `TEST_REDIS_URL` | empty | tests only; local Redis, DB 15 reserved (`redis://localhost:6379/15`) |
 
 ### 5a. Environment safety (enforced before any DB connection)
 
@@ -371,12 +372,60 @@ project schemas; decommissioning a project is a separate export-then-drop
 step.
 
 Never run the DB-backed integration suite against production. Tests read
-`TEST_DATABASE_*` only and `make test` refuses a remote host; CI uses a
-local Postgres service.
+`TEST_DATABASE_*` only and `make test` refuses a remote host. Every local run
+creates `agents_proxy_test_<timestamp>_<random>`, applies the embedded chain,
+and drops it with `WITH (FORCE)` on exit. `TEST_KEEP_DB=1` keeps the database
+for inspection. Redis DB 15 is reserved for tests; CI uses the same runner.
+
+Benchmark runs use the same isolation with `scripts/bench.sh`: a fresh
+`agents_proxy_bench_*` database, Redis DB 14, seeded Centrum data, and
+pprof/DB/Redis evidence under `.tmp/bench/<timestamp>/`. No benchmark ever
+points at a shared dev database or the default Redis DB.
 
 ---
 
 ## 9. Schema Migrations
+
+### Production deploy gate
+
+`deploy.yml` is the only path that can move the production alias. It runs
+after a successful CI run on `main`:
+
+1. `go run ./cmd/migrate check` against production (read-only). Pending
+   migrations, checksum drift, unknown features, or an active project tenant
+   with an empty entitlement fail the job before any build is staged.
+2. `vercel build --prod`, then `vercel deploy --prebuilt --prod
+   --skip-domain`. The alias still points at the previous deployment.
+3. `cmd/smoke` against the staged URL: exact version match, Centrum public
+   facilities/availability/pricing, unauthenticated records 401, CORS
+   preflight, and the retired `/v1/sports` alias 404.
+4. `vercel promote` moves the alias; `cmd/smoke` runs again on the production
+   alias. The workflow captures the currently aliased deployment first; a
+   failure after promotion runs `vercel rollback <previous-deployment>` and
+   verifies the old version serves.
+
+The Vercel CLI is pinned to `66.6.0` in the workflow so the staged-URL and
+rollback flags cannot change under the release gate.
+
+The workflow never applies DDL. Merge a migration-only PR, run
+`db-migrate` with `apply`, then merge the code. A code deploy whose target
+database is not already clean fails closed. GitHub Free has no required
+reviewers; the `production` environment branch policy and the main-only job
+condition are the gate.
+
+Required GitHub configuration:
+
+* Environment `production` secret: `VERCEL_TOKEN`.
+* Environment `production` secret: `PROD_DATABASE_ADMIN_URL` (shared with
+  `db-migrate` and `schema-check`).
+* Repository/environment variables: `VERCEL_ORG_ID`,
+  `VERCEL_PROJECT_ID`, `PROD_DB_REF`.
+* Optional secret: `VERCEL_AUTOMATION_BYPASS_SECRET` when Vercel deployment
+  protection blocks the staged deployment URL.
+
+A manual Vercel dashboard redeploy bypasses this workflow. Treat it as
+break-glass only: run `go run ./cmd/migrate check` against production first,
+and record why in the incident/change note.
 
 `go run ./cmd/migrate` applies:
 1. platform migrations in `internal/db/migrations/` (public schema), then

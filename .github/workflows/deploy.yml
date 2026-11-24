@@ -1,0 +1,223 @@
+# deploy.yml — the only path that promotes production.
+#
+# Vercel Git auto-deploy for main is disabled in vercel.json. A merge still
+# runs CI; only a successful CI run reaches this workflow. The release is
+# staged, not atomic-by-faith:
+#
+#   migrate check (read-only) -> build --prod -> deploy --skip-domain
+#   -> cmd/smoke on the staged URL -> promote -> cmd/smoke on the alias
+#
+# The alias never moves if the schema is not clean or the contract smoke
+# fails. A failure after promotion rolls the previous production deployment
+# back and verifies it.
+#
+# Secrets (GitHub `production` environment):
+#   PROD_DATABASE_ADMIN_URL, VERCEL_TOKEN
+# Optional:
+#   VERCEL_AUTOMATION_BYPASS_SECRET — for deployment-protection on staged URLs
+# Variables:
+#   PROD_DB_REF, VERCEL_ORG_ID, VERCEL_PROJECT_ID
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "main commit SHA to deploy (empty = current main)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  PROD_URL: https://agents-proxy-nine.vercel.app
+  TARGET_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}
+
+jobs:
+  gate:
+    name: migrate check (production)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Checkout target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - name: Require target SHA to be current main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          main=$(git rev-parse refs/remotes/origin/main)
+          if [ "$main" != "$TARGET_SHA" ]; then
+            echo "::error::target $TARGET_SHA is not current main ($main); let the newer run deploy or re-run on current main"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: "Hard gate: production ledger and client entitlement"
+        # Read-only by construction. It fails on pending migrations, checksum
+        # drift, missing files, schema/client mismatch, unknown features, and
+        # an active project tenant with an empty entitlement. No DDL here:
+        # schema changes stay in the auditable db-migrate workflow.
+        env:
+          ENV: production
+          EXPECTED_DB_REF: ${{ vars.PROD_DB_REF }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          DATABASE_ADMIN_URL: ${{ secrets.PROD_DATABASE_ADMIN_URL }}
+          ALLOW_ORIGINS: https://dfdagency.vercel.app
+          LLM_API_KEY: deploy-unused
+          ADMIN_API_KEY: deploy-unused
+        run: |
+          set -euo pipefail
+          test -n "$DATABASE_ADMIN_URL" || { echo "PROD_DATABASE_ADMIN_URL is not set"; exit 1; }
+          go run ./cmd/migrate check
+
+  deploy:
+    name: stage, smoke, promote
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Checkout target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Install Vercel CLI
+        run: |
+          npm install --global vercel@66.6.0
+          vercel --version
+
+      - name: Build production artifact
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          VERCEL_GIT_COMMIT_SHA: ${{ env.TARGET_SHA }}
+        run: |
+          set -euo pipefail
+          test -n "$VERCEL_TOKEN" || { echo "VERCEL_TOKEN is not set"; exit 1; }
+          vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+          vercel build --prod --token "$VERCEL_TOKEN"
+
+      - name: Capture current production deployment
+        id: previous
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          prev=$(vercel inspect "$PROD_URL" --json --token "$VERCEL_TOKEN" \
+            | jq -r '.id // .uid // .url // empty')
+          test -n "$prev" || { echo "could not resolve the current production deployment"; exit 1; }
+          echo "id=$prev" >> "$GITHUB_OUTPUT"
+          echo "current production deployment: $prev"
+
+      - name: Stage production deployment (alias unchanged)
+        id: stage
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          payload=$(vercel deploy --prebuilt --prod --skip-domain --yes --json --token "$VERCEL_TOKEN")
+          url=$(printf '%s' "$payload" | jq -r '.url // .deployment.url // empty')
+          test -n "$url" || { echo "unexpected deployment response: $payload"; exit 1; }
+          case "$url" in https://*) ;; *) url="https://$url" ;; esac
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "staged $url"
+
+      - name: Smoke staged deployment (production env, no alias)
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/smoke \
+            -base-url "${{ steps.stage.outputs.url }}" \
+            -expect-version "$TARGET_SHA" \
+            -attempts 5 -retry-delay 10s
+
+      - name: Promote staged deployment
+        id: promote
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          vercel promote "${{ steps.stage.outputs.url }}" --yes --token "$VERCEL_TOKEN"
+
+      - name: Verify production alias
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/smoke \
+            -base-url "$PROD_URL" \
+            -expect-version "$TARGET_SHA" \
+            -attempts 5 -retry-delay 10s
+
+      - name: Roll back failed promotion
+        if: failure() && steps.promote.outcome == 'success'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          echo "::error::post-promotion smoke failed; rolling back to ${{ steps.previous.outputs.id }}"
+          vercel rollback "${{ steps.previous.outputs.id }}" --yes --token "$VERCEL_TOKEN"
+          sleep 5
+          go run ./cmd/smoke -base-url "$PROD_URL" -attempts 5 -retry-delay 10s || true
+
+      - name: Remove failed staging deployment
+        if: failure() && steps.stage.outcome == 'success' && steps.promote.outcome != 'success'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          vercel remove "${{ steps.stage.outputs.url }}" \
+            --confirm-name "${{ steps.stage.outputs.url }}" --safe --token "$VERCEL_TOKEN" || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Deploy"
+            echo ""
+            echo "- commit: \`$TARGET_SHA\`"
+            echo "- staged: \`${{ steps.stage.outputs.url }}\`"
+            echo "- production: $PROD_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
