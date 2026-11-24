@@ -137,8 +137,23 @@ jobs:
           VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
         run: |
           set -euo pipefail
-          prev=$(vercel inspect "$PROD_URL" --json --token "$VERCEL_TOKEN" \
-            | jq -r '.id // .uid // .url // empty')
+          # A project-scoped token can build/deploy the project but Vercel's
+          # alias inspect path can fail with "User not found". Prefer inspect,
+          # then fall back to the project's production deployment list.
+          prev=""
+          inspect_out=$(vercel inspect "$PROD_URL" --json --token "$VERCEL_TOKEN" 2>&1) || true
+          prev=$(printf '%s' "$inspect_out" | jq -r '.id // .uid // .url // empty' 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "inspect did not resolve a deployment; trying the deployments API" >&2
+            api_out=$(curl -fsS -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=production&limit=1" 2>&1) || true
+            prev=$(printf '%s' "$api_out" | jq -r '.deployments[0].uid // .deployments[0].id // .deployments[0].url // empty')
+          fi
+          if [ -z "$prev" ]; then
+            echo "deployments API did not resolve a deployment; falling back to CLI list" >&2
+            list_out=$(vercel ls agents-proxy --prod --json --token "$VERCEL_TOKEN")
+            prev=$(printf '%s' "$list_out" | jq -r '.deployments[0].url // .deployments[0].id // empty')
+          fi
           test -n "$prev" || { echo "could not resolve the current production deployment"; exit 1; }
           echo "id=$prev" >> "$GITHUB_OUTPUT"
           echo "current production deployment: $prev"
