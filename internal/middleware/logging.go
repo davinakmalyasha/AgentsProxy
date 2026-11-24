@@ -45,6 +45,14 @@ func reqPrefix() string {
 	return reqIDPrefix
 }
 
+// InstanceID is a process-boot identifier. Vercel/containers reuse a warm
+// process across requests, so this is the honest cold/warm grouping key; the
+// request ID is not an instance ID. It is exposed as a response header for
+// the benchmark harness and never includes host or tenant data.
+func InstanceID() string {
+	return reqPrefix()
+}
+
 // DONE: PRD §7 (request_id + slog) / STANDARDS §A, §B, §H
 func RequestID() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -62,17 +70,27 @@ func RequestID() func(http.Handler) http.Handler {
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status  int
+	bytes   int
+	started time.Time
+}
+
+func (s *statusRecorder) finalizeHeaders() {
+	if s.Header().Get("Server-Timing") == "" {
+		ms := float64(time.Since(s.started).Microseconds()) / 1000.0
+		s.Header().Set("Server-Timing", fmt.Sprintf("app;dur=%.3f", ms))
+	}
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
+	s.finalizeHeaders()
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *statusRecorder) Write(b []byte) (int, error) {
 	if s.status == 0 {
+		s.finalizeHeaders()
 		s.status = http.StatusOK
 	}
 	n, err := s.ResponseWriter.Write(b)
@@ -114,7 +132,8 @@ func Logging() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			rec := &statusRecorder{ResponseWriter: w}
+			w.Header().Set("X-Instance-Id", InstanceID())
+			rec := &statusRecorder{ResponseWriter: w, started: start}
 			next.ServeHTTP(rec, r)
 			dur := time.Since(start)
 			cid, _ := r.Context().Value(CtxClientID).(string)

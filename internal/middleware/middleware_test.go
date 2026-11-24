@@ -207,6 +207,12 @@ func TestLogging_RecordsFields(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Errorf("status=%d", resp.StatusCode)
 	}
+	if resp.Header.Get("X-Instance-Id") == "" {
+		t.Error("missing X-Instance-Id")
+	}
+	if !strings.HasPrefix(resp.Header.Get("Server-Timing"), "app;dur=") {
+		t.Errorf("missing Server-Timing: %q", resp.Header.Get("Server-Timing"))
+	}
 	if !strings.Contains(buf.String(), `"path":"/"`) {
 		t.Errorf("log missing path: %s", buf.String())
 	}

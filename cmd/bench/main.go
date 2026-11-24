@@ -51,25 +51,64 @@ type options struct {
 }
 
 type sample struct {
-	dur    time.Duration
-	status int
-	err    bool
+	dur      time.Duration
+	status   int
+	err      bool
+	serverMs float64
+	instance string
+	cold     bool
+}
+
+type instanceTracker struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func newInstanceTracker() *instanceTracker {
+	return &instanceTracker{seen: map[string]bool{}}
+}
+
+// observe reports whether this is the first request seen for the instance.
+// Empty IDs (protection pages, older servers) are neither cold nor warm.
+func (t *instanceTracker) observe(id string) bool {
+	if id == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cold := !t.seen[id]
+	t.seen[id] = true
+	return cold
+}
+
+func (t *instanceTracker) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.seen)
 }
 
 type stats struct {
-	Name        string      `json:"name"`
-	Requests    int         `json:"requests"`
-	Errors      int         `json:"errors"`
-	RPS         float64     `json:"rps"`
-	P50Ms       float64     `json:"p50_ms"`
-	P90Ms       float64     `json:"p90_ms"`
-	P95Ms       float64     `json:"p95_ms"`
-	P99Ms       float64     `json:"p99_ms"`
-	MinMs       float64     `json:"min_ms"`
-	MaxMs       float64     `json:"max_ms"`
-	StatusCodes map[int]int `json:"status_codes"`
-	ElapsedMS   int64       `json:"elapsed_ms"`
-	Notes       []string    `json:"notes,omitempty"`
+	Name         string      `json:"name"`
+	Requests     int         `json:"requests"`
+	Errors       int         `json:"errors"`
+	RPS          float64     `json:"rps"`
+	P50Ms        float64     `json:"p50_ms"`
+	P90Ms        float64     `json:"p90_ms"`
+	P95Ms        float64     `json:"p95_ms"`
+	P99Ms        float64     `json:"p99_ms"`
+	MinMs        float64     `json:"min_ms"`
+	MaxMs        float64     `json:"max_ms"`
+	ServerP50Ms  float64     `json:"server_p50_ms,omitempty"`
+	ServerP95Ms  float64     `json:"server_p95_ms,omitempty"`
+	ServerP99Ms  float64     `json:"server_p99_ms,omitempty"`
+	Instances    int         `json:"instances,omitempty"`
+	ColdRequests int         `json:"cold_requests,omitempty"`
+	ColdP95Ms    float64     `json:"cold_p95_ms,omitempty"`
+	WarmRequests int         `json:"warm_requests,omitempty"`
+	WarmP95Ms    float64     `json:"warm_p95_ms,omitempty"`
+	StatusCodes  map[int]int `json:"status_codes"`
+	ElapsedMS    int64       `json:"elapsed_ms"`
+	Notes        []string    `json:"notes,omitempty"`
 }
 
 func main() {
@@ -154,11 +193,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	var results []stats
+	tracker := newInstanceTracker()
 	for _, sc := range selected {
 		if o.warmup > 0 {
-			warm(ctx, client, sc, &o)
+			warm(ctx, client, sc, &o, tracker)
 		}
-		results = append(results, measure(ctx, client, sc, &o))
+		results = append(results, measure(ctx, client, sc, &o, tracker))
 	}
 
 	printTable(stdout, results)
@@ -277,7 +317,7 @@ func selectScenarios(o *options, all []scenario) []scenario {
 	return out
 }
 
-func warm(ctx context.Context, client *http.Client, sc scenario, o *options) {
+func warm(ctx context.Context, client *http.Client, sc scenario, o *options, tracker *instanceTracker) {
 	wctx, cancel := context.WithTimeout(ctx, o.warmup)
 	defer cancel()
 	var pacing time.Duration
@@ -298,7 +338,7 @@ func warm(ctx context.Context, client *http.Client, sc scenario, o *options) {
 			}
 			for wctx.Err() == nil {
 				started := time.Now()
-				_ = do(wctx, client, sc, o)
+				_ = do(wctx, client, sc, o, tracker)
 				if pacing > 0 {
 					if wait := pacing - time.Since(started); wait > 0 {
 						select {
@@ -314,7 +354,7 @@ func warm(ctx context.Context, client *http.Client, sc scenario, o *options) {
 	wg.Wait()
 }
 
-func measure(ctx context.Context, client *http.Client, sc scenario, o *options) stats {
+func measure(ctx context.Context, client *http.Client, sc scenario, o *options, tracker *instanceTracker) stats {
 	mctx, cancel := context.WithTimeout(ctx, o.duration)
 	defer cancel()
 	start := time.Now()
@@ -340,7 +380,7 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options) 
 			}
 			for mctx.Err() == nil {
 				started := time.Now()
-				s := do(mctx, client, sc, o)
+				s := do(mctx, client, sc, o, tracker)
 				// Requests interrupted by the measurement deadline are not
 				// server errors; drop them instead of poisoning the tail.
 				if mctx.Err() != nil {
@@ -366,6 +406,9 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options) 
 
 	st := stats{Name: sc.name, StatusCodes: map[int]int{}, ElapsedMS: elapsed.Milliseconds()}
 	durs := make([]time.Duration, 0, len(samples))
+	serverDurs := make([]time.Duration, 0, len(samples))
+	coldDurs := make([]time.Duration, 0, len(samples))
+	warmDurs := make([]time.Duration, 0, len(samples))
 	for _, s := range samples {
 		st.Requests++
 		st.StatusCodes[s.status]++
@@ -374,10 +417,23 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options) 
 			continue
 		}
 		durs = append(durs, s.dur)
+		if s.serverMs > 0 {
+			serverDurs = append(serverDurs, time.Duration(s.serverMs*float64(time.Millisecond)))
+		}
+		if s.instance != "" {
+			if s.cold {
+				st.ColdRequests++
+				coldDurs = append(coldDurs, s.dur)
+			} else {
+				st.WarmRequests++
+				warmDurs = append(warmDurs, s.dur)
+			}
+		}
 	}
 	if elapsed > 0 {
 		st.RPS = float64(st.Requests) / elapsed.Seconds()
 	}
+	st.Instances = tracker.count()
 	if len(durs) > 0 {
 		sort.Slice(durs, func(i, j int) bool { return durs[i] < durs[j] })
 		st.P50Ms = ms(percentile(durs, 0.50))
@@ -387,10 +443,24 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options) 
 		st.MinMs = ms(durs[0])
 		st.MaxMs = ms(durs[len(durs)-1])
 	}
+	if len(serverDurs) > 0 {
+		sort.Slice(serverDurs, func(i, j int) bool { return serverDurs[i] < serverDurs[j] })
+		st.ServerP50Ms = ms(percentile(serverDurs, 0.50))
+		st.ServerP95Ms = ms(percentile(serverDurs, 0.95))
+		st.ServerP99Ms = ms(percentile(serverDurs, 0.99))
+	}
+	if len(coldDurs) > 0 {
+		sort.Slice(coldDurs, func(i, j int) bool { return coldDurs[i] < coldDurs[j] })
+		st.ColdP95Ms = ms(percentile(coldDurs, 0.95))
+	}
+	if len(warmDurs) > 0 {
+		sort.Slice(warmDurs, func(i, j int) bool { return warmDurs[i] < warmDurs[j] })
+		st.WarmP95Ms = ms(percentile(warmDurs, 0.95))
+	}
 	return st
 }
 
-func do(ctx context.Context, client *http.Client, sc scenario, o *options) sample {
+func do(ctx context.Context, client *http.Client, sc scenario, o *options, tracker *instanceTracker) sample {
 	start := time.Now()
 	body := []byte(nil)
 	if sc.body != nil {
@@ -407,6 +477,9 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options) sampl
 	if err != nil {
 		return sample{dur: time.Since(start), err: true}
 	}
+	instance := resp.Header.Get("X-Instance-Id")
+	serverMs := parseServerTiming(resp.Header.Get("Server-Timing"))
+	cold := tracker.observe(instance)
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
 	if sc.createPath != "" && resp.StatusCode == http.StatusCreated {
@@ -421,17 +494,31 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options) sampl
 				}
 				dresp, derr := client.Do(dr)
 				if derr != nil {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold}
 				}
 				_, _ = io.Copy(io.Discard, io.LimitReader(dresp.Body, 1<<20))
 				dresp.Body.Close()
 				if dresp.StatusCode != http.StatusOK && dresp.StatusCode != http.StatusNoContent {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold}
 				}
 			}
 		}
 	}
-	return sample{dur: time.Since(start), status: resp.StatusCode}
+	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, instance: instance, cold: cold}
+}
+
+func parseServerTiming(header string) float64 {
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "app;dur=") {
+			continue
+		}
+		var ms float64
+		if _, err := fmt.Sscanf(strings.TrimPrefix(part, "app;dur="), "%f", &ms); err == nil {
+			return ms
+		}
+	}
+	return 0
 }
 
 func login(ctx context.Context, client *http.Client, o *options) (string, error) {
@@ -481,10 +568,12 @@ func ms(d time.Duration) float64 {
 }
 
 func printTable(w io.Writer, results []stats) {
-	fmt.Fprintf(w, "%-26s %8s %8s %8s %8s %8s %8s\n", "scenario", "req", "err", "rps", "p50ms", "p95ms", "p99ms")
+	fmt.Fprintf(w, "%-26s %8s %8s %8s %8s %8s %8s %8s %6s %8s %8s\n",
+		"scenario", "req", "err", "rps", "p50ms", "p95ms", "p99ms", "srv95", "inst", "cold95", "warm95")
 	for _, r := range results {
-		fmt.Fprintf(w, "%-26s %8d %8d %8.1f %8.2f %8.2f %8.2f\n",
-			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P95Ms, r.P99Ms)
+		fmt.Fprintf(w, "%-26s %8d %8d %8.1f %8.2f %8.2f %8.2f %8.2f %6d %8.2f %8.2f\n",
+			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P95Ms, r.P99Ms,
+			r.ServerP95Ms, r.Instances, r.ColdP95Ms, r.WarmP95Ms)
 	}
 }
 
@@ -498,11 +587,12 @@ func writeJSON(path string, results []stats) error {
 
 func writeMarkdown(path string, results []stats) error {
 	var b strings.Builder
-	b.WriteString("| scenario | requests | errors | rps | p50 ms | p90 ms | p95 ms | p99 ms |\n")
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|\n")
+	b.WriteString("| scenario | requests | errors | rps | p50 ms | p90 ms | p95 ms | p99 ms | server p95 | instances | cold p95 | warm p95 |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, r := range results {
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f | %.2f | %.2f | %.2f | %.2f |\n",
-			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P90Ms, r.P95Ms, r.P99Ms)
+		fmt.Fprintf(&b, "| %s | %d | %d | %.1f | %.2f | %.2f | %.2f | %.2f | %.2f | %d | %.2f | %.2f |\n",
+			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P90Ms, r.P95Ms, r.P99Ms,
+			r.ServerP95Ms, r.Instances, r.ColdP95Ms, r.WarmP95Ms)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

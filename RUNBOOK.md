@@ -461,6 +461,17 @@ It promotes the previous READY deployment, checks `/healthz` and smoke,
 restores the original deployment, and verifies again. It requires the
 `production` environment and `VERCEL_TOKEN`/`VERCEL_PROJECT_ID`.
 
+Run the staged-deployment cleanup drill after changing the failure path:
+
+```bash
+gh workflow run cleanup-drill.yml --ref main -f confirm=CLEANUP-DRILL
+```
+
+It builds a production-target deployment without aliasing it, smokes it,
+deletes it through `DELETE /v13/deployments/{id}`, and requires a subsequent
+GET to return 404. A failure leaves the deployment unaliased and the workflow
+tries the cleanup again.
+
 `go run ./cmd/migrate` applies:
 1. platform migrations in `internal/db/migrations/` (public schema), then
 2. each project's `projects/<slug>/migrations/*.sql` (its own schema).
@@ -642,6 +653,11 @@ the Pacific to `sin1`; it is a gross-regression guard, not the absolute
 same-region SLO measurement. A violation opens or updates the `[perf-alert]`
 issue. Staff/admin/agent production workloads still require credentials and
 are measured by the local harness.
+
+Every response carries `X-Instance-Id` (process-boot identity) and
+`Server-Timing: app;dur=<ms>` (application time to first response byte).
+`cmd/bench` records network time, server time, and first-seen-instance cold
+vs warm p95 separately; this is how the production tail is classified.
 
 ---
 
