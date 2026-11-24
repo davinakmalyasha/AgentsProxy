@@ -66,8 +66,12 @@ workflow, which:
    so the alias does not move yet;
 3. runs `cmd/smoke` against the staged URL (version, Centrum public reads,
    unauthenticated records 401, CORS preflight, retired alias 404);
-4. promotes the staged deployment and runs the same smoke on the production
-   alias; a post-promotion failure rolls back.
+4. promotes the staged deployment with the Vercel REST API
+   (`POST /v10/projects/{projectId}/promote/{deploymentId}`) and runs the
+   same smoke on the production alias; a post-promotion failure promotes the
+   captured previous deployment back. The API is used instead of
+   `vercel promote` because CLI 66.6.0's scoped-token preflight fails with
+   `User not found` even when the project token can build and stage.
 
 ```bash
 gh workflow run deploy.yml --ref main
