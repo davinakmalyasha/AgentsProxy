@@ -8,8 +8,7 @@ production handles the same concurrency.
 
 - Production commit under measurement:
   `68c19969991ce4e009ba6071ade56a0948e6e054`. The deploy-gate code was
-  promoted later as `dbf8225`; it changes boot audit/deployment plumbing, not
-  the measured request paths.
+  promoted later; the current post-gate spot check is on `8f511ef`.
 - Local code: the exit-gate branch working tree (validator, boot audit,
   smoke, fresh-DB runner, benchmark harness)
 - Baseline date: 2026-11-24 (Asia/Jakarta)
@@ -152,6 +151,27 @@ Redis during the full run: 34,826 hits / 418 misses = 98.8% hit ratio;
 - A blended cold+warm SLO: insufficient production samples.
 - A production load test above 0.2 RPS per endpoint: the per-IP limiter
   returns 429 above the safe probe rate. Do not bypass it for a benchmark.
+
+## Post-gate production spot check
+
+After the exit-gate deploy (`8f511ef`), a 240-second, 0.2 RPS probe from the
+same workstation produced 48 samples per endpoint:
+
+| Scenario | p50 | p95 | p99 | Errors |
+|---|---:|---:|---:|---:|
+| health | 101.4 ms | 1137.6 ms | 5943.7 ms | 0 |
+| public-facilities | 102.6 ms | 230.7 ms | 373.1 ms | 0 |
+| public-availability | 104.3 ms | 220.2 ms | 263.9 ms | 0 |
+| public-pricing | 136.4 ms | 575.9 ms | 1470.8 ms | 0 |
+
+The medians are stable and close to the pre-gate baseline, but the tails
+contain multi-second outliers. A separate 20-probe health run and the US
+`perf-guard` run did not reproduce those outliers, so this is not yet
+attributable to a code regression; it can be client/network jitter, a cold
+start, or edge-instance variance. The absolute p95 SLOs should therefore be
+treated as **unverified**, not passed, until the probe can separate server
+time from network time and identify cold instances. The median path is
+healthy; the tail is the next measurement problem.
 
 ## Continuous guard
 
