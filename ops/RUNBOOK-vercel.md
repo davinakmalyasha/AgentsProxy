@@ -92,10 +92,11 @@ migration, verifies the ledger is clean, then prints both ledgers. Never run
 `cmd/migrate` from a laptop against production; the local `.env` has no remote
 credentials and `ENV=development` refuses them.
 
-Required deploy configuration: `VERCEL_TOKEN` and
-`PROD_DATABASE_ADMIN_URL` as `production` environment secrets;
-`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF` as variables. If the
-staged deployment URL is protected, add `VERCEL_AUTOMATION_BYPASS_SECRET`.
+Required deploy configuration: `VERCEL_TOKEN` (project-scoped is enough
+because promotion uses the REST API), `PROD_DATABASE_ADMIN_URL`, and
+`VERCEL_AUTOMATION_BYPASS_SECRET` as `production` environment secrets;
+`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF` as variables. The
+bypass secret is required while deployment protection covers staged URLs.
 
 A dashboard redeploy bypasses the gate. Use it only as break-glass, after
 running `cmd/migrate check` against production.

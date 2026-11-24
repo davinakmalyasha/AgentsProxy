@@ -6,8 +6,10 @@ deployed commit. The full-workload numbers are a local run of the same HTTP
 router and handlers against a fresh seeded database. They are not a claim that
 production handles the same concurrency.
 
-- Production commit: `68c19969991ce4e009ba6071ade56a0948e6e054`
-  (`https://agents-proxy-nine.vercel.app`)
+- Production commit under measurement:
+  `68c19969991ce4e009ba6071ade56a0948e6e054`. The deploy-gate code was
+  promoted later as `dbf8225`; it changes boot audit/deployment plumbing, not
+  the measured request paths.
 - Local code: the exit-gate branch working tree (validator, boot audit,
   smoke, fresh-DB runner, benchmark harness)
 - Baseline date: 2026-11-24 (Asia/Jakarta)
