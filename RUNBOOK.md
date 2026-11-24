@@ -421,13 +421,14 @@ condition are the gate.
 
 Required GitHub configuration:
 
-* Environment `production` secret: `VERCEL_TOKEN`.
+* Environment `production` secret: `VERCEL_TOKEN` (project-scoped is enough
+  because promotion uses the REST API).
 * Environment `production` secret: `PROD_DATABASE_ADMIN_URL` (shared with
   `db-migrate` and `schema-check`).
+* Environment `production` secret: `VERCEL_AUTOMATION_BYPASS_SECRET` — required
+  here because deployment protection blocks the staged URL.
 * Repository/environment variables: `VERCEL_ORG_ID`,
   `VERCEL_PROJECT_ID`, `PROD_DB_REF`.
-* Optional secret: `VERCEL_AUTOMATION_BYPASS_SECRET` when Vercel deployment
-  protection blocks the staged deployment URL.
 
 A manual Vercel dashboard redeploy bypasses this workflow. Treat it as
 break-glass only: run `go run ./cmd/migrate check` against production first,

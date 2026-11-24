@@ -173,14 +173,14 @@ external decision pending · `[ ]` open · `[-]` accepted residual, documented.
   `UpdateProject`.
 - [x] **A-9 Public health detail.** `/healthz` reports only an aggregate
   fence count; tenant slugs and internal reasons stay on the admin endpoint.
-- [~] **A-10 Deploy-order hard gate.** `deploy.yml` runs `cmd/migrate check`
+- [x] **A-10 Deploy-order hard gate.** `deploy.yml` runs `cmd/migrate check`
   against production before building, stages a production Vercel deployment
-  with `--skip-domain`, runs `cmd/smoke` on the staged URL, promotes it, and
-  runs the same contract on the alias. A post-promotion failure rolls back.
+  with `--skip-domain`, runs `cmd/smoke` on the staged URL, promotes it via
+  the project-scoped Vercel REST API, and runs the same contract on the alias.
+  A post-promotion failure promotes the captured previous deployment back.
   Vercel Git auto-deploy for `main` is disabled in `vercel.json`; PR previews
-  remain automatic. The deploy workflow never applies DDL. **Implementation
-  and local contract checks pass; live rollout is pending the production
-  environment secrets listed in `RUNBOOK.md`.**
+  remain automatic. The deploy workflow never applies DDL. **Live rollout
+  verified on `dbf8225` (deploy run 45439936391).**
 - [x] **A-11 Shared entitlement validator + boot audit.** `cmd/migrate`,
   boot, and `tenant-reload` use `features.ValidateClientEntitlement`. Boot
   fences active project tenants with empty/unknown/vertical-mismatched
@@ -346,10 +346,26 @@ architecture work above.
     start remains unmeasured and is called out in the baseline report.
   - YAML parse of `deploy.yml`, `smoke.yml`, `ci.yml`, and `schema-check.yml`
     — pass; `bash -n scripts/test-local.sh scripts/bench.sh` — pass.
-- Production/staging rollout of A-10 and A-13 is pending: it requires
-  `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and the production
-  environment secrets described in `RUNBOOK.md`. The workflows are committed
-  but not yet exercised against the live alias.
+- Production gate rollout and verification (2026-11-24):
+  - `schema-check` run 45362695377 — `migrations clean`.
+  - CI/security PRs #87, #88, #89 merged. The first gate runs proved
+    `migrate check`, build, staging, the Deployment Protection bypass, and
+    `cmd/smoke` on the staged URL. They stopped at promote because Vercel CLI
+    66.6.0 rejects scoped tokens during its `/v2/user` preflight
+    (`User not found`).
+  - The gate now uses the project-scoped Vercel REST API for promote,
+    rollback, and staged-deployment cleanup. Deploy run 45439936391 passed
+    `migrate check` → stage → smoke → API promote → production smoke.
+  - Production is on `dbf8225`; `/healthz` reports
+    `status=ok db=true redis=true` and the matching version. `cmd/smoke`
+    passes health, Centrum facilities/availability/pricing, records 401,
+    legacy-alias 404, and CORS preflight.
+  - Independent `smoke` workflow run 45440953568 was re-run successfully
+    after a manual backup (run 45441755905); the earlier failure was the
+    backup-freshness check, not the deploy contract.
+- Production/staging rollout of A-10 and A-13 is complete for production.
+  The production token remains project-scoped; team/full-account scope is not
+  required because promotion uses the REST API.
 - Production health on `f52cc76`: `status=ok`, `db=true`, `redis=true`;
   `/v1/sports/facilities` 404, `/v1/p/centrum/facilities` 200; Centrum and
   DFD frontends healthy.
@@ -367,10 +383,10 @@ architecture work above.
 - Vercel Production was checked (names only): `BACKGROUND_TICKERS`,
   `DB_USE_SIMPLE_PROTOCOL`, `DB_POOL_MIN`, `DB_POOL_MAX`, and
   `EXPECTED_DB_REF` are present and match the new server-side validation.
-- The hard deploy gate is implemented but not yet live until this branch is
-  merged and the `production` environment has `VERCEL_TOKEN`,
-  `PROD_DATABASE_ADMIN_URL`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and
-  `PROD_DB_REF`. Until then, Vercel auto-deploy remains the only path.
+- The hard deploy gate is live on `main`; production is on `dbf8225` after a
+  successful gate run. The `production` environment has `VERCEL_TOKEN`,
+  `PROD_DATABASE_ADMIN_URL`, `VERCEL_AUTOMATION_BYPASS_SECRET`,
+  `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, and `PROD_DB_REF`.
 - A manual Vercel dashboard redeploy bypasses `deploy.yml`; the runbook marks
   it break-glass and requires `cmd/migrate check` first.
 - The performance baseline is local + read-only production probes. It does
