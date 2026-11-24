@@ -399,13 +399,19 @@ after a successful CI run on `main`:
 3. `cmd/smoke` against the staged URL: exact version match, Centrum public
    facilities/availability/pricing, unauthenticated records 401, CORS
    preflight, and the retired `/v1/sports` alias 404.
-4. `vercel promote` moves the alias; `cmd/smoke` runs again on the production
-   alias. The workflow captures the currently aliased deployment first; a
-   failure after promotion runs `vercel rollback <previous-deployment>` and
-   verifies the old version serves.
+4. The Vercel REST API promotes the staged deployment
+   (`POST /v10/projects/{projectId}/promote/{deploymentId}`);
+   `cmd/smoke` runs again on the production alias. The workflow captures the
+   currently aliased deployment first; a failure after promotion promotes that
+   previous deployment back with the same API and verifies the old version
+   serves.
 
-The Vercel CLI is pinned to `66.6.0` in the workflow so the staged-URL and
-rollback flags cannot change under the release gate.
+The Vercel CLI is pinned to `66.6.0` for pull/build/deploy. Promotion and
+rollback use the REST API on purpose: CLI 66.6.0's scoped-token preflight
+calls the user endpoint and fails with `User not found`, even when the
+project-scoped token can build and stage the project. The API endpoint is
+project-scoped and accepts the same token. If a future CLI fixes scoped-token
+preflight, the API path is still the smaller surface and should stay.
 
 The workflow never applies DDL. Merge a migration-only PR, run
 `db-migrate` with `apply`, then merge the code. A code deploy whose target
