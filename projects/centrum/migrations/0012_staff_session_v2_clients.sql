@@ -22,7 +22,7 @@ BEGIN
     -- Keep the capability column-scoped even when a platform repair migration
     -- (092) granted table SELECT before this project chain ran.
     REVOKE SELECT ON public.clients FROM auth_definer;
-    GRANT SELECT (id, db_schema, status, vertical, features)
+    GRANT SELECT (id, tenant_id, db_schema, status, vertical, features)
       ON public.clients TO auth_definer;
   END IF;
 END $$;
