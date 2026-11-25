@@ -44,20 +44,25 @@ func TestContractLegacyObjectsAreGone(t *testing.T) {
 			noLogin, noCreate, noSession, noPayments, noMoney, noRole, projectMoney)
 	}
 
-	// The retired scanner needed project-table and clients.db_schema access.
-	// The new session function needs only tenant_id and status.
-	var projectSelect, dbSchema, tenantSelect, statusSelect bool
+	// The retired scanner needed project-table access. The current session
+	// resolver needs only client routing/entitlement columns: id, db_schema,
+	// status, vertical, features. Token/quota/PII columns stay out of the
+	// definer capability, and project tables remain unreachable.
+	var projectSelect, dbSchema, tenantSelect, statusSelect, verticalSelect, featuresSelect, tokenSelect bool
 	if err := pool.QueryRow(ctx, `
 		SELECT has_table_privilege('auth_definer','project_centrum.sports_users','SELECT'),
 		       has_column_privilege('auth_definer','public.clients','db_schema','SELECT'),
 		       has_column_privilege('auth_definer','public.clients','tenant_id','SELECT'),
-		       has_column_privilege('auth_definer','public.clients','status','SELECT')
-	`).Scan(&projectSelect, &dbSchema, &tenantSelect, &statusSelect); err != nil {
+		       has_column_privilege('auth_definer','public.clients','status','SELECT'),
+		       has_column_privilege('auth_definer','public.clients','vertical','SELECT'),
+		       has_column_privilege('auth_definer','public.clients','features','SELECT'),
+		       has_column_privilege('auth_definer','public.clients','token_hash','SELECT')
+	`).Scan(&projectSelect, &dbSchema, &tenantSelect, &statusSelect, &verticalSelect, &featuresSelect, &tokenSelect); err != nil {
 		t.Fatal(err)
 	}
-	if projectSelect || dbSchema || !tenantSelect || !statusSelect {
-		t.Fatalf("auth_definer grants project=%v db_schema=%v tenant=%v status=%v",
-			projectSelect, dbSchema, tenantSelect, statusSelect)
+	if projectSelect || !dbSchema || !tenantSelect || !statusSelect || !verticalSelect || !featuresSelect || tokenSelect {
+		t.Fatalf("auth_definer grants project=%v db_schema=%v tenant=%v status=%v vertical=%v features=%v token=%v",
+			projectSelect, dbSchema, tenantSelect, statusSelect, verticalSelect, featuresSelect, tokenSelect)
 	}
 
 	var runtimeCreate, runtimeResolve bool
