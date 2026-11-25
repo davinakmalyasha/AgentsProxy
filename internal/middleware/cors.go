@@ -21,7 +21,6 @@ func CORSResolving(staticExtra []string, res *DBResolver) func(http.Handler) htt
 			origin := r.Header.Get("Origin")
 			if origin != "" && res.Allowed(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
 			}
 			staticH.ServeHTTP(w, r)
 		})
@@ -50,10 +49,16 @@ func CORS(allowOrigins []string) func(http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			if wildcard {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
-			} else if origin != "" {
-				if _, ok := allowed[origin]; ok {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					w.Header().Set("Vary", "Origin")
+			} else {
+				// Always advertise the dimension, even for a request with
+				// no Origin or a disallowed one. Otherwise a shared cache
+				// can store a no-ACAO response and replay it to an allowed
+				// origin, or vice versa.
+				addVary(w.Header(), "Origin")
+				if origin != "" {
+					if _, ok := allowed[origin]; ok {
+						w.Header().Set("Access-Control-Allow-Origin", origin)
+					}
 				}
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")

@@ -80,27 +80,44 @@ func (a *Auth) RegisterUser(ctx context.Context, tenantID string, in RegisterInp
 
 // UserByToken resolves a session token to a user, checking expiry and asking
 // the tenant's project provider for the live profile. A missing user,
-// inactive user, unknown tenant, or missing provider all become pgx.ErrNoRows
-// so the caller's existing 401/public-read fallback stays intact.
+// inactive user, unknown tenant, paused tenant, or missing provider all become
+// pgx.ErrNoRows so the caller's existing 401/public-read fallback stays
+// intact.
+//
+// Migration 090 resolves the session, its clients row, and the once-a-minute
+// last_seen_at touch in one statement. The project provider then reads only
+// its own user table through the schema that statement just validated. Role
+// and is_active are still live on every request: there is deliberately no
+// cached profile here.
 func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 	hash := HashToken(tok)
 
-	var userID, tenantID string
+	var userID, tenantID, clientID, schema, status, vertical string
+	var features []string
 	err := a.Pool.QueryRow(ctx,
-		`SELECT user_id::text, tenant_id
-		   FROM private.staff_session_resolve($1)`, hash).
-		Scan(&userID, &tenantID)
+		`SELECT user_id::text, tenant_id, client_id::text, db_schema, status, vertical, features
+		   FROM private.staff_session_resolve_v2($1)`, hash).
+		Scan(&userID, &tenantID, &clientID, &schema, &status, &vertical, &features)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, pgx.ErrNoRows
 	}
 	if err != nil {
 		return nil, err
 	}
+	if status != "active" {
+		return nil, pgx.ErrNoRows
+	}
+
 	p := a.providerFor(tenantID)
 	if p == nil {
 		return nil, pgx.ErrNoRows
 	}
-	u, err := p.Profile(ctx, tenantID, userID)
+	var u User
+	if sap, ok := p.(SchemaAwareProvider); ok && schema != "" {
+		u, err = sap.ProfileInSchema(ctx, tenantID, userID, schema)
+	} else {
+		u, err = p.Profile(ctx, tenantID, userID)
+	}
 	if errors.Is(err, ErrInvalidCredentials) {
 		return nil, pgx.ErrNoRows
 	}
@@ -108,11 +125,9 @@ func (a *Auth) UserByToken(ctx context.Context, tok string) (*User, error) {
 		return nil, err
 	}
 	u.TenantID = tenantID
-
-	// Bump last_seen at most ~once a minute per session: a busy staff
-	// dashboard fires many authed requests and an unconditional UPDATE here
-	// would take a write lock on the session row every time.
-	_, _ = a.Pool.Exec(ctx,
-		`SELECT private.touch_session($1, now() - interval '1 minute')`, hash)
+	u.ClientID = clientID
+	u.DBSchema = schema
+	u.Vertical = vertical
+	u.Features = features
 	return &u, nil
 }

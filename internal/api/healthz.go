@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,15 +35,19 @@ func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	resp := healthzResponse{Status: "ok", Version: h.Build}
-	dbOK := false
-	if err := h.DB.Ping(ctx); err == nil {
-		dbOK = true
-	}
+	var dbOK, rdsOK bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		dbOK = h.DB.Ping(ctx) == nil
+	}()
+	go func() {
+		defer wg.Done()
+		rdsOK = h.RDB.Ping(ctx).Err() == nil
+	}()
+	wg.Wait()
 	resp.DB = dbOK
-	rdsOK := false
-	if err := h.RDB.Ping(ctx).Err(); err == nil {
-		rdsOK = true
-	}
 	resp.Redis = rdsOK
 	if !dbOK || !rdsOK {
 		resp.Status = "degraded"

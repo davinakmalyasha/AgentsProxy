@@ -38,6 +38,7 @@ jobs:
             -base-url "$PROD_URL" \
             -scenarios health,public-facilities,public-availability,public-pricing \
             -concurrency 1 -rps 0.2 -duration 120s -warmup 5s \
+            -cache-bust \
             -json perf.json
       - name: assert frozen public SLOs
         run: |

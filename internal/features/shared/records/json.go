@@ -3,6 +3,7 @@ package records
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -18,6 +19,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// MarkPublicCache marks a successful landing-page read as shareable at the
+// CDN for maxAge seconds. It deliberately does not touch Cache-Control:
+// SecurityHeaders keeps browser/proxy caching at no-store, while Vercel's
+// CDN honors the more specific header. Only public GET 200 responses may
+// call this; authenticated responses must never carry it.
+func MarkPublicCache(w http.ResponseWriter, maxAge, staleWhileRevalidate int) {
+	if maxAge <= 0 {
+		return
+	}
+	if staleWhileRevalidate < maxAge {
+		staleWhileRevalidate = maxAge
+	}
+	value := fmt.Sprintf("public, s-maxage=%d, stale-while-revalidate=%d", maxAge, staleWhileRevalidate)
+	h := w.Header()
+	h.Set("Vercel-CDN-Cache-Control", value)
+	h.Set("CDN-Cache-Control", value)
 }
 
 // emptyPayloadJSON is the shared empty-object payload. List handlers

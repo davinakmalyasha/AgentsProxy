@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -245,7 +246,7 @@ func main() {
 	// by cmd/migrate check before promotion; a manual edit afterward is
 	// caught here. One bad tenant is fenced, not fatal: healthy tenants keep
 	// serving and the admin tenant-health surface names the reason.
-	entitlementBad, err := features.AuditProjectEntitlements(bootCtx, adminPool, projects, badTenants)
+	entitlementBad, err := features.AuditProjectEntitlements(bootCtx, pool, projects, badTenants)
 	if err != nil {
 		slog.Error("tenant entitlement audit failed", "err", err)
 		os.Exit(1)
@@ -268,7 +269,7 @@ func main() {
 	// honors it too. Boot-derived fences are reconciled, not accumulated: a
 	// tenant whose data was repaired is released on the next deploy, while
 	// rows written by an operator or a reload failure stay visible.
-	reconcileQuarantine(bootCtx, adminPool, fences)
+	reconcileQuarantine(bootCtx, pool, fences)
 	names := make([]string, 0, len(projects))
 	for slug, p := range projects {
 		names = append(names, slug+" ("+p.Display+")")
@@ -504,7 +505,7 @@ func main() {
 }
 
 // reconcileQuarantine syncs the in-memory registry with the durable
-// tenant_quarantine table (admin pool):
+// tenant_quarantine table through one runtime-pool RPC (migration 091):
 //   - rows fenced at this boot are written, so the Supabase driver honors
 //     them and a restart does not silently unfence;
 //   - stale boot/reload-derived rows are deleted when the current manifest
@@ -512,30 +513,26 @@ func main() {
 //   - all remaining rows (operator fences, other processes) are loaded into
 //     this process's registry.
 //
-// A boot failure here is fatal: silent divergence between the registry
-// and the table would fence tenants for one driver but not the other.
-func reconcileQuarantine(ctx context.Context, adminPool *pgxpool.Pool, fences map[string]string) {
-	slugs := make([]string, 0, len(fences))
-	for slug, reason := range fences {
-		slugs = append(slugs, slug)
-		if _, err := adminPool.Exec(ctx,
-			`INSERT INTO tenant_quarantine (tenant_id, reason) VALUES ($1, $2)
-			 ON CONFLICT (tenant_id) DO UPDATE SET reason = EXCLUDED.reason, quarantined_at = now()`,
-			slug, reason); err != nil {
-			slog.Error("quarantine persist failed", "tenant", slug, "err", err)
-			os.Exit(1)
-		}
+// A boot failure here is fatal: silent divergence between the registry and
+// the table would fence tenants for one driver but not the other.
+//
+// Using the runtime pool means a serverless cold start never opens the
+// direct-5432 admin pool just to reconcile fences; that pool stays lazy
+// unless an admin request or a long-lived-host worker actually needs it.
+func reconcileQuarantine(ctx context.Context, pool *pgxpool.Pool, fences map[string]string) {
+	if fences == nil {
+		fences = map[string]string{}
 	}
-	if _, err := adminPool.Exec(ctx,
-		`DELETE FROM tenant_quarantine
-		  WHERE (reason LIKE 'boot:%' OR reason LIKE 'reload:%')
-		    AND NOT (tenant_id = ANY($1::text[]))`, slugs); err != nil {
-		slog.Error("quarantine stale cleanup failed", "err", err)
+	payload, err := json.Marshal(fences)
+	if err != nil {
+		slog.Error("quarantine payload marshal failed", "err", err)
 		os.Exit(1)
 	}
-	rows, err := adminPool.Query(ctx, `SELECT tenant_id, reason FROM tenant_quarantine`)
+	rows, err := pool.Query(ctx,
+		`SELECT tenant_id, reason FROM private.sync_tenant_quarantine($1::jsonb)`,
+		string(payload))
 	if err != nil {
-		slog.Error("quarantine load failed", "err", err)
+		slog.Error("quarantine sync failed", "err", err)
 		os.Exit(1)
 	}
 	defer rows.Close()

@@ -57,6 +57,10 @@ trap cleanup EXIT INT TERM
 if [ -n "${BENCH_BASE_URL:-}" ]; then
     SCENARIOS="${BENCH_SCENARIOS:-health,public-facilities,public-availability,public-pricing}"
     REMOTE_CONC="${BENCH_CONCURRENCY:-1}"
+    CACHE_BUST_FLAG=""
+    if [ "${BENCH_CACHE_BUST:-0}" = "1" ]; then
+        CACHE_BUST_FLAG="-cache-bust"
+    fi
     echo "remote benchmark: $BENCH_BASE_URL scenarios=$SCENARIOS concurrency=$REMOTE_CONC"
     set +e
     go run ./cmd/bench \
@@ -67,6 +71,7 @@ if [ -n "${BENCH_BASE_URL:-}" ]; then
         -admin-key "${BENCH_ADMIN_KEY:-}" \
         -concurrency "$REMOTE_CONC" -warmup "$WARMUP" -duration "$DURATION" \
         -rps "${BENCH_RPS:-0.5}" \
+        $CACHE_BUST_FLAG \
         -scenarios "$SCENARIOS" \
         -json "$OUT/results.json" -markdown "$OUT/results.md"
     code=$?

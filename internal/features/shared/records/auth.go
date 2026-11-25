@@ -71,6 +71,13 @@ func withClientAuth(deps Deps) func(http.Handler) http.Handler {
 // The implementation lives in internal/tenantdb so the auth provider and
 // project features use the same primitive without importing the records
 // feature package.
+//
+// The resolved identity already carries the tenant's db_schema. Passing it
+// through skips a clients lookup per request; callers without an identity
+// (agent tools, background paths) fall back to the cached lookup in WithTx.
 func withTenantTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
+	if id := clientctx.From(ctx); id != nil && id.TenantID() == tenantID && id.DBSchema != "" {
+		return tenantdb.WithTxSchema(ctx, pool, tenantID, id.DBSchema, fn)
+	}
 	return tenantdb.WithTx(ctx, pool, tenantID, fn)
 }

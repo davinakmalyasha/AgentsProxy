@@ -659,6 +659,13 @@ Every response carries `X-Instance-Id` (process-boot identity) and
 `cmd/bench` records network time, server time, and first-seen-instance cold
 vs warm p95 separately; this is how the production tail is classified.
 
+Public facilities/pricing GETs are edge-cacheable for 10 seconds and
+availability for 2 seconds via `Vercel-CDN-Cache-Control`; browser caching
+stays `no-store`. Only the unauthenticated public identity sets those
+headers. Use `cmd/bench -cache-bust` (or `BENCH_CACHE_BUST=1`) when measuring
+the origin, and leave it off when measuring the edge. `x-vercel-cache: HIT`
+samples are reported separately and excluded from cold/warm origin stats.
+
 ---
 
 ## 10. Performance & Capacity

@@ -27,8 +27,10 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +50,7 @@ type options struct {
 	mdPath     string
 	timeout    time.Duration
 	rps        float64
+	cacheBust  bool
 }
 
 type sample struct {
@@ -57,7 +60,10 @@ type sample struct {
 	serverMs float64
 	instance string
 	cold     bool
+	cache    string
 }
+
+var cacheBustSeq atomic.Uint64
 
 type instanceTracker struct {
 	mu   sync.Mutex
@@ -106,6 +112,9 @@ type stats struct {
 	ColdP95Ms    float64     `json:"cold_p95_ms,omitempty"`
 	WarmRequests int         `json:"warm_requests,omitempty"`
 	WarmP95Ms    float64     `json:"warm_p95_ms,omitempty"`
+	CacheHits    int         `json:"cache_hits,omitempty"`
+	OriginReqs   int         `json:"origin_requests,omitempty"`
+	OriginP95Ms  float64     `json:"origin_p95_ms,omitempty"`
 	StatusCodes  map[int]int `json:"status_codes"`
 	ElapsedMS    int64       `json:"elapsed_ms"`
 	Notes        []string    `json:"notes,omitempty"`
@@ -134,6 +143,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.mdPath, "markdown", "", "write a Markdown table to this path")
 	fs.DurationVar(&o.timeout, "timeout", 60*time.Second, "per-request timeout")
 	fs.Float64Var(&o.rps, "rps", 0, "total target requests/second across workers (0 = closed-loop saturation)")
+	fs.BoolVar(&o.cacheBust, "cache-bust", false, "append a unique query parameter to GETs so CDN cache hits are avoided (origin measurement)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -409,6 +419,7 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 	serverDurs := make([]time.Duration, 0, len(samples))
 	coldDurs := make([]time.Duration, 0, len(samples))
 	warmDurs := make([]time.Duration, 0, len(samples))
+	originDurs := make([]time.Duration, 0, len(samples))
 	for _, s := range samples {
 		st.Requests++
 		st.StatusCodes[s.status]++
@@ -417,6 +428,12 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 			continue
 		}
 		durs = append(durs, s.dur)
+		if s.cache == "hit" {
+			st.CacheHits++
+			continue
+		}
+		st.OriginReqs++
+		originDurs = append(originDurs, s.dur)
 		if s.serverMs > 0 {
 			serverDurs = append(serverDurs, time.Duration(s.serverMs*float64(time.Millisecond)))
 		}
@@ -457,6 +474,10 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 		sort.Slice(warmDurs, func(i, j int) bool { return warmDurs[i] < warmDurs[j] })
 		st.WarmP95Ms = ms(percentile(warmDurs, 0.95))
 	}
+	if len(originDurs) > 0 {
+		sort.Slice(originDurs, func(i, j int) bool { return originDurs[i] < originDurs[j] })
+		st.OriginP95Ms = ms(percentile(originDurs, 0.95))
+	}
 	return st
 }
 
@@ -466,7 +487,15 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 	if sc.body != nil {
 		body = sc.body()
 	}
-	req, err := http.NewRequestWithContext(ctx, sc.method, o.baseURL+sc.path(), bytes.NewReader(body))
+	path := sc.path()
+	if o.cacheBust && sc.method == http.MethodGet {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		path += sep + "__bench_cb=" + strconv.FormatUint(cacheBustSeq.Add(1), 10)
+	}
+	req, err := http.NewRequestWithContext(ctx, sc.method, o.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return sample{dur: time.Since(start), err: true}
 	}
@@ -479,7 +508,11 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 	}
 	instance := resp.Header.Get("X-Instance-Id")
 	serverMs := parseServerTiming(resp.Header.Get("Server-Timing"))
-	cold := tracker.observe(instance)
+	cacheState := strings.ToLower(strings.TrimSpace(resp.Header.Get("X-Vercel-Cache")))
+	cold := false
+	if cacheState != "hit" {
+		cold = tracker.observe(instance)
+	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
 	if sc.createPath != "" && resp.StatusCode == http.StatusCreated {
@@ -494,17 +527,17 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 				}
 				dresp, derr := client.Do(dr)
 				if derr != nil {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
 				}
 				_, _ = io.Copy(io.Discard, io.LimitReader(dresp.Body, 1<<20))
 				dresp.Body.Close()
 				if dresp.StatusCode != http.StatusOK && dresp.StatusCode != http.StatusNoContent {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
 				}
 			}
 		}
 	}
-	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, instance: instance, cold: cold}
+	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
 }
 
 func parseServerTiming(header string) float64 {

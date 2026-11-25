@@ -321,6 +321,9 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if idn.IsPublic() {
+		records.MarkPublicCache(w, 10, 30)
+	}
 	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
@@ -345,6 +348,9 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rr.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	if idn.IsPublic() {
+		records.MarkPublicCache(w, 10, 30)
+	}
 	records.WriteJSON(w, http.StatusOK, rr)
 }
 
