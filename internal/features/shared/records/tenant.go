@@ -10,6 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/tenantdb"
 )
 
 // Querier is the QueryRow subset both *pgxpool.Pool and pgx.Tx satisfy.
@@ -68,15 +71,38 @@ const (
 	tenantInfoKeyPrefix  = "tinfo:v2:"
 )
 
+// tenantInfoLoads collapses concurrent cold-cache misses for one
+// (Redis client, query pool, tenant) so a public burst cannot stampede
+// Postgres when the 30s entry expires.
+var tenantInfoLoads singleflight.Group
+
 // CheckTenantInfoCached is LookupTenantInfo with a 30s Redis cache. The
 // lookup sits on the hottest anonymous path (every public read, every
 // client-chat); without this, landing traffic is a Postgres query per
 // request with a thundering herd every time a client row changes.
 func CheckTenantInfoCached(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (TenantInfo, error) {
-	var info TenantInfo
 	if tenantID == "" {
-		return info, nil
+		return TenantInfo{}, nil
 	}
+	key := fmt.Sprintf("%p|%p|%s", rdb, q, tenantID)
+	v, err, _ := tenantInfoLoads.Do(key, func() (any, error) {
+		// Detach from the first waiter's cancellation: one client hanging
+		// up must not fail every request sharing this cold miss. The
+		// lookup itself has a 2s bound; the outer bound covers the Redis
+		// read/write around it as well.
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		return checkTenantInfoCachedOnce(lctx, rdb, q, tenantID)
+	})
+	if err != nil {
+		return TenantInfo{}, err
+	}
+	info, _ := v.(TenantInfo)
+	return info, nil
+}
+
+func checkTenantInfoCachedOnce(ctx context.Context, rdb *redis.Client, q Querier, tenantID string) (TenantInfo, error) {
+	var info TenantInfo
 	if rdb != nil {
 		if b, err := rdb.Get(ctx, tenantInfoKeyPrefix+tenantID).Bytes(); err == nil {
 			if json.Unmarshal(b, &info) == nil {
@@ -106,7 +132,11 @@ func CheckTenantCached(ctx context.Context, rdb *redis.Client, q Querier, tenant
 // write (provision, patch, status change) so the 30s TTL never delays a
 // fence or a launch.
 func EvictTenantKnown(ctx context.Context, rdb *redis.Client, tenantID string) error {
-	if rdb == nil || tenantID == "" {
+	if tenantID == "" {
+		return nil
+	}
+	tenantdb.Invalidate(tenantID)
+	if rdb == nil {
 		return nil
 	}
 	return rdb.Del(ctx,

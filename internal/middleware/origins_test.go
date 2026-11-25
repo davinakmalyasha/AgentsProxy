@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,7 +129,28 @@ func TestCORSResolving_NilParity(t *testing.T) {
 			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != want {
 				t.Errorf("origin %q header = %q, want %q", origin, got, want)
 			}
+			// The dimension must be advertised even when this particular
+			// origin is denied, or a shared cache can replay a no-ACAO
+			// response to an allowed origin.
+			if got := rec.Header().Get("Vary"); !strings.Contains(got, "Origin") {
+				t.Errorf("origin %q: Vary = %q, want Origin", origin, got)
+			}
 		}
+	}
+}
+
+func TestCORS_WildcardDoesNotNeedVary(t *testing.T) {
+	h := CORS([]string{"*"})
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Origin", "https://anything.test")
+	rec := httptest.NewRecorder()
+	h(next).ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("ACAO = %q, want *", got)
+	}
+	if got := rec.Header().Get("Vary"); strings.Contains(got, "Origin") {
+		t.Fatalf("Vary = %q, a wildcard does not vary by Origin", got)
 	}
 }
 

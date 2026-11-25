@@ -83,6 +83,27 @@ func TestWithTxSetsTenantContextAndSearchPath(t *testing.T) {
 	}
 }
 
+func TestWithTxSchemaUsesResolvedSchemaWithoutLookup(t *testing.T) {
+	ctx, pool, schema, tenant := setup(t)
+	var gotSchema, gotTenant string
+	if err := tenantdb.WithTxSchema(ctx, pool, tenant, schema, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT current_schema(), current_setting('app.tenant_id')`).
+			Scan(&gotSchema, &gotTenant)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gotSchema != schema || gotTenant != tenant {
+		t.Fatalf("schema=%q tenant=%q want %q/%q", gotSchema, gotTenant, schema, tenant)
+	}
+}
+
+func TestWithTxSchemaRejectsInvalidSchema(t *testing.T) {
+	err := tenantdb.WithTxSchema(context.Background(), nil, "t", "project_centrum; drop table x", func(pgx.Tx) error { return nil })
+	if err == nil {
+		t.Fatal("invalid schema must fail before opening a transaction")
+	}
+}
+
 func TestLookupAndActiveTxFailClosed(t *testing.T) {
 	ctx, pool, schema, tenant := setup(t)
 	gotSchema, status, err := tenantdb.Lookup(ctx, pool, tenant)

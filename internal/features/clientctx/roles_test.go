@@ -63,6 +63,23 @@ func TestNilIdentity_IsNeitherOwner(t *testing.T) {
 	if id.IsStaffOwner() {
 		t.Error("nil identity must not pass IsStaffOwner")
 	}
+	if id.IsPublic() {
+		t.Error("nil identity must not pass IsPublic")
+	}
+}
+
+func TestIsPublic_OnlyLandingIdentity(t *testing.T) {
+	for role, want := range map[string]bool{
+		RolePublic: true,
+		RoleOwner:  false,
+		RoleClient: false,
+		RoleStaff:  false,
+	} {
+		id := &Identity{Role: role}
+		if got := id.IsPublic(); got != want {
+			t.Errorf("IsPublic(%s) = %v, want %v", role, got, want)
+		}
+	}
 }
 
 func TestUnknownRole_IsNeitherOwner(t *testing.T) {

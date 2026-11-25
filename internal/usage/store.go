@@ -24,6 +24,11 @@ var (
 // Record inserts a usage row (synchronous, source of truth) and
 // best-effort increments the monthly quota cache in Redis.
 //
+// The insert is one definer RPC (migration 089): the old BEGIN/set_config/
+// INSERT/COMMIT sequence was four round trips for one row. The definer is
+// owned by the role that may write usage and granted EXECUTE only to
+// app_runtime; the FK and CHECK constraints still validate every value.
+//
 // The counter write is one atomic Lua call (INCRBY + creator-set
 // EXPIREAT): the old read-the-result-then-EXPIRE split misdetected
 // creation whenever the pre-existing value happened to equal the
@@ -32,26 +37,11 @@ var (
 // month SUM on the next request.
 func Record(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID, model, kind string, tokensIn, tokensOut int) error {
 	costUSD := EstimateCost(tokensIn, tokensOut)
-	// app.client_id is the RLS check for usage_write_runtime. Set it in the
-	// same transaction as the insert so a pooled statement can never carry
-	// another client's value.
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin usage insert: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`SELECT set_config('app.client_id', $1, true)`, clientID); err != nil {
-		return fmt.Errorf("set usage client context: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO usage (client_id, tokens_in, tokens_out, cost_usd, model, kind) VALUES ($1, $2, $3, $4, $5, $6)`,
+	if _, err := db.Exec(ctx,
+		`SELECT private.record_usage($1::uuid, $2, $3, $4, $5, $6)`,
 		clientID, tokensIn, tokensOut, costUSD, model, kind,
 	); err != nil {
 		return fmt.Errorf("insert usage: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit usage insert: %w", err)
 	}
 	if rdb != nil {
 		if _, err := redisx.IncrByExpireAtRun(ctx, rdb,

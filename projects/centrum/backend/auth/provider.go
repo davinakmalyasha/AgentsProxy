@@ -97,6 +97,32 @@ func (p *Provider) Profile(ctx context.Context, tenantID, userID string) (authap
 	return u, nil
 }
 
+// ProfileInSchema is the fast path used by the platform session resolver:
+// the session statement already returned the tenant's schema and status, so
+// only the project user row is read. A deactivated/deleted user still
+// invalidates the session immediately.
+func (p *Provider) ProfileInSchema(ctx context.Context, tenantID, userID, schema string) (authapi.User, error) {
+	var u authapi.User
+	err := tenantdb.WithTxSchema(ctx, p.Pool, tenantID, schema, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT id::text, email, role, full_name, COALESCE(phone, '')
+			  FROM sports_users
+			 WHERE id = $1::uuid AND tenant_id = $2 AND is_active`,
+			userID, tenantID,
+		).Scan(&u.ID, &u.Email, &u.Role, &u.FullName, &u.Phone)
+	})
+	if errors.Is(err, pgx.ErrNoRows) ||
+		errors.Is(err, tenantdb.ErrUnknownTenant) ||
+		errors.Is(err, tenantdb.ErrInactiveTenant) {
+		return u, authapi.ErrInvalidCredentials
+	}
+	if err != nil {
+		return u, err
+	}
+	u.TenantID = tenantID
+	return u, nil
+}
+
 // Register creates a staff row for the tenant. The platform has already
 // checked the caller's owner session, normalized the email, and hashed the
 // password.

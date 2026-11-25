@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/singleflight"
 )
 
 // schemaRe matches every schema the clients table may name. It is
@@ -28,6 +30,31 @@ var (
 	ErrUnknownTenant = errors.New("tenantdb: unknown tenant")
 	// ErrInactiveTenant means the client exists but is not active.
 	ErrInactiveTenant = errors.New("tenantdb: inactive tenant")
+)
+
+// Schema routing is immutable for an existing client: provisioning picks
+// db_schema once and 079 makes it unique. Caching it is therefore safe for
+// the lifetime of this process, but a short TTL also bounds a manual repair
+// or a delete/recreate from another instance. A stale entry cannot widen
+// access: the transaction still sets app.tenant_id and RLS filters every
+// row; a stale schema only makes the query fail closed (zero rows/FK error).
+const (
+	schemaCacheTTL = 30 * time.Second
+	schemaCacheMax = 4096
+)
+
+type schemaCacheEntry struct {
+	schema  string
+	expires time.Time
+}
+
+var (
+	schemaCacheMu sync.RWMutex
+	schemaCache   = map[string]schemaCacheEntry{}
+	// singleflight keeps a cold cache from sending one clients query per
+	// concurrent request. The load is detached from the first caller's
+	// cancellation, bounded, and then shared by every waiter.
+	schemaLoads singleflight.Group
 )
 
 // WithTx opens a transaction, sets the per-statement GUC app.tenant_id, and
@@ -48,9 +75,23 @@ var (
 func WithTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
 	// Fail closed: an unknown tenant must not silently become a public
 	// transaction. Platform tenants are explicit rows with db_schema='public'.
-	schema, _, err := Lookup(ctx, pool, tenantID)
+	schema, err := lookupSchemaCached(ctx, pool, tenantID)
 	if err != nil {
 		return err
+	}
+	return WithTxSchema(ctx, pool, tenantID, schema, fn)
+}
+
+// WithTxSchema is WithTx for callers that already resolved the tenant's
+// schema from the request identity. It skips the clients round trip but
+// re-validates the schema before it reaches set_config. The tenant GUC is
+// still set, so RLS remains the enforcement boundary.
+func WithTxSchema(ctx context.Context, pool *pgxpool.Pool, tenantID, schema string, fn func(pgx.Tx) error) error {
+	if !schemaRe.MatchString(schema) {
+		return fmt.Errorf("tenantdb: invalid schema %q for tenant %q", schema, tenantID)
+	}
+	if cached, ok := cachedSchema(tenantID); !ok || cached != schema {
+		storeSchema(tenantID, schema)
 	}
 	return retryDeadlock(ctx, func() error {
 		return withSchemaTxOnce(ctx, pool, tenantID, schema, fn)
@@ -91,6 +132,87 @@ func Lookup(ctx context.Context, pool *pgxpool.Pool, tenantID string) (schema, s
 		return "", "", fmt.Errorf("tenantdb: invalid schema %q for tenant %q", schema, tenantID)
 	}
 	return schema, status, nil
+}
+
+// Invalidate drops one tenant's cached schema. Admin/provisioning writes call
+// this in the process that handled them; other instances converge within the
+// 30-second TTL.
+func Invalidate(tenantID string) {
+	if tenantID == "" {
+		return
+	}
+	schemaCacheMu.Lock()
+	delete(schemaCache, tenantID)
+	schemaCacheMu.Unlock()
+}
+
+// ResetSchemaCacheForTest clears process-wide routing state. Integration tests
+// clone schemas and sometimes reuse a tenant id; production never calls this.
+func ResetSchemaCacheForTest() {
+	schemaCacheMu.Lock()
+	schemaCache = map[string]schemaCacheEntry{}
+	schemaCacheMu.Unlock()
+	schemaLoads.Forget("")
+}
+
+func lookupSchemaCached(ctx context.Context, pool *pgxpool.Pool, tenantID string) (string, error) {
+	if schema, ok := cachedSchema(tenantID); ok {
+		return schema, nil
+	}
+	v, err, _ := schemaLoads.Do(tenantID, func() (any, error) {
+		if schema, ok := cachedSchema(tenantID); ok {
+			return schema, nil
+		}
+		// Detach from the first waiter's deadline: a cancelled request must
+		// not fail every request sharing the same cold tenant. The timeout
+		// keeps a hung database from parking the shared call forever.
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		schema, _, err := Lookup(lctx, pool, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		storeSchema(tenantID, schema)
+		return schema, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	schema, _ := v.(string)
+	if schema == "" {
+		return "", ErrUnknownTenant
+	}
+	return schema, nil
+}
+
+func cachedSchema(tenantID string) (string, bool) {
+	schemaCacheMu.RLock()
+	e, ok := schemaCache[tenantID]
+	schemaCacheMu.RUnlock()
+	if !ok || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.schema, true
+}
+
+func storeSchema(tenantID, schema string) {
+	if tenantID == "" || !schemaRe.MatchString(schema) {
+		return
+	}
+	now := time.Now()
+	schemaCacheMu.Lock()
+	if len(schemaCache) >= schemaCacheMax {
+		for k, e := range schemaCache {
+			if now.After(e.expires) {
+				delete(schemaCache, k)
+			}
+		}
+		if len(schemaCache) >= schemaCacheMax {
+			schemaCache = map[string]schemaCacheEntry{}
+		}
+	}
+	schemaCache[tenantID] = schemaCacheEntry{schema: schema, expires: now.Add(schemaCacheTTL)}
+	schemaCacheMu.Unlock()
 }
 
 func retryDeadlock(ctx context.Context, run func() error) error {

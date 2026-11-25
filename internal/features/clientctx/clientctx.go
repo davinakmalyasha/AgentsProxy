@@ -89,6 +89,15 @@ func (id *Identity) IsStaffOwner() bool {
 	return id.Role == RoleOwner
 }
 
+// IsPublic reports whether this is the unauthenticated landing identity.
+// Only public GET responses are safe to mark as CDN-cacheable.
+func (id *Identity) IsPublic() bool {
+	if id == nil {
+		return false
+	}
+	return id.Role == RolePublic
+}
+
 type ctxKey struct{}
 
 // With returns a new context with the identity stashed.

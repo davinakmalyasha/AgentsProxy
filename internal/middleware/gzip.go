@@ -36,7 +36,7 @@ func Gzip(next http.Handler) http.Handler {
 		}
 		w.Header().Del("Content-Length")
 		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Add("Vary", "Accept-Encoding")
+		addVary(w.Header(), "Accept-Encoding")
 		rec := &gzipRecorder{ResponseWriter: w}
 		defer func() {
 			rec.finish()
@@ -93,7 +93,11 @@ func (g *gzipRecorder) WriteHeader(status int) {
 		// remove the gzip envelope and stream the bytes untouched.
 		g.passthrough = true
 		g.ResponseWriter.Header().Del("Content-Encoding")
-		g.ResponseWriter.Header().Del("Vary")
+		removeVaryToken(g.ResponseWriter.Header(), "Accept-Encoding")
+	} else {
+		// A handler is allowed to set its own Vary; re-add the
+		// compression dimension without dropping what it set.
+		addVary(g.ResponseWriter.Header(), "Accept-Encoding")
 	}
 	g.ResponseWriter.WriteHeader(status)
 	// A handler may write a small body before calling WriteHeader. Flush
@@ -118,7 +122,7 @@ func (g *gzipRecorder) Write(b []byte) (int, error) {
 			// pass everything through untouched.
 			g.passthrough = true
 			g.ResponseWriter.Header().Del("Content-Encoding")
-			g.ResponseWriter.Header().Del("Vary")
+			removeVaryToken(g.ResponseWriter.Header(), "Accept-Encoding")
 			if len(g.buffered) > 0 {
 				if _, err := g.ResponseWriter.Write(g.buffered); err != nil {
 					return 0, err
@@ -157,7 +161,7 @@ func (g *gzipRecorder) finish() {
 	}
 	g.wroteHeader = true
 	g.ResponseWriter.Header().Del("Content-Encoding")
-	g.ResponseWriter.Header().Del("Vary")
+	removeVaryToken(g.ResponseWriter.Header(), "Accept-Encoding")
 	g.ResponseWriter.Header().Del("Content-Length")
 	g.ResponseWriter.WriteHeader(http.StatusOK)
 	if len(g.buffered) > 0 {

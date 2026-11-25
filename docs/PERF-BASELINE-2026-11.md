@@ -214,7 +214,45 @@ remains ~3.5 ms. The gap is Vercel instance boot/network, not the Go handler.
   cold/network variance; the application path is fast.
 - Production staff/admin/agent absolute latency remains unmeasured.
 
-## Continuous guard
+## Round-trip and edge-cache pass (2026-11-26)
+
+The production `pg_stat_statements` snapshot showed hot app queries executing
+in 0.04–1.7 ms while the labeled server p95 was 14–15 ms. The gap is
+sequential round trips, not query work. The production dataset was also tiny
+(2 clients, 2 bookings, no tenant records), so index changes cannot explain
+or improve that latency.
+
+Implemented in the round-trip pass:
+
+- The request identity's resolved schema is reused by the tenant transaction;
+  a 30-second bounded cache covers agent/tool paths that have no identity.
+- `private.record_usage` replaces the four-round-trip usage transaction with
+  one definer call plus the quota Redis increment.
+- `private.staff_session_resolve_v2` resolves the session, its live tenant
+  routing/entitlement, and the once-a-minute `last_seen_at` touch in one call.
+  Centrum reads only its user row through the resolved schema.
+- Health probes run DB and Redis checks concurrently.
+- Boot quarantine reconciliation uses one runtime-pool RPC, so a serverless
+  cold start no longer opens the direct-5432 admin pool.
+
+Implemented in the edge-cache pass:
+
+- Public facilities/pricing GET 200 responses carry a 10-second
+  `Vercel-CDN-Cache-Control` / `CDN-Cache-Control` TTL; availability uses 2
+  seconds. Browser `Cache-Control: no-store` is unchanged.
+- Only the unauthenticated public identity marks a response cacheable;
+  staff/client responses never do.
+- `Gzip` now removes only its own `Accept-Encoding` Vary token instead of
+  deleting the entire header, and CORS always advertises `Vary: Origin` for
+  non-wildcard responses. Without those fixes, a CDN could conflate CORS or
+  compressed/identity variants.
+- `cmd/bench` distinguishes `x-vercel-cache: HIT` samples from origin
+  samples and can cache-bust GETs for origin measurement. The daily
+  `perf-guard` now cache-busts so a warm edge cannot hide an origin
+  regression.
+
+Production verification of the measured win is recorded after the code
+deploy; the pre-change table above remains the comparison baseline.
 
 ## Continuous guard
 

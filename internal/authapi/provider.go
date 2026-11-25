@@ -88,6 +88,15 @@ type Provider interface {
 	Register(ctx context.Context, tenantID string, in RegisterInput) (User, error)
 }
 
+// SchemaAwareProvider is an optional Provider extension. The session
+// directory already resolves and validates the tenant's db_schema, so a
+// provider that implements this can read its user row without a second
+// clients lookup and without re-deriving the tenant. Providers that do not
+// implement it keep the old Profile path unchanged.
+type SchemaAwareProvider interface {
+	ProfileInSchema(ctx context.Context, tenantID, userID, schema string) (User, error)
+}
+
 // ProviderFactory builds a provider bound to the shared runtime pool.
 type ProviderFactory func(*pgxpool.Pool) Provider
 

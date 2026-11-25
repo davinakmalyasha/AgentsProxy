@@ -57,6 +57,41 @@ func TestGzip_SmallPassesThrough(t *testing.T) {
 	}
 }
 
+// A small response is identity for every client, so Gzip may drop its own
+// Accept-Encoding token - but it must not erase Vary: Origin, which a
+// shared cache uses to keep CORS variants apart.
+func TestGzip_SmallResponsePreservesOriginVary(t *testing.T) {
+	h := Gzip(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Vary", "Origin")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	req := httptest.NewRequest("GET", "/v1/p/centrum/facilities", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Result().Header.Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Fatalf("Vary = %q, want it to retain Origin", got)
+	}
+}
+
+func TestGzip_LargeResponseKeepsOriginVary(t *testing.T) {
+	big := strings.Repeat("x", 4096)
+	h := Gzip(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Vary", "Origin")
+		_, _ = w.Write([]byte(big))
+	}))
+	req := httptest.NewRequest("GET", "/v1/p/centrum/facilities", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	vary := rec.Result().Header.Get("Vary")
+	if !strings.Contains(vary, "Origin") || !strings.Contains(vary, "Accept-Encoding") {
+		t.Fatalf("Vary = %q, want Origin and Accept-Encoding", vary)
+	}
+}
+
 func TestGzip_XlsxPassesThrough(t *testing.T) {
 	big := bytes.Repeat([]byte{0x50, 0x4b, 0x03, 0x04}, 4096) // fake zip header bytes
 	h := Gzip(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

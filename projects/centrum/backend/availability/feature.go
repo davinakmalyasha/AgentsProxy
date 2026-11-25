@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/singleflight"
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
@@ -55,6 +56,10 @@ type handler struct {
 	// without bound on a public polling endpoint.
 	cache   map[string]cachedAvail
 	cacheMu sync.Mutex
+	// sf collapses concurrent cold-cache builds for the same
+	// (tenant, date, type). The in-process cache absorbs polling, but a
+	// cold instance otherwise runs one identical query per waiting tab.
+	sf singleflight.Group
 }
 
 // maxAvailCacheEntries bounds the availability cache: one entry per
@@ -113,12 +118,26 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	hit, ok := h.cache[key]
 	h.cacheMu.Unlock()
 	if ok && now.Sub(hit.at) < cacheTTL {
+		if idn.IsPublic() {
+			records.MarkPublicCache(w, 2, 5)
+		}
 		records.WriteJSON(w, http.StatusOK, hit.payload)
 		return
 	}
 
-	payload, err := h.build(r.Context(), idn.TenantID(), date, typ)
+	payloadAny, err, _ := h.sf.Do(key, func() (any, error) {
+		// Detach from the first waiter's cancellation: all tabs behind a
+		// cold cache should share one build even if one disconnects.
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		return h.build(bctx, idn.TenantID(), date, typ)
+	})
 	if err != nil {
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	payload, _ := payloadAny.(map[string]any)
+	if payload == nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -144,6 +163,9 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
 	h.cacheMu.Unlock()
+	if idn.IsPublic() {
+		records.MarkPublicCache(w, 2, 5)
+	}
 	records.WriteJSON(w, http.StatusOK, payload)
 }
 
