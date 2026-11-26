@@ -20,6 +20,15 @@ func WithTenantTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn f
 	return withTenantTx(ctx, pool, tenantID, fn)
 }
 
+// WithTenantRead runs one read statement in the tenant's RLS context.
+// It is the fast path for single-query GETs: on production's
+// simple-protocol pool the SET LOCAL context and the SELECT share one
+// round trip. Handlers that need more than one statement must use
+// WithTenantTx.
+func WithTenantRead(ctx context.Context, pool *pgxpool.Pool, tenantID, sql string, args []any, fn func(pgx.Rows) error) error {
+	return withTenantRead(ctx, pool, tenantID, sql, args, fn)
+}
+
 // WriteJSON writes a JSON response with the given status.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
 	writeJSON(w, status, v)

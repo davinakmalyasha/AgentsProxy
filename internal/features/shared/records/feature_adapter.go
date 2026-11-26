@@ -151,26 +151,22 @@ func (a *FeatureAdapter) list(w http.ResponseWriter, r *http.Request) {
 	var items = make([]recordResp, 0, limit+1)
 	var lastTs time.Time
 	var lastID string
-	err = withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
-		        FROM tenant_records WHERE vertical = $1 AND kind = $2 AND status = $3`
-		args := []any{vertical, kind, status}
-		idx := 4
-		if !cur.ts.IsZero() {
-			sql += " AND (created_at, id) < ($4, $5::uuid)"
-			args = append(args, cur.ts, cur.id.String())
-			idx = 6
-		}
-		sql += " AND tenant_id = $" + strconv.Itoa(idx)
-		args = append(args, caller.TenantID)
-		idx++
-		sql += " ORDER BY created_at DESC, id DESC LIMIT $" + strconv.Itoa(idx)
-		args = append(args, limit+1)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
+	        FROM tenant_records WHERE vertical = $1 AND kind = $2 AND status = $3`
+	args := []any{vertical, kind, status}
+	idx := 4
+	if !cur.ts.IsZero() {
+		sql += " AND (created_at, id) < ($4, $5::uuid)"
+		args = append(args, cur.ts, cur.id.String())
+		idx = 6
+	}
+	sql += " AND tenant_id = $" + strconv.Itoa(idx)
+	args = append(args, caller.TenantID)
+	idx++
+	sql += " ORDER BY created_at DESC, id DESC LIMIT $" + strconv.Itoa(idx)
+	args = append(args, limit+1)
+
+	err = withTenantRead(r.Context(), a.Pool, caller.TenantID, sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var rec recordResp
 			var payload []byte
@@ -223,15 +219,23 @@ func (a *FeatureAdapter) getOne(w http.ResponseWriter, r *http.Request) {
 	var rec recordResp
 	var payload []byte
 	var createdAt, updatedAt time.Time
-	err := withTenantTx(r.Context(), a.Pool, caller.TenantID, func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
-		        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND kind = $3 AND tenant_id = $4`
-		if !includeDeleted {
-			sql += " AND status != 'deleted'"
-		}
-		row := tx.QueryRow(r.Context(), sql, id, vertical, kind, caller.TenantID)
-		return row.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
-	})
+	sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
+	        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND kind = $3 AND tenant_id = $4`
+	if !includeDeleted {
+		sql += " AND status != 'deleted'"
+	}
+	sql += " LIMIT 1"
+	err := withTenantRead(r.Context(), a.Pool, caller.TenantID, sql,
+		[]any{id, vertical, kind, caller.TenantID},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
+		})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "not found")

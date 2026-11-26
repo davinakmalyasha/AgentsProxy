@@ -52,6 +52,13 @@ func RateLimitScope(rdb *redis.Client, perMinute int, scope string) func(http.Ha
 // what populates CtxClientID. Accounts behind one NAT stop sharing a
 // bucket, and rotating IPs no longer multiplies an authenticated
 // caller's budget.
+//
+// It is deliberately a NO-OP when no verified client identity is in the
+// context. The pre-auth RateLimit already bounds that caller by IP; the
+// old IP fallback here opened a second, independent bucket with the same
+// limit and key, which cost one extra Redis round trip per public request
+// while enforcing exactly the same cap. Keep this limiter for its
+// distinct purpose: per-account isolation after identity is known.
 func RateLimitClient(rdb *redis.Client, perMinute int, scope string) func(http.Handler) http.Handler {
 	return rateLimitBy(rdb, perMinute, scope, verifiedClientKey)
 }
@@ -62,7 +69,15 @@ func rateLimitBy(rdb *redis.Client, perMinute int, scope string, keyFn func(*htt
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ok, retryAfter := Allow(r.Context(), rdb, perMinute, scope, keyFn(r))
+			key := keyFn(r)
+			if key == "" {
+				// No verified identity: the route's pre-auth limiter is the
+				// bound. An empty key would otherwise become a shared bucket
+				// every anonymous caller drains.
+				next.ServeHTTP(w, r)
+				return
+			}
+			ok, retryAfter := Allow(r.Context(), rdb, perMinute, scope, key)
 			if !ok {
 				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 				w.Header().Set("Content-Type", "application/json")
@@ -122,14 +137,15 @@ func rateKey(r *http.Request) string {
 	return "ip:" + remoteIP(r)
 }
 
-// verifiedClientKey is the POST-auth bucket key. Falls back to IP so a
-// request that reached an authenticated route without a resolved
-// identity is still bounded rather than unmetered.
+// verifiedClientKey is the POST-auth bucket key: verified client id only.
+// An empty result means "no per-account budget to apply"; the route's
+// pre-auth IP limiter still applies. Never fall back to IP here — that
+// duplicate bucket was one extra Redis round trip for the same cap.
 func verifiedClientKey(r *http.Request) string {
 	if cid, ok := r.Context().Value(CtxClientID).(string); ok && cid != "" {
 		return "c:" + cid
 	}
-	return "ip:" + remoteIP(r)
+	return ""
 }
 
 // remoteIP uses the one shared trust boundary. A direct caller cannot
