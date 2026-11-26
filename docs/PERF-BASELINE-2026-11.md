@@ -268,6 +268,20 @@ hardening, not a latency change — the payoff grows with rows scanned per
 query. Migrations: platform `094_rls_initplan.sql`, Centrum
 `0013_rls_initplan.sql` (migration-only PR #120, applied via `db-migrate`).
 
+### Cron probe-first hardening (2026-11-26, ops PR #124)
+
+`private.tick_report_jobs` (every minute) ran its reap UPDATE before checking
+for work, so every idle minute took a row lock. It now probes first: no
+pending rows and no stale working rows means two indexed probes
+(`report_jobs_pending_idx`, `report_jobs_working_claimed_idx` from step 1)
+and zero writes. Semantics are unchanged — stale `working` rows are still
+reaped to pending before the build decision.
+Verified on prod after applying the function: the stored definition carries
+the gate, an idle tick returns 0 with `n_tup_upd` unchanged, and smoke passes.
+`reminder-tick` was already probe-gated and `retention-tick` is a daily
+batched job, so both were left alone; `reap_stale_claims` already runs as a
+single indexed UPDATE and was not worth a migration for zero measured gain.
+
 ### Post-deploy origin split (2026-11-26, `be7c639`)
 
 Twelve cache-busted samples per endpoint at 0.2 RPS (origin only):
