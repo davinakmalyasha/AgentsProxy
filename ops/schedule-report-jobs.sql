@@ -1,6 +1,8 @@
 -- schedule-report-jobs.sql — pg_cron worker for deferred report builds
 -- (migration 064). One job per minute, probe-gated like the reminder
--- tick: an idle system spends one indexed query per tick and zero HTTP.
+-- tick: an idle system spends two indexed probes per tick and zero HTTP.
+-- The reap UPDATE only runs when a probe says there is work (pending rows
+-- or stale working rows); steady state takes no row locks and writes no WAL.
 --
 -- Setup per environment (once):
 --   select vault.create_secret('https://agents-proxy-nine.vercel.app',
@@ -22,6 +24,17 @@ DECLARE
   v_url text;
   v_tok text;
 BEGIN
+  -- Idle fast path: two index probes (pending_idx, working_claimed_idx),
+  -- no writes, no row locks. The reap below runs only when a probe finds
+  -- work. Semantics match the old reap-first order: stale 'working' rows
+  -- are still converted to pending before the build decision.
+  IF NOT EXISTS (SELECT 1 FROM public.report_jobs WHERE status = 'pending')
+     AND NOT EXISTS (SELECT 1 FROM public.report_jobs
+                      WHERE status = 'working'
+                        AND claimed_at < pg_catalog.now() - interval '10 minutes') THEN
+    RETURN 0;
+  END IF;
+
   UPDATE public.report_jobs
      SET status = 'pending', claimed_at = NULL, updated_at = pg_catalog.now()
    WHERE status = 'working'
