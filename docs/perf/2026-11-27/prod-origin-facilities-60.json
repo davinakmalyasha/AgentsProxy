@@ -1,0 +1,28 @@
+[
+  {
+    "name": "public-facilities",
+    "requests": 60,
+    "errors": 0,
+    "rps": 0.49999875416977085,
+    "p50_ms": 84.6,
+    "p90_ms": 107.319,
+    "p95_ms": 112.4,
+    "p99_ms": 190.327,
+    "min_ms": 65.043,
+    "max_ms": 190.327,
+    "server_p50_ms": 4.231,
+    "server_p95_ms": 6.882,
+    "server_p99_ms": 9.068,
+    "db_p95_ms": 1.858,
+    "redis_p95_ms": 2.432,
+    "instances": 1,
+    "warm_requests": 60,
+    "warm_p95_ms": 112.4,
+    "origin_requests": 60,
+    "origin_p95_ms": 112.4,
+    "status_codes": {
+      "200": 60
+    },
+    "elapsed_ms": 120000
+  }
+]
