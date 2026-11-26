@@ -17,6 +17,7 @@ import (
 
 	"github.com/davinakmalyasha/agents-proxy/internal/reqmetrics"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
+	"github.com/davinakmalyasha/agents-proxy/internal/slo"
 )
 
 type ctxKey int
@@ -152,6 +153,12 @@ func Logging() func(http.Handler) http.Handler {
 			rec := &statusRecorder{ResponseWriter: w, started: start, span: span}
 			next.ServeHTTP(rec, r)
 			dur := time.Since(start)
+			// Traffic-derived SLOs (internal/slo): one histogram increment
+			// per request, flushed to Redis once per 5 minutes per class.
+			// Never blocks: the Redis write happens on a detached goroutine.
+			if class := SLOClass(r); class != "" {
+				slo.Observe(class, dur, rec.status)
+			}
 			// Successful reads are Debug: at Info, every landing-page
 			// poll and every /healthz probe is a log line, and on
 			// Vercel log volume is a metered ingestion path. Errors

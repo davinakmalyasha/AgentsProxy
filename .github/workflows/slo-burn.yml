@@ -1,0 +1,90 @@
+# slo-burn.yml — hourly check of traffic-derived latency SLOs.
+#
+# Unlike perf-guard (which synthetically probes public reads), this reads the
+# server's own aggregate of real staff/admin/agent/public traffic from
+# GET /v1/admin/slo. Classes below min_samples report "insufficient" and are
+# ignored: a low-volume tenant must never produce a fabricated alert.
+#
+# Requires the production admin key as a repository secret named ADMIN_API_KEY.
+# Without it the job exits 0 with a notice — the SLO endpoint is still live and
+# can be read manually, but no automated alert runs.
+name: slo-burn
+
+on:
+  schedule:
+    - cron: "10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: slo-burn
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PROD_URL: https://agents-proxy-nine.vercel.app
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+    steps:
+      - name: read the traffic SLO report
+        id: report
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_API_KEY:-}" ]; then
+            echo "::notice::ADMIN_API_KEY secret is not set; skipping automated SLO burn check"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $ADMIN_API_KEY" \
+            "$PROD_URL/v1/admin/slo?window=60" -o slo.json
+          python - <<'PY'
+          import json, sys
+          rep = json.load(open("slo.json"))
+          print(f"window={rep['window_minutes']}m min_samples={rep['min_samples']} generated={rep['generated_at']}")
+          print(f"{'class':8} {'req':>6} {'err':>5} {'p50':>8} {'p95':>8} {'target':>7}  status")
+          breaches = []
+          for c in rep["classes"]:
+              target = f"{c['target_p95_ms']:.0f}" if c.get("target_p95_ms") else "-"
+              print(f"{c['class']:8} {c['requests']:6d} {c['errors']:5d} {c['p50_ms']:8.1f} {c['p95_ms']:8.1f} {target:>7}  {c['status']}")
+              if c["status"] == "breach":
+                  breaches.append(c)
+          with open("breaches.json", "w") as f:
+              json.dump(breaches, f)
+          if breaches:
+              print("\nSLO breaches:", file=sys.stderr)
+              for c in breaches:
+                  print(f"  - {c['class']}: p95 {c['p95_ms']:.1f} ms > {c['target_p95_ms']:.0f} ms ({c['requests']} req)", file=sys.stderr)
+              sys.exit(1)
+          print("no breaches (insufficient classes are not alerts)")
+          PY
+
+      - name: open or update the SLO alert issue
+        if: failure() && steps.report.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="[slo-alert] Traffic SLO breach"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          details=$(python - <<'PY'
+          import json
+          rows = json.load(open("breaches.json"))
+          print("\n".join(
+              f"- {c['class']}: p95 {c['p95_ms']:.1f} ms > {c['target_p95_ms']:.0f} ms ({c['requests']} requests, {c['errors']} errors)"
+              for c in rows))
+          PY
+          )
+          body=$(printf 'Traffic-derived SLO check failed.\n\n%s\n\nRun: %s\n\nReport: GET /v1/admin/slo?window=60\n' "$details" "$run_url")
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

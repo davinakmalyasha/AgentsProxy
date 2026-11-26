@@ -231,6 +231,10 @@ func NewRouter(d Deps) http.Handler {
 			thDeps := TenantHealthDeps{ADK: d.ADK, Pool: adminPool, RestFenced: badProjects}
 			r.Get("/tenant-health", TenantHealth(thDeps))
 			r.Post("/tenant-health/reload", TenantReload(thDeps))
+			// Traffic-derived latency percentiles per route class. Real prod
+			// traffic, not a synthetic probe; classes below min_samples say
+			// insufficient instead of inventing a p95.
+			r.Get("/slo", (SLOReporter{RDB: d.Redis}).ServeHTTP)
 		})
 	})
 
