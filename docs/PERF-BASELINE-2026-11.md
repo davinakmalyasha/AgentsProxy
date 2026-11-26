@@ -416,3 +416,41 @@ Prod origin probe (2026-11-26, `5c41318`, `--cache-bust`, 1 conc, 0.5 RPS,
   plus db/redis splits and true origin for availability.
 
 Artifacts: `.tmp/bench/20261126T095320Z/results.{json,md}` (gitignored).
+
+### Optimization batch 2 — 2026-11-26 (folds + pricing cache + money single-pass)
+
+Shipped via gate: migration PR #132 (`0016_money_range_single_pass`)
+applied via `db-migrate`; code PR #133 deployed via `deploy.yml` and live
+on prod `a522804`, smoke passing.
+
+Code (all verified by suites, no new indexes — EXPLAIN on 2k seeded
+bookings showed every hot query already optimal at 0.05–0.9 ms):
+- `closing_report` 3 sequential QueryRows → 1 row (cash/qris + 2 booking
+  counts with subselects). 3 RTT → 1 per closing call.
+- Bookings PATCH 3 SELECTs of the same row (start/date/end, price,
+  status) → 1 (`start/date/end/price/status`); release uses fetched price,
+  transition uses fetched status. 2–3 RTT → 1 plus the CAS UPDATE.
+- Payments create price + SUM 2 SELECTs → 1 (price/override + paid-sum
+  subquery under the same `FOR UPDATE` row lock). Trigger recalc stays
+  (correctness).
+- Pricing rule 30 s in-process cache (`tenant|date`, 1024-cap, single
+  invalidation on create/patch/applyHours/del); contract gate still runs
+  per call so safety is unchanged. Saves 1 SELECT (~0.07 ms exec + RTT)
+  on every booking create, extension reprice, and `get_pricing`.
+
+DB:
+- `0016_money_range_single_pass.sql` (Centrum): 10 subqueries → 7.
+  Payments cash/qris/other/count collapse to one `FILTER` agg CTE + best;
+  booked/bookings collapse to one bookings `FILTER` CTE + peak. Same
+  predicates, same JSON shape; kantin/expenses/peak untouched.
+
+Probe (2026-11-26, `a522804`, `--cache-bust`, 1 conc, 0.5 RPS, 10/endpoint):
+- health: p95 90ms client, srv 4.5ms.
+- facilities: p95 65ms, srv 12.8ms = db 9.6ms + redis 2.0ms.
+- availability: p95 77ms, srv 14.6ms = db 11.0ms + redis 1.6ms.
+- pricing: p95 77ms, srv 14.0ms = db 10.2ms + redis 1.5ms.
+- 0 errors on all endpoints; all origin (bust), avail 10/10 miss as
+  designed, coldN 0 (single instance). No regression vs batch-1
+  (srv 15–18ms); pricing edge outlier from batch-1 did not repeat.
+
+Artifacts: `.tmp/bench/20261126T150201Z/results.{json,md}` (gitignored).
