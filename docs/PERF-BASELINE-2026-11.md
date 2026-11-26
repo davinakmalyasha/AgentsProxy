@@ -375,3 +375,44 @@ BENCH_SCENARIOS=agent-client-chat,chat BENCH_CONCURRENCY=4 \
   -scenarios public-facilities,public-availability \
   -concurrency 1 -rps 0.2 -duration 120s -warmup 5s
 ```
+
+### Optimization batch 2026-11-26 (Go hot-path + bench harness, RLS gaps)
+
+Shipped via gate: migration PR #128 (097 initplan gaps, fixed in #129 for
+prod table-move) applied via `db-migrate`; code PR #130 deployed via
+`deploy.yml` and live on prod `5c41318`, smoke passing.
+
+Go (all low-risk, verified by suites):
+- Records create metering async off the 201 (detached ctx preserved;
+  `records_test.go` polls with 5s deadline for the eventual row).
+- Agent RPD + cost caps pipelined 2 RTT -> 1 (`redisx.IncrExpireTwo`,
+  `CapsAllowed`; same fail-closed semantics).
+- Logging lazy attrs (prod Info skips Debug alloc on successful GETs).
+- `reqmetrics` hooks skip clock with no span; `requestip` single VERCEL
+  lookup per request (reverted Once cache — broke `t.Setenv` tests).
+- Availability: `X-Avail-Cache: hit/miss` header, `__bench_cb` bypasses
+  in-process cache for true origin, lazy evict (no O(cap) scan per miss).
+
+Bench harness (no prod impact, fixes measurement blind spots):
+- Per-scenario tracker (was global, diluted cold attribution).
+- Robust `Server-Timing` parse (quoted `dur="12.3"`, `;desc=` params).
+- Table + markdown now show `origin/db/redis/cache_hits/cold_N/avail`.
+- `records-create-delete` measures POST only (DELETE cleanup outside timing).
+
+DB:
+- 097 closes remaining initplan gaps conditionally (prod tables already
+  moved/dropped by Centrum 0001/0005/0009 and 042; fresh chain still fixes
+  pre-move tables). Prod `db-migrate apply` green.
+
+Prod origin probe (2026-11-26, `5c41318`, `--cache-bust`, 1 conc, 0.5 RPS,
+10 samples/endpoint, `scripts/bench.sh` remote):
+- health: p95 130ms, srv 4.5ms, redis 1.3ms (db 0 — ping untraced, known).
+- facilities: p95 136ms, srv 15.2ms = db 8.9ms + redis 4.0ms + ~2ms app.
+- availability: p95 395ms client, srv 16.3ms = db 10.5ms + redis 5.5ms;
+  avail_miss 10/10 (bypass works), coldN 0 (same instance).
+- pricing: p95 2583ms client (single 2.5s edge outlier, N=10),
+  srv 17.9ms = db 10.7ms + redis 4.8ms; no errors on any endpoint.
+- Server p95 15–18ms matches pre-batch baseline (14–15ms): no regression,
+  plus db/redis splits and true origin for availability.
+
+Artifacts: `.tmp/bench/20261126T095320Z/results.{json,md}` (gitignored).
