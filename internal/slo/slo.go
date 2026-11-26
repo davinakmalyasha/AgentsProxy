@@ -463,3 +463,21 @@ func EnsureConfigured(client *redis.Client, keyPrefix string) {
 	state = map[string]*classState{}
 	lastFlush = time.Now()
 }
+
+// MaybeFlush starts a detached flush when the interval has elapsed. The
+// middleware calls it at request start, so the goroutine has the whole
+// request duration to finish before a serverless runtime freezes the
+// instance — materially more durable than flushing only after the response.
+// Non-blocking; a no-op when Redis is unconfigured or the interval is not due.
+func MaybeFlush() {
+	mu.Lock()
+	var snap *snapshot
+	if rdb != nil && time.Since(lastFlush) >= flushInterval {
+		snap = swapLocked(time.Now())
+		lastFlush = time.Now()
+	}
+	mu.Unlock()
+	if snap != nil {
+		go flushSnapshot(snap)
+	}
+}

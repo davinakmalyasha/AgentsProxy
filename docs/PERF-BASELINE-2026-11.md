@@ -476,3 +476,20 @@ production traffic now produces the staff/admin/agent numbers itself.
 This does not replace the public probe: `perf-guard` remains the change
 verification and gross-regression guard, and its numbers are never mixed with
 traffic SLOs.
+
+#### Live verification (2026-11-27, `0ab6208`)
+
+- Deploy gate success; prod smoke passes on `0ab6208` (health, facilities,
+  availability, pricing, 401/404/204 contracts).
+- `GET /v1/admin/slo` unauthenticated → 401 (mounted, admin-gated).
+- `slo-burn.yml` dispatched: exits 0 with an `ADMIN_API_KEY secret is not
+  set` notice, as designed. Automated hourly burn alerts activate when the
+  production admin key is added as the `ADMIN_API_KEY` repository secret;
+  until then the endpoint is read manually.
+- Flush timing: the middleware now calls `slo.MaybeFlush()` at request
+  start, so the detached Redis write runs during the request instead of
+  after it — a serverless freeze is much less likely to drop a window.
+- Honest residual: accumulation/readback is proven by the Redis integration
+  test and the `/v1/admin/slo` route test, but the first real production
+  read requires the admin key. Expect `insufficient` for staff/admin/agent
+  until real traffic reaches 20 samples in the window.

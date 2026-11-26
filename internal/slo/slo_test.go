@@ -114,3 +114,31 @@ func TestReportClampHelpers(t *testing.T) {
 		t.Fatalf("percentile rank sanity failed: %v", got)
 	}
 }
+
+func TestMaybeFlushNoRedisIsSafe(t *testing.T) {
+	Configure(nil, "slo")
+	mu.Lock()
+	lastFlush = time.Now().Add(-2 * flushInterval)
+	mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		MaybeFlush()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("MaybeFlush blocked without Redis")
+	}
+	// Without Redis the snapshot must not be dropped: the next Configure
+	// resets anyway, but a due no-op must keep state intact.
+	Observe("public", 10*time.Millisecond, 200)
+	mu.Lock()
+	n := len(state)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("state classes=%d want 1 after no-op flush", n)
+	}
+	Configure(nil, "slo")
+}
