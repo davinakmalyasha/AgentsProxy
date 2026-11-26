@@ -129,3 +129,7 @@ features mount at `/v1/p/<slug>/...` and own their schema.
 Agency: add a handler under `internal/agency/<domain>/` and mount it in
 `internal/agency/router.go`. Run `make test` (or `go test -p 1 ./...`
 against the local test targets) + curl smoke.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). If you fork or reuse this code, keep the license file and copyright notice.
