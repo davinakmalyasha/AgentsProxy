@@ -254,6 +254,31 @@ Implemented in the edge-cache pass:
 Production verification of the measured win is recorded after the code
 deploy; the pre-change table above remains the comparison baseline.
 
+### Post-deploy origin split (2026-11-26, `be7c639`)
+
+Twelve cache-busted samples per endpoint at 0.2 RPS (origin only):
+
+| Scenario | Server p95 | DB p95 | Redis p95 |
+|---|---:|---:|---:|
+| health | 3.40 ms | 0 ms (ping untraced) | 1.33 ms |
+| public-facilities | 13.80 ms | 7.18 ms | 5.21 ms |
+| public-availability | 14.99 ms | 8.42 ms | 4.70 ms |
+| public-pricing | 14.26 ms | 7.92 ms | 4.80 ms |
+
+The split adds up: ~7–8 ms database + ~5 ms Redis + ~2 ms application
+work inside ~14–15 ms server time. The pre-optimization labeled run showed
+server p95 4–15 ms without the split; the absolute origin latency is
+unchanged (no regression), and the composition is now measured rather than
+inferred. Raw artifacts: `docs/perf/2026-11-26/prod-origin-60.json`.
+
+A parallel non-busted run confirmed edge behavior: facilities/pricing serve
+`X-Vercel-Cache: HIT` inside the 10-second TTL (7 hits / 5 origin on
+facilities), while 2-second availability at 0.2 RPS always revalidates.
+Client-observed edge p95 in that small run was noisy (network/cold tails
+with server p95 still ~15 ms), so the edge win is stated as origin offload,
+not a same-client latency claim. Raw artifacts:
+`docs/perf/2026-11-26/prod-edge-60.json`.
+
 ## Continuous guard
 
 `.github/workflows/perf-guard.yml` runs the same public probe daily at 0.2 RPS
