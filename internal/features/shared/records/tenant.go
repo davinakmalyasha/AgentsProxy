@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -76,6 +78,71 @@ const (
 // Postgres when the 30s entry expires.
 var tenantInfoLoads singleflight.Group
 
+// Tenant info is read on every public landing request and every anonymous
+// chat turn. Redis is the cross-instance source of truth (30s), but a Redis
+// round trip on each request is pure overhead for a value that changes only
+// on an admin write. This process-local L1 is deliberately short (5s): an
+// admin eviction clears the handling instance immediately and every other
+// instance converges within 5s — fresher than the 30s Redis entry it fronts.
+// The 30s L2 stays, so a cold instance or an L1 eviction still avoids a DB
+// query.
+const (
+	tenantInfoL1TTL = 5 * time.Second
+	tenantInfoL1Max = 4096
+)
+
+type tenantInfoL1Entry struct {
+	info    TenantInfo
+	expires time.Time
+}
+
+var (
+	tenantInfoL1Mu sync.Mutex
+	tenantInfoL1   = map[string]tenantInfoL1Entry{}
+)
+
+// tenantInfoCacheKey includes both the Redis client and query pool so tests
+// (and a future multi-pool host) cannot share routing state across databases.
+func tenantInfoCacheKey(rdb *redis.Client, q Querier, tenantID string) string {
+	return fmt.Sprintf("%p|%p|%s", rdb, q, tenantID)
+}
+
+func getTenantInfoL1(key string) (TenantInfo, bool) {
+	tenantInfoL1Mu.Lock()
+	e, ok := tenantInfoL1[key]
+	tenantInfoL1Mu.Unlock()
+	if !ok || time.Now().After(e.expires) {
+		return TenantInfo{}, false
+	}
+	return e.info, true
+}
+
+func putTenantInfoL1(key string, info TenantInfo) {
+	now := time.Now()
+	tenantInfoL1Mu.Lock()
+	if len(tenantInfoL1) >= tenantInfoL1Max {
+		for k, e := range tenantInfoL1 {
+			if now.After(e.expires) {
+				delete(tenantInfoL1, k)
+			}
+		}
+		if len(tenantInfoL1) >= tenantInfoL1Max {
+			tenantInfoL1 = map[string]tenantInfoL1Entry{}
+		}
+	}
+	tenantInfoL1[key] = tenantInfoL1Entry{info: info, expires: now.Add(tenantInfoL1TTL)}
+	tenantInfoL1Mu.Unlock()
+}
+
+// ResetTenantInfoCacheForTest clears process-local tenant routing state.
+// Integration tests reuse tenant ids across databases; production never
+// calls this (admin writes use EvictTenantKnown).
+func ResetTenantInfoCacheForTest() {
+	tenantInfoL1Mu.Lock()
+	tenantInfoL1 = map[string]tenantInfoL1Entry{}
+	tenantInfoL1Mu.Unlock()
+}
+
 // CheckTenantInfoCached is LookupTenantInfo with a 30s Redis cache. The
 // lookup sits on the hottest anonymous path (every public read, every
 // client-chat); without this, landing traffic is a Postgres query per
@@ -84,8 +151,16 @@ func CheckTenantInfoCached(ctx context.Context, rdb *redis.Client, q Querier, te
 	if tenantID == "" {
 		return TenantInfo{}, nil
 	}
-	key := fmt.Sprintf("%p|%p|%s", rdb, q, tenantID)
+	key := tenantInfoCacheKey(rdb, q, tenantID)
+	if info, ok := getTenantInfoL1(key); ok {
+		return info, nil
+	}
 	v, err, _ := tenantInfoLoads.Do(key, func() (any, error) {
+		// Re-check after waiting on the flight: a concurrent request may
+		// have populated L1 while this one was blocked.
+		if info, ok := getTenantInfoL1(key); ok {
+			return info, nil
+		}
 		// Detach from the first waiter's cancellation: one client hanging
 		// up must not fail every request sharing this cold miss. The
 		// lookup itself has a 2s bound; the outer bound covers the Redis
@@ -98,6 +173,7 @@ func CheckTenantInfoCached(ctx context.Context, rdb *redis.Client, q Querier, te
 		return TenantInfo{}, err
 	}
 	info, _ := v.(TenantInfo)
+	putTenantInfoL1(key, info)
 	return info, nil
 }
 
@@ -136,6 +212,17 @@ func EvictTenantKnown(ctx context.Context, rdb *redis.Client, tenantID string) e
 		return nil
 	}
 	tenantdb.Invalidate(tenantID)
+	// L1 is keyed by pool/redis pointers; drop every entry for this tenant
+	// so a pause/feature change is immediate on the instance that handled
+	// the admin write. Other instances converge within tenantInfoL1TTL.
+	tenantInfoL1Mu.Lock()
+	suffix := "|" + tenantID
+	for k := range tenantInfoL1 {
+		if strings.HasSuffix(k, suffix) {
+			delete(tenantInfoL1, k)
+		}
+	}
+	tenantInfoL1Mu.Unlock()
 	if rdb == nil {
 		return nil
 	}

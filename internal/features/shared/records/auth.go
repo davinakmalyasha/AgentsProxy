@@ -81,3 +81,17 @@ func withTenantTx(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn f
 	}
 	return tenantdb.WithTx(ctx, pool, tenantID, fn)
 }
+
+// withTenantRead runs one read statement in the tenant's RLS context.
+// Unlike withTenantTx it does not open an explicit transaction: on a
+// simple-protocol pool (production) the context and the read share one
+// simple Query message, which PostgreSQL executes as one implicit
+// transaction. That removes three round trips from every single-query
+// public read. Multi-statement handlers must keep using withTenantTx.
+func withTenantRead(ctx context.Context, pool *pgxpool.Pool, tenantID, sql string, args []any, fn func(pgx.Rows) error) error {
+	schema := ""
+	if id := clientctx.From(ctx); id != nil && id.TenantID() == tenantID {
+		schema = id.DBSchema
+	}
+	return tenantdb.ReadTenant(ctx, pool, tenantID, schema, sql, args, fn)
+}

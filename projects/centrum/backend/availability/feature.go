@@ -191,42 +191,40 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 // gone too.
 func (h *handler) build(ctx context.Context, tenantID, date, typ string) (map[string]any, error) {
 	out := make([]facilityAvailability, 0, 16)
-	err := records.WithTenantTx(ctx, h.pool, tenantID, func(tx pgx.Tx) error {
-		q := `SELECT f.id::text, f.name, f.open_time::text, f.close_time::text,
-		              COALESCE((
-		                SELECT jsonb_agg(x ORDER BY x->>'start', x->>'end')
-		                  FROM (
-		                    SELECT jsonb_build_object('start', to_char(b.start_time, 'HH24:MI'),
-		                                              'end', to_char(b.end_time, 'HH24:MI'),
-		                                              'kind', 'booked') AS x
-		                      FROM sports_bookings b
-		                     WHERE b.tenant_id = $1 AND b.date = $2::date
-		                       AND b.status NOT IN ('cancelled', 'no_show')
-		                       AND b.facility_id = f.id
-		                    UNION ALL
-		                    SELECT jsonb_build_object('start', to_char(k.start_time, 'HH24:MI'),
-		                                              'end', to_char(k.end_time, 'HH24:MI'),
-		                                              'kind', 'blocked')
-		                      FROM sports_court_blocks k
-		                     WHERE k.tenant_id = $1 AND k.block_date = $2::date
-		                       AND (k.facility_id = f.id OR k.facility_id IS NULL)
-		                  ) sub
-		              ), '[]'::jsonb)
-		         FROM sports_facilities f
-		        WHERE f.tenant_id = $1 AND f.deleted_at IS NULL AND f.status = 'active'`
-		args := []any{tenantID, date}
-		if typ != "" {
-			q += ` AND f.type = $3`
-			args = append(args, typ)
-		}
-		// Courts are ones, not thousands — but no query ships unbounded.
-		// 500 is far above any venue; hitting it means a different product.
-		q += ` ORDER BY f.name LIMIT 500`
-		rows, err := tx.Query(ctx, q, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	q := `SELECT f.id::text, f.name, f.open_time::text, f.close_time::text,
+	              COALESCE((
+	                SELECT jsonb_agg(x ORDER BY x->>'start', x->>'end')
+	                  FROM (
+	                    SELECT jsonb_build_object('start', to_char(b.start_time, 'HH24:MI'),
+	                                              'end', to_char(b.end_time, 'HH24:MI'),
+	                                              'kind', 'booked') AS x
+	                      FROM sports_bookings b
+	                     WHERE b.tenant_id = $1 AND b.date = $2::date
+	                       AND b.status NOT IN ('cancelled', 'no_show')
+	                       AND b.facility_id = f.id
+	                    UNION ALL
+	                    SELECT jsonb_build_object('start', to_char(k.start_time, 'HH24:MI'),
+	                                              'end', to_char(k.end_time, 'HH24:MI'),
+	                                              'kind', 'blocked')
+	                      FROM sports_court_blocks k
+	                     WHERE k.tenant_id = $1 AND k.block_date = $2::date
+	                       AND (k.facility_id = f.id OR k.facility_id IS NULL)
+	                  ) sub
+	              ), '[]'::jsonb)
+	         FROM sports_facilities f
+	        WHERE f.tenant_id = $1 AND f.deleted_at IS NULL AND f.status = 'active'`
+	args := []any{tenantID, date}
+	if typ != "" {
+		q += ` AND f.type = $3`
+		args = append(args, typ)
+	}
+	// Courts are ones, not thousands — but no query ships unbounded.
+	// 500 is far above any venue; hitting it means a different product.
+	q += ` ORDER BY f.name LIMIT 500`
+
+	// WithTenantRead folds BEGIN/set_config/COMMIT into the SELECT on the
+	// production simple-protocol pool: one round trip per cache miss.
+	err := records.WithTenantRead(ctx, h.pool, tenantID, q, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var fa facilityAvailability
 			var open, close string

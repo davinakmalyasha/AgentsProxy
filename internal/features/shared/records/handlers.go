@@ -188,57 +188,52 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 			lastTs time.Time
 			lastID string
 		)
-		err = withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
-			var sb strings.Builder
-			sb.Grow(256)
-			sb.WriteString(`SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
+		var sb strings.Builder
+		sb.Grow(256)
+		sb.WriteString(`SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
 			            FROM tenant_records
 			            WHERE vertical = $1 AND status = $2`)
-			args := []any{vertical, status}
-			idx := 3
-			if kind != "" {
-				sb.WriteString(" AND kind = $")
-				sb.WriteString(strconv.Itoa(idx))
-				args = append(args, kind)
-				idx++
-			}
-			if q != "" {
-				sb.WriteString(" AND (title ILIKE $")
-				sb.WriteString(strconv.Itoa(idx))
-				sb.WriteString(" OR payload::text ILIKE $")
-				sb.WriteString(strconv.Itoa(idx))
-				sb.WriteString(")")
-				args = append(args, "%"+q+"%")
-				idx++
-			}
-			// Cursor: skip rows (created_at, id) >= (cur.ts, cur.id) under
-			// DESC ordering. The composite condition keeps the sort
-			// stable when two rows share a created_at.
-			if !cur.ts.IsZero() {
-				sb.WriteString(" AND (created_at, id) < ($")
-				sb.WriteString(strconv.Itoa(idx))
-				sb.WriteString(", $")
-				sb.WriteString(strconv.Itoa(idx + 1))
-				sb.WriteString("::uuid)")
-				args = append(args, cur.ts, cur.id.String())
-				idx += 2
-			}
-			// Defense in depth: RLS already pins the tenant, but an explicit
-			// predicate means a BYPASSRLS role or a future policy mistake is
-			// still bounded by the authenticated client.
-			sb.WriteString(" AND tenant_id = $")
+		args := []any{vertical, status}
+		idx := 3
+		if kind != "" {
+			sb.WriteString(" AND kind = $")
 			sb.WriteString(strconv.Itoa(idx))
-			args = append(args, caller.TenantID)
+			args = append(args, kind)
 			idx++
-			sb.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $")
+		}
+		if q != "" {
+			sb.WriteString(" AND (title ILIKE $")
 			sb.WriteString(strconv.Itoa(idx))
-			args = append(args, limit+1) // +1 over-fetch to detect has_more
+			sb.WriteString(" OR payload::text ILIKE $")
+			sb.WriteString(strconv.Itoa(idx))
+			sb.WriteString(")")
+			args = append(args, "%"+q+"%")
+			idx++
+		}
+		// Cursor: skip rows (created_at, id) >= (cur.ts, cur.id) under
+		// DESC ordering. The composite condition keeps the sort
+		// stable when two rows share a created_at.
+		if !cur.ts.IsZero() {
+			sb.WriteString(" AND (created_at, id) < ($")
+			sb.WriteString(strconv.Itoa(idx))
+			sb.WriteString(", $")
+			sb.WriteString(strconv.Itoa(idx + 1))
+			sb.WriteString("::uuid)")
+			args = append(args, cur.ts, cur.id.String())
+			idx += 2
+		}
+		// Defense in depth: RLS already pins the tenant, but an explicit
+		// predicate means a BYPASSRLS role or a future policy mistake is
+		// still bounded by the authenticated client.
+		sb.WriteString(" AND tenant_id = $")
+		sb.WriteString(strconv.Itoa(idx))
+		args = append(args, caller.TenantID)
+		idx++
+		sb.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $")
+		sb.WriteString(strconv.Itoa(idx))
+		args = append(args, limit+1) // +1 over-fetch to detect has_more
 
-			rows, err := tx.Query(r.Context(), sb.String(), args...)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
+		err = withTenantRead(r.Context(), h.Pool, caller.TenantID, sb.String(), args, func(rows pgx.Rows) error {
 			for rows.Next() {
 				var rec recordResp
 				var payload []byte
@@ -262,10 +257,7 @@ func (h *Handler) list(vertical string) http.HandlerFunc {
 					lastTs, lastID = createdAt, rec.ID
 				}
 			}
-			if err := rows.Err(); err != nil {
-				return err
-			}
-			return nil
+			return rows.Err()
 		})
 		if err != nil {
 			slog.Error("list records", "err", err)
@@ -303,15 +295,23 @@ func (h *Handler) getOne(vertical string) http.HandlerFunc {
 		var rec recordResp
 		var payload []byte
 		var createdAt, updatedAt time.Time
-		err := withTenantTx(r.Context(), h.Pool, caller.TenantID, func(tx pgx.Tx) error {
-			sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
-			        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`
-			if !includeDeleted {
-				sql += " AND status != 'deleted'"
-			}
-			row := tx.QueryRow(r.Context(), sql, id, vertical, caller.TenantID)
-			return row.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
-		})
+		sql := `SELECT id::text, tenant_id, vertical, kind, title, slug, payload, status, created_at, updated_at
+		        FROM tenant_records WHERE id = $1::uuid AND vertical = $2 AND tenant_id = $3`
+		if !includeDeleted {
+			sql += " AND status != 'deleted'"
+		}
+		sql += " LIMIT 1"
+		err := withTenantRead(r.Context(), h.Pool, caller.TenantID, sql,
+			[]any{id, vertical, caller.TenantID},
+			func(rows pgx.Rows) error {
+				if !rows.Next() {
+					if err := rows.Err(); err != nil {
+						return err
+					}
+					return pgx.ErrNoRows
+				}
+				return rows.Scan(&rec.ID, &rec.TenantID, &rec.Vertical, &rec.Kind, &rec.Title, &rec.Slug, &payload, &rec.Status, &createdAt, &updatedAt)
+			})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeJSONError(w, http.StatusNotFound, "not found")

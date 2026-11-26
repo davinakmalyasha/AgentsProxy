@@ -361,27 +361,23 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]ruleResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
-			   FROM sports_pricing_rules WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY valid_from DESC LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var r ruleResp
-			var createdAt time.Time
-			if err := rows.Scan(&r.ID, &r.TenantID, &r.ValidFrom, &r.OpenTime, &r.CloseTime, &r.DayStart, &r.DayEnd,
-				&r.PriceDay, &r.PriceEvening, &r.IsActive, &createdAt); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
+		   FROM sports_pricing_rules WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY valid_from DESC LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var r ruleResp
+				var createdAt time.Time
+				if err := rows.Scan(&r.ID, &r.TenantID, &r.ValidFrom, &r.OpenTime, &r.CloseTime, &r.DayStart, &r.DayEnd,
+					&r.PriceDay, &r.PriceEvening, &r.IsActive, &createdAt); err != nil {
+					return err
+				}
+				r.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, r)
 			}
-			r.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, r)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -400,14 +396,20 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var rr ruleResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
-			   FROM sports_pricing_rules WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&rr.ID, &rr.TenantID, &rr.ValidFrom, &rr.OpenTime, &rr.CloseTime, &rr.DayStart, &rr.DayEnd,
-			&rr.PriceDay, &rr.PriceEvening, &rr.IsActive, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
+		   FROM sports_pricing_rules WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&rr.ID, &rr.TenantID, &rr.ValidFrom, &rr.OpenTime, &rr.CloseTime, &rr.DayStart, &rr.DayEnd,
+				&rr.PriceDay, &rr.PriceEvening, &rr.IsActive, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return

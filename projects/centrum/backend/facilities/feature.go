@@ -182,12 +182,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY sort_order, name LIMIT %d`, limit)
 		args = []any{idn.TenantID()}
 	}
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(), q, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), q, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var f facilityResp
 			var createdAt, updatedAt time.Time
@@ -219,14 +214,20 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var f facilityResp
 	var createdAt, updatedAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&f.ID, &f.TenantID, &f.Name, &f.Type, &f.Capacity, &f.PricePerHour,
-			&f.OpenTime, &f.CloseTime, &f.Status, &createdAt, &updatedAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
+		   FROM sports_facilities WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&f.ID, &f.TenantID, &f.Name, &f.Type, &f.Capacity, &f.PricePerHour,
+				&f.OpenTime, &f.CloseTime, &f.Status, &createdAt, &updatedAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return

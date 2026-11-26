@@ -103,11 +103,11 @@ func TestVerifiedClientKey(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to IP when identity is unresolved", func(t *testing.T) {
-		// Reached when an authenticated route is hit without a valid
-		// token; must still be bounded rather than unmetered.
-		if got := verifiedClientKey(newReq("10.0.0.5:9999")); got != "ip:10.0.0.5" {
-			t.Fatalf("got %q want ip:10.0.0.5", got)
+	t.Run("no identity yields no per-account key", func(t *testing.T) {
+		// The route's pre-auth IP limiter is the bound; this limiter must
+		// not open a duplicate IP-keyed bucket for the same cap.
+		if got := verifiedClientKey(newReq("10.0.0.5:9999")); got != "" {
+			t.Fatalf("got %q want empty (pre-auth limiter owns the IP bucket)", got)
 		}
 	})
 

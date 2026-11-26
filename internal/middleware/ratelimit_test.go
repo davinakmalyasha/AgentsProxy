@@ -29,7 +29,14 @@ func testRedis(t *testing.T) *redis.Client {
 	if addr == "" {
 		t.Skip("TEST_REDIS_URL not set - skipping integration test")
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	// CI passes a full redis:// URL (including the DB index); local
+	// convention may be host:port. Parse the URL when present so these
+	// tests actually run in CI instead of skipping on a malformed Addr.
+	opts, err := redis.ParseURL(addr)
+	if err != nil {
+		opts = &redis.Options{Addr: addr}
+	}
+	rdb := redis.NewClient(opts)
 	ctx := context.Background()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		t.Skipf("redis unavailable at %s: %v", addr, err)
@@ -171,24 +178,46 @@ func TestRateLimitClient_SeparatesClientsBehindOneIP(t *testing.T) {
 	}
 }
 
-// A request that reaches an authenticated route with no resolved
-// identity must still be bounded, not left unmetered.
-func TestRateLimitClient_FallsBackToIPWithoutIdentity(t *testing.T) {
+// Without a verified client identity the per-account limiter must do
+// nothing: the pre-auth IP limiter already bounds the caller, and a
+// second IP-keyed bucket here would be a duplicate Redis round trip for
+// the same cap.
+func TestRateLimitClient_NoIdentityDoesNotConsumeBucket(t *testing.T) {
 	rdb := testRedis(t)
 	scope := uniqueScope("noident")
 	h := RateLimitClient(rdb, 2, scope)
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 6; i++ {
 		rec := httptest.NewRecorder()
 		h(next).ServeHTTP(rec, req("10.0.0.8:5555", nil))
-		want := 200
-		if i >= 2 {
-			want = http.StatusTooManyRequests
+		if rec.Code != 200 {
+			t.Fatalf("request %d: got %d want 200 (no identity => no per-account bucket)", i, rec.Code)
 		}
-		if rec.Code != want {
-			t.Fatalf("request %d: got %d want %d (must fall back to IP)", i, rec.Code, want)
+	}
+	keys, err := rdb.Keys(context.Background(), "rl:"+scope+":*").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("no-identity limiter wrote %d Redis bucket(s), want 0", len(keys))
+	}
+
+	// With a verified identity the bucket is real and still enforced.
+	withID := func() int {
+		r := req("10.0.0.8:5555", nil)
+		r = r.WithContext(SetClientID(r.Context(), "client-x"))
+		rec := httptest.NewRecorder()
+		h(next).ServeHTTP(rec, r)
+		return rec.Code
+	}
+	for i := 0; i < 2; i++ {
+		if c := withID(); c != 200 {
+			t.Fatalf("client-x request %d: %d want 200", i, c)
 		}
+	}
+	if c := withID(); c != http.StatusTooManyRequests {
+		t.Fatalf("client-x third request: %d want 429", c)
 	}
 }
 
