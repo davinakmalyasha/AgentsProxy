@@ -32,21 +32,17 @@ func closingReportTool(pool *pgxpool.Pool) agentstools.Tool {
 			}
 			var cash, qris float64
 			var bookings, unpaid int
+			// One round trip, not three: payments aggregates plus both
+			// booking counts in a single row. Same predicates, same
+			// semantics — 3 RTTs halved to 1 on every closing call.
 			err := records.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
-				if err := tx.QueryRow(ctx,
-					`SELECT COALESCE(SUM(amount) FILTER (WHERE method='cash'),0), COALESCE(SUM(amount) FILTER (WHERE method='qris'),0)
-				   FROM sports_payments WHERE tenant_id=$1 AND deleted_at IS NULL AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
-					tenantID, p.Date).Scan(&cash, &qris); err != nil {
-					return err
-				}
-				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM sports_bookings WHERE tenant_id=$1 AND date=$2::date AND status NOT IN ('cancelled','no_show')`,
-					tenantID, p.Date).Scan(&bookings); err != nil {
-					return err
-				}
 				return tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM sports_bookings WHERE tenant_id=$1 AND date=$2::date AND payment_status != 'paid' AND status NOT IN ('cancelled','no_show')`,
-					tenantID, p.Date).Scan(&unpaid)
+					`SELECT COALESCE(SUM(p.amount) FILTER (WHERE p.method='cash'),0),
+					        COALESCE(SUM(p.amount) FILTER (WHERE p.method='qris'),0),
+					        (SELECT COUNT(*) FROM sports_bookings b WHERE b.tenant_id=$1 AND b.date=$2::date AND b.status NOT IN ('cancelled','no_show')),
+					        (SELECT COUNT(*) FROM sports_bookings b WHERE b.tenant_id=$1 AND b.date=$2::date AND b.payment_status != 'paid' AND b.status NOT IN ('cancelled','no_show'))
+					   FROM sports_payments p WHERE p.tenant_id=$1 AND p.deleted_at IS NULL AND (p.paid_at AT TIME ZONE 'Asia/Jakarta')::date = $2::date`,
+					tenantID, p.Date).Scan(&cash, &qris, &bookings, &unpaid)
 			})
 			if err != nil {
 				return "error: " + err.Error()

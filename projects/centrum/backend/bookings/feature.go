@@ -795,7 +795,6 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	}
 	// Status transition validation (Centrum parity)
 	needsStatusCheck := req.Status != nil
-	var currentStatus string
 	if needsStatusCheck {
 		if !validBookingStatuses[*req.Status] {
 			records.WriteJSONError(w, http.StatusBadRequest, "invalid status")
@@ -885,16 +884,21 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 	var affected int64
 	var transitionErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// end_time ordering vs the stored start_time (extend/release), and
-		// the reprice that has to accompany it.
-		if req.EndTime != nil {
-			var start, dateStr, storedEnd string
+		// Single read of the row for every path that needs it (extend /
+		// release validation, release price, status transition). Was 3
+		// sequential SELECTs of the same row (start/date/end, then price,
+		// then status) plus a second rule lookup on extension.
+		var start, dateStr, storedEnd, currentStatus string
+		var currentPrice float64
+		if req.EndTime != nil || needsStatusCheck {
 			if err := tx.QueryRow(r.Context(),
-				`SELECT start_time::text, date::text, end_time::text FROM sports_bookings
+				`SELECT start_time::text, date::text, end_time::text, price, status FROM sports_bookings
 			  WHERE id=$1::uuid AND tenant_id=$2`,
-				id, idn.TenantID()).Scan(&start, &dateStr, &storedEnd); err != nil {
+				id, idn.TenantID()).Scan(&start, &dateStr, &storedEnd, &currentPrice, &currentStatus); err != nil {
 				return err
 			}
+		}
+		if req.EndTime != nil {
 			endT, _ := time.Parse("15:04", *req.EndTime)
 			startT, serr := time.Parse("15:04:05", start)
 			if serr != nil {
@@ -951,22 +955,12 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 				// A release keeps the committed value, so the reserved price
 				// argument must be the CURRENT price rather than the
 				// placeholder nil — otherwise this would write NULL and erase
-				// it.
-				var currentPrice float64
-				if err := tx.QueryRow(r.Context(),
-					`SELECT price FROM sports_bookings WHERE id=$1::uuid AND tenant_id=$2`,
-					id, idn.TenantID()).Scan(&currentPrice); err != nil {
-					return err
-				}
+				// it. Already fetched above; no second SELECT.
 				args[repriceArg-1] = currentPrice
 			}
 		}
-		// Validate transition against current status
+		// Validate transition against current status (already fetched).
 		if needsStatusCheck {
-			if err := tx.QueryRow(r.Context(),
-				`SELECT status FROM sports_bookings WHERE id=$1::uuid AND tenant_id=$2`, id, idn.TenantID()).Scan(&currentStatus); err != nil {
-				return err
-			}
 			allowed := validTransitions[currentStatus]
 			ok := false
 			for _, a := range allowed {

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -90,12 +91,74 @@ type Rule struct {
 // Returns (rule, price, err). ErrNoRule when no rule exists yet.
 var ErrNoRule = fmt.Errorf("no pricing rule for date")
 
+// Small in-process rule cache: rules change rarely, but every booking
+// create, extension reprice, and get_pricing call reads the active rule.
+// The contract gate still runs per call (safety); only the rule SELECT is
+// cached, for 30s per (tenant, date). Writes clear the cache so a new rule
+// is visible immediately (at most one stale read per instance per write,
+// bounded by the TTL anyway).
+var (
+	ruleCacheMu sync.RWMutex
+	ruleCache   = map[string]cachedRule{}
+)
+
+type cachedRule struct {
+	at   time.Time
+	rule Rule
+}
+
+const ruleCacheTTL = 30 * time.Second
+
+func ruleCacheKey(tenantID string, date time.Time) string {
+	return tenantID + "|" + date.Format("2006-01-02")
+}
+
+func ruleCacheGet(tenantID string, date time.Time) (Rule, bool) {
+	k := ruleCacheKey(tenantID, date)
+	now := time.Now()
+	ruleCacheMu.RLock()
+	e, ok := ruleCache[k]
+	ruleCacheMu.RUnlock()
+	if !ok || now.Sub(e.at) >= ruleCacheTTL {
+		return Rule{}, false
+	}
+	return e.rule, true
+}
+
+func ruleCacheSet(tenantID string, date time.Time, r Rule) {
+	k := ruleCacheKey(tenantID, date)
+	ruleCacheMu.Lock()
+	if len(ruleCache) >= 1024 {
+		// Bounded: rules are tiny, tenants are few; drop one arbitrary
+		// entry rather than scanning for expired ones on the hot path.
+		for kk := range ruleCache {
+			delete(ruleCache, kk)
+			break
+		}
+	}
+	ruleCache[k] = cachedRule{at: time.Now(), rule: r}
+	ruleCacheMu.Unlock()
+}
+
+func ruleCacheClear() {
+	ruleCacheMu.Lock()
+	ruleCache = map[string]cachedRule{}
+	ruleCacheMu.Unlock()
+}
+
 func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time) (*Rule, error) {
 	// Contract gate: a tenant rolled forward past this binary refuses
 	// here, before any price is computed — one choke point for RuleFor,
 	// PriceFor, and every caller (bookings, tools, availability).
 	if err := records.CheckContractTx(ctx, tx, tenantID, featureName, SchemaVersion); err != nil {
 		return nil, err
+	}
+	// Cache the rule SELECT only; the contract check above still runs per
+	// call so a rolled-forward tenant never gets a stale allow.
+	day := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+	if cached, ok := ruleCacheGet(tenantID, day); ok {
+		r := cached
+		return &r, nil
 	}
 	var r Rule
 	var validFrom time.Time
@@ -118,6 +181,7 @@ func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, d
 		return nil, err
 	}
 	r.ValidFrom = validFrom
+	ruleCacheSet(tenantID, day, r)
 	return &r, nil
 }
 
@@ -275,6 +339,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	ruleCacheClear()
 	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -446,6 +511,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
+	ruleCacheClear()
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
 
@@ -518,6 +584,7 @@ func (h *handler) applyHours(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	ruleCacheClear()
 	records.WriteJSON(w, http.StatusOK, map[string]any{
 		"open_time":      open.Format("15:04"),
 		"close_time":     closeT.Format("15:04"),
@@ -555,5 +622,6 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
+	ruleCacheClear()
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
 }

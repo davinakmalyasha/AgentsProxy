@@ -122,11 +122,17 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var id string
 	var overpayErr error
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// Lock booking for update and get effective price (override_price > price)
+		// One row lock + one read: booking price and already-paid sum in a
+		// single SELECT (was two sequential round trips). The trigger still
+		// recomputes payment_status after INSERT — that is correctness, not
+		// redundancy we can drop.
 		var price, overridePrice *float64
+		var paid float64
 		if err := tx.QueryRow(r.Context(),
-			`SELECT price, override_price FROM sports_bookings WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE`,
-			req.BookingID, idn.TenantID()).Scan(&price, &overridePrice); err != nil {
+			`SELECT b.price, b.override_price,
+			        (SELECT COALESCE(SUM(p.amount),0) FROM sports_payments p WHERE p.booking_id=$1::uuid AND p.tenant_id=$2 AND p.deleted_at IS NULL)
+			   FROM sports_bookings b WHERE b.id=$1::uuid AND b.tenant_id=$2 FOR UPDATE`,
+			req.BookingID, idn.TenantID()).Scan(&price, &overridePrice, &paid); err != nil {
 			return err
 		}
 		effective := 0.0
@@ -134,12 +140,6 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			effective = *overridePrice
 		} else if price != nil {
 			effective = *price
-		}
-		var paid float64
-		if err := tx.QueryRow(r.Context(),
-			`SELECT COALESCE(SUM(amount),0) FROM sports_payments WHERE booking_id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-			req.BookingID, idn.TenantID()).Scan(&paid); err != nil {
-			return err
 		}
 		outstanding := effective - paid
 		if outstanding <= 0 {
