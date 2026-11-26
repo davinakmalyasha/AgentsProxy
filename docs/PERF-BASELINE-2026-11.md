@@ -254,6 +254,20 @@ Implemented in the edge-cache pass:
 Production verification of the measured win is recorded after the code
 deploy; the pre-change table above remains the comparison baseline.
 
+### RLS initplan hardening (2026-11-26, `b5ab576`)
+
+All 37 tenant RLS policies (`public` + `project_centrum`) now evaluate the
+tenant GUC once per statement via a scalar subquery instead of once per row.
+`EXPLAIN` shows `InitPlan 1` with the index condition on the initplan value;
+`pg_policies` has zero bare `current_setting` calls, and the Supabase
+`auth_rls_initplan` advisory cleared (only INFO-level `unindexed_foreign_keys`
+and `unused_index` remain). The `internal/db`, `tenantdb`, `records`, and
+`centrum/auth` isolation suites pass unchanged, and production smoke passes
+on the migration commit. At the current tiny production dataset this is scale
+hardening, not a latency change — the payoff grows with rows scanned per
+query. Migrations: platform `094_rls_initplan.sql`, Centrum
+`0013_rls_initplan.sql` (migration-only PR #120, applied via `db-migrate`).
+
 ### Post-deploy origin split (2026-11-26, `be7c639`)
 
 Twelve cache-busted samples per endpoint at 0.2 RPS (origin only):
