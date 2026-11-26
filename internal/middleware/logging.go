@@ -152,38 +152,46 @@ func Logging() func(http.Handler) http.Handler {
 			rec := &statusRecorder{ResponseWriter: w, started: start, span: span}
 			next.ServeHTTP(rec, r)
 			dur := time.Since(start)
-			dbDur, redisDur := span.Duration()
-			dbCalls, redisCalls := span.Calls()
-			cid, _ := r.Context().Value(CtxClientID).(string)
-			rid, _ := r.Context().Value(CtxRequestID).(string)
-			attrs := make([]any, 0, 16)
-			attrs = append(attrs,
-				"method", r.Method,
-				"path", RedactPath(r.URL.Path),
-				"status", rec.status,
-				"duration_ms", dur.Milliseconds(),
-				"request_id", rid,
-				"db_ms", dbDur.Milliseconds(),
-				"redis_ms", redisDur.Milliseconds(),
-				"db_calls", dbCalls,
-				"redis_calls", redisCalls,
-			)
-			if cid != "" {
-				attrs = append(attrs, "client_id", cid)
-			}
 			// Successful reads are Debug: at Info, every landing-page
 			// poll and every /healthz probe is a log line, and on
 			// Vercel log volume is a metered ingestion path. Errors
 			// and writes stay Info so failures are always visible.
-			if rec.status >= 400 || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-				slog.Info("http", attrs...)
-			} else {
-				slog.Debug("http", attrs...)
+			// Build attrs lazily: prod runs at Info, so successful GETs
+			// must not pay the 16-cap slice + RedactPath before the
+			// level check drops them.
+			isWriteOrErr := rec.status >= 400 || (r.Method != http.MethodGet && r.Method != http.MethodHead)
+			if isWriteOrErr || slog.Default().Enabled(r.Context(), slog.LevelDebug) {
+				dbDur, redisDur := span.Duration()
+				dbCalls, redisCalls := span.Calls()
+				cid, _ := r.Context().Value(CtxClientID).(string)
+				rid, _ := r.Context().Value(CtxRequestID).(string)
+				attrs := make([]any, 0, 16)
+				attrs = append(attrs,
+					"method", r.Method,
+					"path", RedactPath(r.URL.Path),
+					"status", rec.status,
+					"duration_ms", dur.Milliseconds(),
+					"request_id", rid,
+					"db_ms", dbDur.Milliseconds(),
+					"redis_ms", redisDur.Milliseconds(),
+					"db_calls", dbCalls,
+					"redis_calls", redisCalls,
+				)
+				if cid != "" {
+					attrs = append(attrs, "client_id", cid)
+				}
+				if isWriteOrErr {
+					slog.Info("http", attrs...)
+				} else {
+					slog.Debug("http", attrs...)
+				}
 			}
 			// Sentry breadcrumb so events in this request carry context.
 			// Skip liveness probes: they would flood breadcrumbs with
 			// zero user value.
 			if r.URL.Path != "/healthz" && sentry.Enabled() {
+				cid, _ := r.Context().Value(CtxClientID).(string)
+				rid, _ := r.Context().Value(CtxRequestID).(string)
 				bc := map[string]any{
 					"method":      r.Method,
 					"path":        RedactPath(r.URL.Path),

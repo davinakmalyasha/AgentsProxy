@@ -103,6 +103,43 @@ func RPDCapAllowedForUser(ctx context.Context, tenantID, role, userID string) bo
 	return n <= int64(cap)
 }
 
+// CapsAllowed checks both the per-person RPD and the per-tenant cost cap
+// in one Redis round trip (pipelined Lua). It preserves the exact
+// fail-closed semantics of the two sequential checks: any Redis error
+// denies, and each counter is compared against its own cap. The TTL is
+// computed once so both keys share the same midnight anchor.
+func CapsAllowed(ctx context.Context, tenantID, role, userID string) (rpdOK, costOK bool) {
+	if CapRDB == nil {
+		return true, true
+	}
+	rpdCap, costCap := RPDCallsOwner, CapCallsOwner
+	switch role {
+	case "client":
+		rpdCap, costCap = RPDCallsClient, CapCallsClient
+	case "pegawai":
+		rpdCap, costCap = RPDCallsStaff, CapCallsStaff
+	case "owner":
+		rpdCap, costCap = RPDCallsOwner, CapCallsOwner
+	}
+	ttl := capTTL()
+	day := WibNow().Format("2006-01-02")
+	rpdKey := "rpd:" + tenantID + ":" + role + ":" + firstNonEmpty(userID, "anon") + ":" + day
+	costKey := "agcap:" + tenantID + ":" + role + ":" + day
+	nRPD, nCost, err := redisx.IncrExpireTwo(ctx, CapRDB, rpdKey, ttl, costKey, ttl)
+	if err != nil {
+		slog.Error("caps redis unavailable, denying", "tenant", tenantID, "role", role, "err", err)
+		return false, false
+	}
+	return nRPD <= int64(rpdCap), nCost <= int64(costCap)
+}
+
+func firstNonEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
 // DefaultOwnerContact is the fallback when a tenant names no contact in
 // its project.json. It is deliberately NOT a real person's number: a tenant
 // without its own contact must never route its visitors to another tenant.

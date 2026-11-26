@@ -429,18 +429,38 @@ func TestRecords_AdapterCreateRecordsUsage(t *testing.T) {
 	}
 	resp.Body.Close()
 	var after int
-	var kind string
-	if err := h.admin.QueryRow(ctx,
-		`SELECT count(*),
-		        (SELECT kind FROM usage WHERE client_id = `+clientOf+` ORDER BY id DESC LIMIT 1)
-		   FROM usage WHERE client_id = `+clientOf).Scan(&after, &kind); err != nil {
-		t.Fatal(err)
+	var kind *string
+	// Metering is async (off the 201 path): poll for the row with a
+	// deadline instead of asserting it exists on return. The contract
+	// under test is kind='business', not write timing.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var k *string
+		var n int
+		if err := h.admin.QueryRow(ctx,
+			`SELECT count(*),
+			        (SELECT kind FROM usage WHERE client_id = `+clientOf+` ORDER BY id DESC LIMIT 1)
+			   FROM usage WHERE client_id = `+clientOf).Scan(&n, &k); err != nil {
+			t.Fatal(err)
+		}
+		after, kind = n, k
+		if n == before+1 && k != nil && *k == "business" {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if after != before+1 {
 		t.Errorf("usage rows after=%d before=%d want exactly one new row", after, before)
 	}
-	if kind != "business" {
-		t.Errorf("usage kind=%q want business", kind)
+	gotKind := ""
+	if kind != nil {
+		gotKind = *kind
+	}
+	if gotKind != "business" {
+		t.Errorf("usage kind=%q want business", gotKind)
 	}
 }
 

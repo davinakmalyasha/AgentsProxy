@@ -469,10 +469,13 @@ func (r *Runner) RunWithToolsRole(ctx context.Context, tenantID, vertical, userN
 	if role == "client" && agentstools.IsOffTopicFor(message, effectiveVertical) {
 		return agentstools.ScopeReplyFor(display, contact), nil
 	}
-	if !agentstools.RPDCapAllowedForUser(ctx, tenantID, role, userName) {
+	// One Redis round trip for both caps (pipelined Lua), same
+	// fail-closed semantics as the two sequential checks.
+	rpdOK, costOK := agentstools.CapsAllowed(ctx, tenantID, role, userName)
+	if !rpdOK {
 		return agentstools.AbuseReplyFor(contact), nil
 	}
-	if !agentstools.CostCapAllowedForRole(ctx, tenantID, role) {
+	if !costOK {
 		return "Daily AI usage limit reached. Try again tomorrow.", nil
 	}
 

@@ -111,6 +111,9 @@ func (RedisHook) DialHook(next redis.DialHook) redis.DialHook {
 
 func (RedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
+		if From(ctx) == nil {
+			return next(ctx, cmd)
+		}
 		start := time.Now()
 		err := next(ctx, cmd)
 		if s := From(ctx); s != nil {
@@ -122,6 +125,9 @@ func (RedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 
 func (RedisHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if From(ctx) == nil {
+			return next(ctx, cmds)
+		}
 		start := time.Now()
 		err := next(ctx, cmds)
 		if s := From(ctx); s != nil {

@@ -113,17 +113,26 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	typ := r.URL.Query().Get("type")
 
 	key := idn.TenantID() + "|" + date + "|" + typ
+	// Origin probes (bench --cache-bust appends __bench_cb) must bypass
+	// the in-process cache: the key deliberately ignores extra query
+	// params, so without this every "origin" sample would still hit
+	// memory. Only bench traffic carries the param; prod keys never do.
+	_, isBust := r.URL.Query()["__bench_cb"]
 	now := time.Now()
-	h.cacheMu.Lock()
-	hit, ok := h.cache[key]
-	h.cacheMu.Unlock()
-	if ok && now.Sub(hit.at) < cacheTTL {
-		if idn.IsPublic() {
-			records.MarkPublicCache(w, 2, 5)
+	if !isBust {
+		h.cacheMu.Lock()
+		hit, ok := h.cache[key]
+		h.cacheMu.Unlock()
+		if ok && now.Sub(hit.at) < cacheTTL {
+			w.Header().Set("X-Avail-Cache", "hit")
+			if idn.IsPublic() {
+				records.MarkPublicCache(w, 2, 5)
+			}
+			records.WriteJSON(w, http.StatusOK, hit.payload)
+			return
 		}
-		records.WriteJSON(w, http.StatusOK, hit.payload)
-		return
 	}
+	w.Header().Set("X-Avail-Cache", "miss")
 
 	payloadAny, err, _ := h.sf.Do(key, func() (any, error) {
 		// Detach from the first waiter's cancellation: all tabs behind a
@@ -146,19 +155,21 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	if h.cache == nil {
 		h.cache = map[string]cachedAvail{}
 	}
-	// Evict expired entries first so the map cannot grow without bound;
-	// then enforce the cap by dropping one entry (every entry is at
-	// most seconds old, so any drop is cheap and self-healing).
-	now2 := time.Now()
-	for k, v := range h.cache {
-		if now2.Sub(v.at) >= cacheTTL {
-			delete(h.cache, k)
-		}
-	}
+	// Lazy evict: the map is tiny and entries expire in 3s, so scanning
+	// on every miss is pure O(cap) overhead on the hottest endpoint.
+	// Scan only when the cap is actually reached.
 	if len(h.cache) >= maxAvailCacheEntries {
-		for k := range h.cache {
-			delete(h.cache, k)
-			break
+		now2 := time.Now()
+		for k, v := range h.cache {
+			if now2.Sub(v.at) >= cacheTTL {
+				delete(h.cache, k)
+			}
+		}
+		if len(h.cache) >= maxAvailCacheEntries {
+			for k := range h.cache {
+				delete(h.cache, k)
+				break
+			}
 		}
 	}
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
