@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/reqmetrics"
 )
 
 func NewClient(ctx context.Context, rawURL string) (*redis.Client, error) {
@@ -35,6 +37,7 @@ func NewClient(ctx context.Context, rawURL string) (*redis.Client, error) {
 	opts.MaxRetries = 1
 	opts.ContextTimeoutEnabled = true
 	c := redis.NewClient(opts)
+	c.AddHook(reqmetrics.RedisHook{})
 	// A TLS blip during a cold start must not kill the instance:
 	// retry the readiness probe a few times before failing boot.
 	var pingErr error

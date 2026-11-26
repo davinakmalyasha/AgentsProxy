@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/reqmetrics"
 )
 
 type Pool = pgxpool.Pool
@@ -58,6 +60,7 @@ func NewPoolWithOptions(ctx context.Context, dsn string, opts NewPoolOptions) (*
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	cfg.ConnConfig.Tracer = reqmetrics.PGTracer{}
 	cfg.MinConns = int32(opts.MinConns)
 	cfg.MaxConns = int32(opts.MaxConns)
 	cfg.MaxConnLifetime = time.Hour

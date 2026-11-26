@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/davinakmalyasha/agents-proxy/internal/reqmetrics"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
 )
 
@@ -73,13 +74,22 @@ type statusRecorder struct {
 	status  int
 	bytes   int
 	started time.Time
+	span    *reqmetrics.Span
 }
 
 func (s *statusRecorder) finalizeHeaders() {
-	if s.Header().Get("Server-Timing") == "" {
-		ms := float64(time.Since(s.started).Microseconds()) / 1000.0
-		s.Header().Set("Server-Timing", fmt.Sprintf("app;dur=%.3f", ms))
+	if s.Header().Get("Server-Timing") != "" {
+		return
 	}
+	ms := float64(time.Since(s.started).Microseconds()) / 1000.0
+	timing := fmt.Sprintf("app;dur=%.3f", ms)
+	if s.span != nil {
+		db, redis := s.span.Duration()
+		timing += fmt.Sprintf(", db;dur=%.3f, redis;dur=%.3f",
+			float64(db.Microseconds())/1000.0,
+			float64(redis.Microseconds())/1000.0)
+	}
+	s.Header().Set("Server-Timing", timing)
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -136,19 +146,27 @@ func Logging() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			span := reqmetrics.New()
+			r = r.WithContext(reqmetrics.With(r.Context(), span))
 			w.Header().Set("X-Instance-Id", InstanceID())
-			rec := &statusRecorder{ResponseWriter: w, started: start}
+			rec := &statusRecorder{ResponseWriter: w, started: start, span: span}
 			next.ServeHTTP(rec, r)
 			dur := time.Since(start)
+			dbDur, redisDur := span.Duration()
+			dbCalls, redisCalls := span.Calls()
 			cid, _ := r.Context().Value(CtxClientID).(string)
 			rid, _ := r.Context().Value(CtxRequestID).(string)
-			attrs := make([]any, 0, 12)
+			attrs := make([]any, 0, 16)
 			attrs = append(attrs,
 				"method", r.Method,
 				"path", RedactPath(r.URL.Path),
 				"status", rec.status,
 				"duration_ms", dur.Milliseconds(),
 				"request_id", rid,
+				"db_ms", dbDur.Milliseconds(),
+				"redis_ms", redisDur.Milliseconds(),
+				"db_calls", dbCalls,
+				"redis_calls", redisCalls,
 			)
 			if cid != "" {
 				attrs = append(attrs, "client_id", cid)

@@ -3,14 +3,18 @@ package main
 import "testing"
 
 func TestParseServerTiming(t *testing.T) {
-	cases := map[string]float64{
-		"app;dur=12.345":          12.345,
-		"edge;dur=1, app;dur=7.5": 7.5,
-		"":                        0,
-		"cache;desc=hit":          0,
+	cases := map[string][3]float64{
+		"app;dur=12.345":                                {12.345, 0, 0},
+		"edge;dur=1, app;dur=7.5":                       {7.5, 0, 0},
+		"app;dur=12.795, db;dur=3.210, redis;dur=1.050": {12.795, 3.21, 1.05},
+		"app;dur=10, db;dur=0, redis;dur=0":             {10, 0, 0},
+		"":                                              {0, 0, 0},
+		"cache;desc=hit":                                {0, 0, 0},
 	}
 	for header, want := range cases {
-		if got := parseServerTiming(header); got != want {
+		app, db, redis := parseServerTiming(header)
+		got := [3]float64{app, db, redis}
+		if got != want {
 			t.Errorf("parseServerTiming(%q) = %v, want %v", header, got, want)
 		}
 	}

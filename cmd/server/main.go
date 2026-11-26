@@ -51,6 +51,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
 		os.Exit(healthcheck())
 	}
+	bootStart := time.Now()
+	phase := func(name string, start time.Time) {
+		slog.Info("boot phase", "phase", name, "duration_ms", time.Since(start).Milliseconds())
+	}
+	cfgStart := time.Now()
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config load", "err", err)
@@ -93,6 +98,7 @@ func main() {
 	// prints every boot so a misconfiguration is visible from the first
 	// screen; Config.String masks keys and DSN credentials.
 	slog.Info("config loaded", "summary", cfg.String())
+	phase("config", cfgStart)
 
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer bootCancel()
@@ -101,6 +107,7 @@ func main() {
 	// app_runtime role. In production this DSN points at the
 	// Supabase Supavisor 6543 pooler with simple protocol; the
 	// admin DSN points at 5432 direct for DDL.
+	poolStart := time.Now()
 	pool, err := db.NewPoolWithOptions(bootCtx, cfg.DatabaseURL, db.NewPoolOptions{
 		MinConns:          cfg.DBPoolMin,
 		MaxConns:          cfg.DBPoolMax,
@@ -112,6 +119,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	phase("db_pool", poolStart)
 	slog.Info("db connected")
 
 	// Migrations use a separate admin connection (default = same DSN).
@@ -128,6 +136,7 @@ func main() {
 	// Max 3 bounds migrate + admin endpoints + one worker. Idle sessions
 	// close after a minute so cold-start instances stop counting against
 	// the cap almost immediately.
+	adminStart := time.Now()
 	adminPool, err := db.NewPoolWithOptions(bootCtx, adminDSN, db.NewPoolOptions{
 		MinConns:        cfg.DBAdminPoolMin,
 		MaxConns:        cfg.DBAdminPoolMax,
@@ -139,6 +148,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer adminPool.Close()
+	phase("admin_pool", adminStart)
 	// Migrations are a deploy step on serverless: every cold start
 	// replaying the ledger inside an advisory lock costs 150ms+ and
 	// serializes parallel boots. Vercel sets RUN_MIGRATIONS=false;
@@ -198,11 +208,13 @@ func main() {
 	// router. Boot-load failure is fatal (fail closed — boot already
 	// exits without a database). Refresh runs gated like every other
 	// background loop; on serverless each cold start reloads instead.
+	originsStart := time.Now()
 	origins, err := middleware.NewDBResolver(bootCtx, pool)
 	if err != nil {
 		slog.Error("origins load", "err", err)
 		os.Exit(1)
 	}
+	phase("origins", originsStart)
 	ex, su := origins.Counts()
 	slog.Info("origins loaded", "exact", ex, "suffix", su)
 	if cfg.BackgroundTickers {
@@ -219,7 +231,9 @@ func main() {
 	// Fatal is still the point for shared mistakes: a config that cannot
 	// even be listed means no tenant can be evaluated, and the deploy
 	// must fail loudly rather than serve an empty world.
+	manifestStart := time.Now()
 	projectCfgs, badProjects := agentconfig.LoadCollect()
+	phase("manifest", manifestStart)
 	for slug, err := range features.ValidateProjectDeclarations(projectCfgs) {
 		badProjects[slug] = err
 		delete(projectCfgs, slug)
@@ -483,7 +497,8 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("listening", "addr", srv.Addr, "env", cfg.Env, "model", cfg.LLMModel)
+		slog.Info("listening", "addr", srv.Addr, "env", cfg.Env, "model", cfg.LLMModel,
+			"boot_ms", time.Since(bootStart).Milliseconds())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("listen", "err", err)
 			os.Exit(1)

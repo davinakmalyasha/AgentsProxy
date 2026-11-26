@@ -58,6 +58,8 @@ type sample struct {
 	status   int
 	err      bool
 	serverMs float64
+	dbMs     float64
+	redisMs  float64
 	instance string
 	cold     bool
 	cache    string
@@ -107,6 +109,8 @@ type stats struct {
 	ServerP50Ms  float64     `json:"server_p50_ms,omitempty"`
 	ServerP95Ms  float64     `json:"server_p95_ms,omitempty"`
 	ServerP99Ms  float64     `json:"server_p99_ms,omitempty"`
+	DbP95Ms      float64     `json:"db_p95_ms,omitempty"`
+	RedisP95Ms   float64     `json:"redis_p95_ms,omitempty"`
 	Instances    int         `json:"instances,omitempty"`
 	ColdRequests int         `json:"cold_requests,omitempty"`
 	ColdP95Ms    float64     `json:"cold_p95_ms,omitempty"`
@@ -417,6 +421,8 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 	st := stats{Name: sc.name, StatusCodes: map[int]int{}, ElapsedMS: elapsed.Milliseconds()}
 	durs := make([]time.Duration, 0, len(samples))
 	serverDurs := make([]time.Duration, 0, len(samples))
+	dbDurs := make([]time.Duration, 0, len(samples))
+	redisDurs := make([]time.Duration, 0, len(samples))
 	coldDurs := make([]time.Duration, 0, len(samples))
 	warmDurs := make([]time.Duration, 0, len(samples))
 	originDurs := make([]time.Duration, 0, len(samples))
@@ -436,6 +442,12 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 		originDurs = append(originDurs, s.dur)
 		if s.serverMs > 0 {
 			serverDurs = append(serverDurs, time.Duration(s.serverMs*float64(time.Millisecond)))
+		}
+		if s.dbMs > 0 {
+			dbDurs = append(dbDurs, time.Duration(s.dbMs*float64(time.Millisecond)))
+		}
+		if s.redisMs > 0 {
+			redisDurs = append(redisDurs, time.Duration(s.redisMs*float64(time.Millisecond)))
 		}
 		if s.instance != "" {
 			if s.cold {
@@ -465,6 +477,14 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 		st.ServerP50Ms = ms(percentile(serverDurs, 0.50))
 		st.ServerP95Ms = ms(percentile(serverDurs, 0.95))
 		st.ServerP99Ms = ms(percentile(serverDurs, 0.99))
+	}
+	if len(dbDurs) > 0 {
+		sort.Slice(dbDurs, func(i, j int) bool { return dbDurs[i] < dbDurs[j] })
+		st.DbP95Ms = ms(percentile(dbDurs, 0.95))
+	}
+	if len(redisDurs) > 0 {
+		sort.Slice(redisDurs, func(i, j int) bool { return redisDurs[i] < redisDurs[j] })
+		st.RedisP95Ms = ms(percentile(redisDurs, 0.95))
 	}
 	if len(coldDurs) > 0 {
 		sort.Slice(coldDurs, func(i, j int) bool { return coldDurs[i] < coldDurs[j] })
@@ -507,7 +527,7 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 		return sample{dur: time.Since(start), err: true}
 	}
 	instance := resp.Header.Get("X-Instance-Id")
-	serverMs := parseServerTiming(resp.Header.Get("Server-Timing"))
+	serverMs, dbMs, redisMs := parseServerTiming(resp.Header.Get("Server-Timing"))
 	cacheState := strings.ToLower(strings.TrimSpace(resp.Header.Get("X-Vercel-Cache")))
 	cold := false
 	if cacheState != "hit" {
@@ -527,31 +547,42 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 				}
 				dresp, derr := client.Do(dr)
 				if derr != nil {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
 				}
 				_, _ = io.Copy(io.Discard, io.LimitReader(dresp.Body, 1<<20))
 				dresp.Body.Close()
 				if dresp.StatusCode != http.StatusOK && dresp.StatusCode != http.StatusNoContent {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
+					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
 				}
 			}
 		}
 	}
-	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, instance: instance, cold: cold, cache: cacheState}
+	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
 }
 
-func parseServerTiming(header string) float64 {
+// parseServerTiming extracts app, db, and redis durations from the
+// Server-Timing header. Old servers send only app;dur, which still parses;
+// missing metrics stay zero rather than failing the sample.
+func parseServerTiming(header string) (app, db, redis float64) {
 	for _, part := range strings.Split(header, ",") {
 		part = strings.TrimSpace(part)
-		if !strings.HasPrefix(part, "app;dur=") {
-			continue
-		}
-		var ms float64
-		if _, err := fmt.Sscanf(strings.TrimPrefix(part, "app;dur="), "%f", &ms); err == nil {
-			return ms
+		var v float64
+		switch {
+		case strings.HasPrefix(part, "app;dur="):
+			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "app;dur="), "%f", &v); err == nil {
+				app = v
+			}
+		case strings.HasPrefix(part, "db;dur="):
+			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "db;dur="), "%f", &v); err == nil {
+				db = v
+			}
+		case strings.HasPrefix(part, "redis;dur="):
+			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "redis;dur="), "%f", &v); err == nil {
+				redis = v
+			}
 		}
 	}
-	return 0
+	return app, db, redis
 }
 
 func login(ctx context.Context, client *http.Client, o *options) (string, error) {
