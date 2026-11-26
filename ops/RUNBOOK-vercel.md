@@ -127,7 +127,7 @@ Supabase-side delivery are required rather than optional.
 | Supabase pg_cron | `reminder-tick` | `*/2` | probe-gated Edge invocation (only when a reminder is due) |
 | Supabase pg_cron | `reaper-tick` | `*/5` | hands back orphaned claims (older than 10 min) |
 | Supabase pg_cron | `retention-tick` | `17 20` (03:17 WIB) | batched deletes: sessions 7d, sent reminders 90d, dead 30d, usage 400d, archived notify 14d, events 180d, report backstop |
-| Supabase pg_cron | `report-jobs-tick` | `* * * * *` | deferred report builds (064): reaps stale `working` jobs, then posts ONE build to the backend worker. No-op until the Vault secrets `report_worker_url` + `report_worker_token` exist (see `ops/schedule-report-jobs.sql`). |
+| Supabase pg_cron | `report-jobs-tick` | `* * * * *` | deferred report builds (064): probe-first (two indexed probes, no writes when idle), reaps stale `working` jobs, then posts ONE build to the backend worker. No-op until the Vault secrets `report_worker_url` + `report_worker_token` exist (see `ops/schedule-report-jobs.sql`). |
 | GitHub Actions | `backup.yml` | `0 18,0,6,12` (01/07/13/19 WIB) | pg_dump of `public`+`private`+`project_*` → artifact (30d) → restore-smoke into postgres:17 |
 | GitHub Actions | `smoke.yml` | `*/30` | backend `/healthz`, Centrum API, DFD catalog (3 attempts each) |
 | GitHub Actions | `schema-check.yml` | `17 2` (09:17 WIB) | read-only `migrate check` against production |
