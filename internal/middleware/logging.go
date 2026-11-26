@@ -148,6 +148,9 @@ func Logging() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			span := reqmetrics.New()
+			// Due SLO histograms flush in the background while this request
+			// runs, so the write completes before a serverless freeze.
+			slo.MaybeFlush()
 			r = r.WithContext(reqmetrics.With(r.Context(), span))
 			w.Header().Set("X-Instance-Id", InstanceID())
 			rec := &statusRecorder{ResponseWriter: w, started: start, span: span}
