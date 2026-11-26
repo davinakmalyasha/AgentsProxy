@@ -679,20 +679,6 @@ func (s *pgxSessionService) Get(ctx context.Context, req *session.GetRequest) (*
 	err := s.withTenantTx(ctx, req.AppName, func(tx pgx.Tx) error {
 		var stateSrc any
 		var createTime time.Time
-		if err := tx.QueryRow(ctx,
-			`SELECT state, create_time, update_time FROM sessions
-			  WHERE app_name=$1 AND user_id=$2 AND id=$3`,
-			req.AppName, req.UserID, req.SessionID).Scan(&stateSrc, &createTime, &updateTime); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("%w: %q: %w", session.ErrNotFound, req.SessionID, err)
-			}
-			return fmt.Errorf("database error while fetching session: %w", err)
-		}
-		var err error
-		storedState, err = decodeStateMap(stateSrc)
-		if err != nil {
-			return fmt.Errorf("failed to map storage object: %w", err)
-		}
 
 		q := `SELECT ` + eventColumns + ` FROM events
 		      WHERE app_name=$1 AND user_id=$2 AND session_id=$3`
@@ -705,31 +691,100 @@ func (s *pgxSessionService) Get(ctx context.Context, req *session.GetRequest) (*
 		if req.NumRecentEvents > 0 {
 			q += fmt.Sprintf(` LIMIT %d`, req.NumRecentEvents)
 		}
-		rows, err := tx.Query(ctx, q, args...)
-		if err != nil {
-			return fmt.Errorf("database error while fetching events: %w", err)
-		}
-		for rows.Next() {
-			ev, err := scanEventRow(rows)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to map storage event: %w", err)
-			}
-			storageEvents = append(storageEvents, ev)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("database error while fetching events: %w", err)
-		}
-		rows.Close()
 
-		appState, _, err = fetchAppStateTx(ctx, tx, req.AppName)
-		if err != nil {
-			return fmt.Errorf("error on get session: %w", err)
+		var appSrc []byte
+		var appFound bool
+		var userSrc []byte
+		var userFound bool
+
+		// One round trip for all four reads. The runner calls Get on
+		// every agent turn; four sequential queries plus tx framing was
+		// seven round trips before the pooler. pgx concatenates the
+		// batch into a single message in simple-protocol mode (Supavisor)
+		// and pipelines it in extended mode, so both paths collapse to
+		// one round trip plus commit. Callbacks run in queue order, so a
+		// missing session still short-circuits with ErrNotFound exactly
+		// like the sequential code.
+		batch := &pgx.Batch{}
+		batch.Queue(
+			`SELECT state, create_time, update_time FROM sessions
+			  WHERE app_name=$1 AND user_id=$2 AND id=$3`,
+			req.AppName, req.UserID, req.SessionID,
+		).QueryRow(func(row pgx.Row) error {
+			if err := row.Scan(&stateSrc, &createTime, &updateTime); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return fmt.Errorf("%w: %q: %w", session.ErrNotFound, req.SessionID, err)
+				}
+				return fmt.Errorf("database error while fetching session: %w", err)
+			}
+			return nil
+		})
+		batch.Queue(q, args...).Query(func(rows pgx.Rows) error {
+			defer rows.Close()
+			for rows.Next() {
+				ev, err := scanEventRow(rows)
+				if err != nil {
+					return fmt.Errorf("failed to map storage event: %w", err)
+				}
+				storageEvents = append(storageEvents, ev)
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("database error while fetching events: %w", err)
+			}
+			return nil
+		})
+		batch.Queue(
+			`SELECT state, update_time FROM app_states WHERE app_name=$1`,
+			req.AppName,
+		).QueryRow(func(row pgx.Row) error {
+			var ut time.Time
+			if err := row.Scan(&appSrc, &ut); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return fmt.Errorf("error on get session: %w", err)
+			}
+			appFound = true
+			return nil
+		})
+		batch.Queue(
+			`SELECT state, update_time FROM user_states WHERE app_name=$1 AND user_id=$2`,
+			req.AppName, req.UserID,
+		).QueryRow(func(row pgx.Row) error {
+			var ut time.Time
+			if err := row.Scan(&userSrc, &ut); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return fmt.Errorf("error on get session: %w", err)
+			}
+			userFound = true
+			return nil
+		})
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return err
 		}
-		userState, _, err = fetchUserStateTx(ctx, tx, req.AppName, req.UserID)
+
+		var err error
+		storedState, err = decodeStateMap(stateSrc)
 		if err != nil {
-			return fmt.Errorf("error on get session: %w", err)
+			return fmt.Errorf("failed to map storage object: %w", err)
+		}
+		if appFound {
+			appState, err = decodeStateMap(appSrc)
+		} else {
+			appState = make(map[string]any)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to map storage object: %w", err)
+		}
+		if userFound {
+			userState, err = decodeStateMap(userSrc)
+		} else {
+			userState = make(map[string]any)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to map storage object: %w", err)
 		}
 		return nil
 	})
