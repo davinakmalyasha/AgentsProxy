@@ -76,6 +76,10 @@ func TrustedPeer(remoteAddr string) bool {
 	if onVercel() {
 		return true
 	}
+	return trustedPeerAddr(remoteAddr)
+}
+
+func trustedPeerAddr(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
@@ -104,11 +108,13 @@ func cleanIP(s string) string {
 // peers, else the TCP peer with the port stripped. It never returns an
 // empty string, so Redis keys stay well-formed.
 func ClientIP(r *http.Request) string {
-	if TrustedPeer(r.RemoteAddr) {
+	// Single VERCEL lookup per request (was two: TrustedPeer + below).
+	isVercel := onVercel()
+	if isVercel || trustedPeerAddr(r.RemoteAddr) {
 		// Vercel documents X-Forwarded-For as overwritten and identical
 		// to X-Real-IP. Prefer it so a client-supplied X-Real-IP cannot
 		// win there.
-		if onVercel() {
+		if isVercel {
 			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 				if ip := cleanIP(strings.Split(xff, ",")[0]); ip != "" {
 					return ip

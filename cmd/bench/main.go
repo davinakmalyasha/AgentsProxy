@@ -63,6 +63,7 @@ type sample struct {
 	instance string
 	cold     bool
 	cache    string
+	availHit string
 }
 
 var cacheBustSeq atomic.Uint64
@@ -119,6 +120,8 @@ type stats struct {
 	CacheHits    int         `json:"cache_hits,omitempty"`
 	OriginReqs   int         `json:"origin_requests,omitempty"`
 	OriginP95Ms  float64     `json:"origin_p95_ms,omitempty"`
+	AvailHits    int         `json:"avail_hits,omitempty"`
+	AvailMiss    int         `json:"avail_miss,omitempty"`
 	StatusCodes  map[int]int `json:"status_codes"`
 	ElapsedMS    int64       `json:"elapsed_ms"`
 	Notes        []string    `json:"notes,omitempty"`
@@ -207,8 +210,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	var results []stats
-	tracker := newInstanceTracker()
 	for _, sc := range selected {
+		tracker := newInstanceTracker()
 		if o.warmup > 0 {
 			warm(ctx, client, sc, &o, tracker)
 		}
@@ -434,6 +437,11 @@ func measure(ctx context.Context, client *http.Client, sc scenario, o *options, 
 			continue
 		}
 		durs = append(durs, s.dur)
+		if s.availHit == "hit" {
+			st.AvailHits++
+		} else if s.availHit == "miss" {
+			st.AvailMiss++
+		}
 		if s.cache == "hit" {
 			st.CacheHits++
 			continue
@@ -529,12 +537,14 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 	instance := resp.Header.Get("X-Instance-Id")
 	serverMs, dbMs, redisMs := parseServerTiming(resp.Header.Get("Server-Timing"))
 	cacheState := strings.ToLower(strings.TrimSpace(resp.Header.Get("X-Vercel-Cache")))
+	avail := strings.ToLower(strings.TrimSpace(resp.Header.Get("X-Avail-Cache")))
 	cold := false
 	if cacheState != "hit" {
 		cold = tracker.observe(instance)
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
+	postDur := time.Since(start)
 	if sc.createPath != "" && resp.StatusCode == http.StatusCreated {
 		var created struct {
 			ID string `json:"id"`
@@ -547,17 +557,35 @@ func do(ctx context.Context, client *http.Client, sc scenario, o *options, track
 				}
 				dresp, derr := client.Do(dr)
 				if derr != nil {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
+					return sample{dur: postDur, status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState, availHit: avail}
 				}
 				_, _ = io.Copy(io.Discard, io.LimitReader(dresp.Body, 1<<20))
 				dresp.Body.Close()
 				if dresp.StatusCode != http.StatusOK && dresp.StatusCode != http.StatusNoContent {
-					return sample{dur: time.Since(start), status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
+					return sample{dur: postDur, status: resp.StatusCode, err: true, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState, availHit: avail}
 				}
 			}
 		}
 	}
-	return sample{dur: time.Since(start), status: resp.StatusCode, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState}
+	return sample{dur: postDur, status: resp.StatusCode, serverMs: serverMs, dbMs: dbMs, redisMs: redisMs, instance: instance, cold: cold, cache: cacheState, availHit: avail}
+}
+
+// parseDur extracts a leading float from a Server-Timing dur value,
+// tolerating quoted forms (dur="12.3") and params (;desc=...).
+func parseDur(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, 59); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	s = strings.Trim(s, "\"")
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // parseServerTiming extracts app, db, and redis durations from the
@@ -569,15 +597,18 @@ func parseServerTiming(header string) (app, db, redis float64) {
 		var v float64
 		switch {
 		case strings.HasPrefix(part, "app;dur="):
-			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "app;dur="), "%f", &v); err == nil {
+			if vv, ok := parseDur(strings.TrimPrefix(part, "app;dur=")); ok {
+				v = vv
 				app = v
 			}
 		case strings.HasPrefix(part, "db;dur="):
-			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "db;dur="), "%f", &v); err == nil {
+			if vv, ok := parseDur(strings.TrimPrefix(part, "db;dur=")); ok {
+				v = vv
 				db = v
 			}
 		case strings.HasPrefix(part, "redis;dur="):
-			if _, err := fmt.Sscanf(strings.TrimPrefix(part, "redis;dur="), "%f", &v); err == nil {
+			if vv, ok := parseDur(strings.TrimPrefix(part, "redis;dur=")); ok {
+				v = vv
 				redis = v
 			}
 		}
@@ -632,12 +663,12 @@ func ms(d time.Duration) float64 {
 }
 
 func printTable(w io.Writer, results []stats) {
-	fmt.Fprintf(w, "%-26s %8s %8s %8s %8s %8s %8s %8s %6s %8s %8s\n",
-		"scenario", "req", "err", "rps", "p50ms", "p95ms", "p99ms", "srv95", "inst", "cold95", "warm95")
+	fmt.Fprintf(w, "%-26s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %8s %8s\n",
+		"scenario", "req", "err", "rps", "p50ms", "p95ms", "p99ms", "srv95", "org95", "db95", "red95", "inst", "coldN", "cold95", "warm95")
 	for _, r := range results {
-		fmt.Fprintf(w, "%-26s %8d %8d %8.1f %8.2f %8.2f %8.2f %8.2f %6d %8.2f %8.2f\n",
+		fmt.Fprintf(w, "%-26s %8d %8d %8.1f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %6d %8d %8.2f %8.2f\n",
 			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P95Ms, r.P99Ms,
-			r.ServerP95Ms, r.Instances, r.ColdP95Ms, r.WarmP95Ms)
+			r.ServerP95Ms, r.OriginP95Ms, r.DbP95Ms, r.RedisP95Ms, r.Instances, r.ColdRequests, r.ColdP95Ms, r.WarmP95Ms)
 	}
 }
 
@@ -651,12 +682,12 @@ func writeJSON(path string, results []stats) error {
 
 func writeMarkdown(path string, results []stats) error {
 	var b strings.Builder
-	b.WriteString("| scenario | requests | errors | rps | p50 ms | p90 ms | p95 ms | p99 ms | server p95 | instances | cold p95 | warm p95 |\n")
-	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	b.WriteString("| scenario | requests | errors | rps | p50 ms | p90 ms | p95 ms | p99 ms | server p95 | origin p95 | db p95 | redis p95 | cache_hits | instances | cold N | cold p95 | warm p95 | avail hit/miss |\n")
+	b.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, r := range results {
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f | %.2f | %.2f | %.2f | %.2f | %.2f | %d | %.2f | %.2f |\n",
+		fmt.Fprintf(&b, "| %s | %d | %d | %.1f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %d | %d | %d | %.2f | %.2f | %d/%d |\n",
 			r.Name, r.Requests, r.Errors, r.RPS, r.P50Ms, r.P90Ms, r.P95Ms, r.P99Ms,
-			r.ServerP95Ms, r.Instances, r.ColdP95Ms, r.WarmP95Ms)
+			r.ServerP95Ms, r.OriginP95Ms, r.DbP95Ms, r.RedisP95Ms, r.CacheHits, r.Instances, r.ColdRequests, r.ColdP95Ms, r.WarmP95Ms, r.AvailHits, r.AvailMiss)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

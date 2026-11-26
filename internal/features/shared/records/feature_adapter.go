@@ -74,6 +74,7 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vertical := a.Vertical
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req featureWriteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
@@ -102,16 +103,22 @@ func (a *FeatureAdapter) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mctx, mcancel := detachedCtx(r.Context())
-	defer mcancel()
 	// usage.kind is CHECKed to ('chat','business') and no reader discriminates
 	// on it (month_tokens sums kind-agnostic), so record shared-feature
 	// writes as 'business' like Handler.create. Passing Spec.Name here used
 	// to fail the CHECK on every call and silently drop the metering row.
 	// If per-feature metering is ever wanted, add a dedicated column —
 	// do not overload kind.
-	if err := usage.Record(mctx, a.Pool, nil, caller.ClientID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
-		slog.Warn("usage record failed", "client_id", caller.ClientID, "err", err)
-	}
+	// Async: same detached-guarantee as Handler.create, off the 201 path.
+	clientID := caller.ClientID
+	payloadLen := len(req.Payload)
+	pool := a.Pool
+	go func() {
+		defer mcancel()
+		if err := usage.Record(mctx, pool, nil, clientID, "mimo", "business", payloadLen/4, 0); err != nil {
+			slog.Warn("usage record failed", "client_id", clientID, "err", err)
+		}
+	}()
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 

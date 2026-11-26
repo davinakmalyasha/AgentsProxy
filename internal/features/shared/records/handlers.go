@@ -103,6 +103,7 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 		if caller == nil {
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req recordWriteReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
@@ -138,10 +139,20 @@ func (h *Handler) create(vertical string) http.HandlerFunc {
 			return
 		}
 		mctx, mcancel := detachedCtx(r.Context())
-		defer mcancel()
-		if err := usage.Record(mctx, h.Pool, nil, caller.ClientID, "mimo", "business", len(req.Payload)/4, 0); err != nil {
-			slog.Warn("usage record failed", "client_id", caller.ClientID, "err", err)
-		}
+		// Post-commit metering off the critical path: the INSERT above is
+		// the source of truth, the usage row is best-effort. A sync PG RPC
+		// + Redis Lua here added 1 PG + 0-1 Redis round trips to every
+		// write's p50 before the 201. Detached context preserves the
+		// guarantee (client disconnect cannot drop the row), bounded at 5s.
+		clientID := caller.ClientID
+		payloadLen := len(req.Payload)
+		pool := h.Pool
+		go func() {
+			defer mcancel()
+			if err := usage.Record(mctx, pool, nil, clientID, "mimo", "business", payloadLen/4, 0); err != nil {
+				slog.Warn("usage record failed", "client_id", clientID, "err", err)
+			}
+		}()
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	}
 }
@@ -327,6 +338,7 @@ func (h *Handler) patch(vertical string) http.HandlerFunc {
 			return
 		}
 		id := chi.URLParam(r, "id")
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req recordPatchReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
