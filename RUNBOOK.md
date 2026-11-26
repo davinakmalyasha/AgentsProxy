@@ -651,8 +651,38 @@ production routes at 0.2 RPS. It enforces runner-specific regression ceilings
 (health ≤ 500 ms, public reads ≤ 600 ms) because GitHub’s US runner crosses
 the Pacific to `sin1`; it is a gross-regression guard, not the absolute
 same-region SLO measurement. A violation opens or updates the `[perf-alert]`
-issue. Staff/admin/agent production workloads still require credentials and
-are measured by the local harness.
+issue.
+
+### Traffic-derived SLOs (staff / admin / agent / public)
+
+Public probes cannot measure staff, admin, or agent paths: those need
+credentials and spend LLM money, so a synthetic probe would be either
+impossible or dishonest. Instead the server aggregates **real traffic**:
+
+- Every matched request increments an in-process histogram
+  (`internal/slo`), classified by surface (`internal/middleware/slo_class.go`):
+  `public`, `staff`, `admin`, `agent`, `chat`, `other`. `/healthz` is excluded.
+- Every 5 minutes (and on shutdown) the buckets flush to Redis with one
+  EVAL per class with traffic: `slo:<class>:<5-min-bucket>`, 2 h TTL.
+  The flush is detached and best-effort; a lost window on process freeze
+  affects statistics only, never user data.
+- `GET /v1/admin/slo?window=60` (admin key) merges the window and returns
+  p50/p95/p99 per class. It is **server-observed** (middleware time,
+  excluding edge/network) and marked approximate (5 ms–10 s buckets).
+
+Honesty rules enforced in code:
+
+- Below 20 samples a class reports `insufficient`, never a guessed p95.
+  A low-volume tenant will legitimately read insufficient for staff/admin.
+- `agent` and `chat` are provider-bound: percentiles are reported but never
+  `breach`, because the LLM dominates their latency.
+- `public` target 300 ms, `staff` 500 ms, `admin` 400 ms, `other` 500 ms —
+  server-observed regression ceilings, not published client-observed SLOs.
+
+`slo-burn.yml` checks the endpoint hourly and opens/updates the
+`[slo-alert]` issue on a breach. It requires the production admin key as the
+`ADMIN_API_KEY` repository secret; without it the job exits 0 with a notice
+and only manual reads work.
 
 Every response carries `X-Instance-Id` (process-boot identity) and
 `Server-Timing: app;dur=<ms>` (application time to first response byte).

@@ -38,6 +38,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/reminder"
 	"github.com/davinakmalyasha/agents-proxy/internal/requestip"
 	"github.com/davinakmalyasha/agents-proxy/internal/sentry"
+	"github.com/davinakmalyasha/agents-proxy/internal/slo"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
 )
@@ -181,6 +182,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer rdb.Close()
+	// Traffic-derived SLO histograms: in-process buckets, one EVAL per
+	// class per 5-minute interval. Flush before the Redis client closes on
+	// shutdown; the periodic path runs from the logging middleware.
+	slo.Configure(rdb, "slo")
+	defer slo.Flush()
 	slog.Info("redis connected")
 	agentstools.ReportRDB = rdb // download tokens for chat-generated .xlsx reports
 	agentstools.CapRDB = rdb    // per-tenant daily cost cap

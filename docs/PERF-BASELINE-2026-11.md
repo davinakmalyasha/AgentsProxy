@@ -454,3 +454,25 @@ Probe (2026-11-26, `a522804`, `--cache-bust`, 1 conc, 0.5 RPS, 10/endpoint):
   (srv 15–18ms); pricing edge outlier from batch-1 did not repeat.
 
 Artifacts: `.tmp/bench/20261126T150201Z/results.{json,md}` (gitignored).
+
+### Traffic-derived SLOs (2026-11-26)
+
+The synthetic-probe question is settled without a synthetic tenant:
+production traffic now produces the staff/admin/agent numbers itself.
+
+- `internal/slo` keeps per-class histograms in-process, classed by surface
+  (`public`, `staff`, `admin`, `agent`, `chat`, `other`; `/healthz` excluded).
+- One EVAL per class with traffic per 5-minute interval writes
+  `slo:<class>:<bucket>` (2 h TTL). Detached, best-effort, never on the
+  request path. Lost windows on serverless freeze affect statistics only.
+- `GET /v1/admin/slo?window=60` returns server-observed p50/p95/p99 per class,
+  marked approximate, with `ok | insufficient | breach` status.
+- `agent`/`chat` are provider-bound and never breach. Below 20 samples a class
+  reports `insufficient` — expected for staff/admin on a low-volume tenant.
+- `slo-burn.yml` alerts hourly via the `[slo-alert]` issue once the
+  `ADMIN_API_KEY` repository secret is configured; otherwise it is a no-op
+  notice and the endpoint remains available for manual reads.
+
+This does not replace the public probe: `perf-guard` remains the change
+verification and gross-regression guard, and its numbers are never mixed with
+traffic SLOs.
