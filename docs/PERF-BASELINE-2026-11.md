@@ -493,3 +493,74 @@ traffic SLOs.
   test and the `/v1/admin/slo` route test, but the first real production
   read requires the admin key. Expect `insufficient` for staff/admin/agent
   until real traffic reaches 20 samples in the window.
+
+### Optimization batch 3 — 2026-11-27 (origin round-trip cuts)
+
+Shipped via the normal gate: code PR #137 merged as `6d53f46` (code
+`4484840`); deploy workflow staged, smoked, promoted, and prod smoke
+passed on `6d53f46`. No DDL, no new indexes, no synthetic tenant.
+
+What changed and why it was measured first:
+- **One Redis round trip instead of three on public reads.**
+  `RateLimitClient` no longer falls back to IP: the pre-auth limiter
+  already owns that IP bucket, so the fallback opened a second,
+  independent bucket with the same 180/min cap and cost one EVAL per
+  public/project request. Verified client IDs keep their per-account
+  budget. `CheckTenantInfoCached` gained a 5 s process-local L1 in front
+  of the 30 s Redis entry; admin eviction clears L1 and other instances
+  converge in 5 s (better than the Redis TTL).
+- **One DB round trip instead of four on single-query tenant reads.**
+  Production runs Supavisor transaction mode / simple protocol.
+  `tenantdb.ReadTenant` puts `SET LOCAL app.tenant_id/search_path` and
+  the SELECT in one simple Query message, which PostgreSQL executes as
+  one implicit transaction. Extended-protocol pools keep the old
+  `WithTx` path. Applied to availability, facilities, pricing, and
+  records list/get; multi-statement/write handlers still use `WithTx`.
+- The effective anonymous IP cap is unchanged (global limiter still
+  180/min); the removed bucket was a duplicate cap, not an extra one.
+
+Proof:
+- `TestReadTenantSimpleProtocolRLS` runs on a real `app_runtime`
+  simple-protocol pool with `MaxConns=1`: tenant A sees only A's rows,
+  `current_schema()` is the tenant schema, `app.tenant_id` does not
+  leak back to the connection, a failed read does not poison the next
+  one, and the extended-protocol fallback returns identical context.
+- L1 hit/evict/TTL/negative-cache tests; no-identity limiter test
+  asserts zero Redis keys written.
+- Full `internal/api` suite, records, facilities, pricing, tenantdb,
+  middleware all pass locally, including a simple-protocol end-to-end
+  project-route run that exercises the production fast path.
+- The middleware Redis test helper now parses `redis://` URLs, so those
+  integration tests actually run in CI instead of skipping on a
+  malformed `Addr`.
+
+Production probe (2026-11-27, `6d53f46`, `--cache-bust`, 1 conc,
+0.5 RPS; 45–60 samples/endpoint; all origin, 0 errors, coldN 0):
+
+| Scenario | Server p95 before → after | DB p95 before → after | Redis p95 before → after |
+|---|---:|---:|---:|
+| public-facilities | 13.80 → 6.88 ms | 7.18 → 1.86 ms | 5.21 → 2.43 ms |
+| public-availability | 14.99 → 7.84 ms | 8.42 → 1.57 ms | 4.70 → 2.56 ms |
+| public-pricing | 14.26 → 7.32 ms | 7.92 → 1.50 ms | 4.80 → 2.80 ms |
+
+“Before” is the post-batch-2 origin split in this document. The drop is
+the round trips leaving, not a faster query plan: execution times did
+not change and no index was touched.
+
+Client-observed p95 in the cache-busted run was 112–130 ms (network/
+edge-bound; baseline was 135–145 ms). A parallel non-busted run showed
+24/30 edge hits on facilities and pricing (10 s TTL), 4/30 on
+availability (2 s TTL); p50 fell to 63–69 ms from the baseline 90–118 ms,
+while one facilities p95 outlier shows why the edge numbers are reported
+as p50/offload, not a new absolute SLO. Raw artifacts:
+`docs/perf/2026-11-27/prod-origin-45.json`,
+`docs/perf/2026-11-27/prod-origin-facilities-60.json`, and
+`docs/perf/2026-11-27/prod-edge-30.json`.
+
+Residual, stated deliberately:
+- Edge TTLs are unchanged (availability 2 s, facilities/pricing 10 s);
+  raising them is a product freshness decision, not a Go change.
+- Cold start is unchanged (1.67 s p95 last measured); boot-phase logs
+  are still the prerequisite before lazy-init work.
+- staff/admin/agent SLOs remain `insufficient` until real traffic reaches
+  20 samples/window; no synthetic tenant was introduced to fill them.
