@@ -268,6 +268,28 @@ hardening, not a latency change — the payoff grows with rows scanned per
 query. Migrations: platform `094_rls_initplan.sql`, Centrum
 `0013_rls_initplan.sql` (migration-only PR #120, applied via `db-migrate`).
 
+### Legacy index cleanup (2026-11-26, applied via `db-migrate`)
+
+Seventeen indexes with no possible reader were dropped (migration-only
+PR #126: platform `096_drop_unused_indexes.sql`, Centrum
+`0015_drop_unused_indexes.sql`). Each drop was proven against every query
+in the codebase, not the idle-DB advisory: slug / payload-GIN /
+payload-date expression (no such predicates exist), customers / expenses /
+members plain indexes (every read carries the live predicate the partial
+serves), payments `booking_idx` (every booking-scoped read filters deleted;
+the live index serves index-only), facilities `tenant_idx` (every read
+filters deleted), kantin live `created_at` / `live_id` partials (no matching
+query shape — the export includes voided rows, money buckets by WIB day),
+and reminder-due / notify-tenant / sessions-tenant / audit / report-objects
+indexes with no readers. Deliberately kept: the `paid_at` sort, both
+recorder pairs, the voided-inclusive export index, all lookup/FK/sole-access
+indexes, and the agency-plane indexes (live code, no traffic evidence to
+judge them by). Fresh chain applies clean with zero remaining; the
+db/tenantdb/records/auth suites plus the expenses/payments/kantin/customers/
+members/facilities feature suites all pass; prod `pg_indexes` confirms zero
+remaining and smoke passes. Write amplification drops on every insert,
+update, and tombstone write.
+
 ### Cron probe-first hardening (2026-11-26, ops PR #124)
 
 `private.tick_report_jobs` (every minute) ran its reap UPDATE before checking
