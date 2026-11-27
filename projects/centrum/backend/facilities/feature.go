@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
@@ -58,6 +60,40 @@ func routes(r chi.Router, deps features.BuilderDeps) {
 
 type handler struct {
 	pool *pgxpool.Pool
+	// Small in-process cache: venue config changes rarely, but every
+	// landing-page load and every booking create reads it. 30s TTL
+	// absorbs the burst without going to Postgres each time; a venue
+	// edit is visible within 30s on this instance (edge already holds
+	// 60s, so the edge window dominates anyway). Same bounded +
+	// singleflight shape as availability.
+	cache   map[string]cachedFacilities
+	cacheMu sync.Mutex
+	sf      singleflight.Group
+}
+
+// maxFacCacheEntries bounds the facilities cache: one entry per
+// (tenant, type, limit). Venues use a handful of limits; 256 is far
+// above any real keyspace.
+const maxFacCacheEntries = 256
+
+type cachedFacilities struct {
+	at    time.Time
+	items []facilityResp
+}
+
+// facCacheTTL bounds how long a built facilities payload is reused.
+const facCacheTTL = 30 * time.Second
+
+// evictTenant drops one tenant's cached lists after a venue write.
+func (h *handler) evictTenant(tenantID string) {
+	prefix := tenantID + "|"
+	h.cacheMu.Lock()
+	for k := range h.cache {
+		if strings.HasPrefix(k, prefix) {
+			delete(h.cache, k)
+		}
+	}
+	h.cacheMu.Unlock()
 }
 
 type facilityReq struct {
@@ -156,6 +192,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	h.evictTenant(idn.TenantID())
 	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -170,36 +207,79 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
-	out := make([]facilityResp, 0, limit+1)
-	var q string
-	var args []any
-	if typ != "" {
-		q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL AND type=$2 ORDER BY sort_order, name LIMIT %d`, limit)
-		args = []any{idn.TenantID(), typ}
-	} else {
-		q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
-			   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY sort_order, name LIMIT %d`, limit)
-		args = []any{idn.TenantID()}
-	}
-	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), q, args, func(rows pgx.Rows) error {
-		for rows.Next() {
-			var f facilityResp
-			var createdAt, updatedAt time.Time
-			if err := rows.Scan(&f.ID, &f.TenantID, &f.Name, &f.Type, &f.Capacity, &f.PricePerHour,
-				&f.OpenTime, &f.CloseTime, &f.Status, &createdAt, &updatedAt); err != nil {
-				return err
+	key := idn.TenantID() + "|" + typ + "|" + strconv.Itoa(limit)
+	_, isBust := r.URL.Query()["__bench_cb"]
+	now := time.Now()
+	if !isBust {
+		h.cacheMu.Lock()
+		hit, ok := h.cache[key]
+		h.cacheMu.Unlock()
+		if ok && now.Sub(hit.at) < facCacheTTL {
+			if idn.IsPublic() {
+				records.MarkPublicCache(w, 60, 120)
 			}
-			f.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, f)
+			records.WriteJSON(w, http.StatusOK, map[string]any{"items": hit.items})
+			return
 		}
-		return rows.Err()
+	}
+	var out []facilityResp
+	_, err, _ := h.sf.Do(key, func() (any, error) {
+		built := make([]facilityResp, 0, limit+1)
+		var q string
+		var args []any
+		if typ != "" {
+			q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
+				   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL AND type=$2 ORDER BY sort_order, name LIMIT %d`, limit)
+			args = []any{idn.TenantID(), typ}
+		} else {
+			q = fmt.Sprintf(`SELECT id::text, tenant_id, name, type, capacity, price_per_hour, open_time::text, close_time::text, status, created_at, updated_at
+				   FROM sports_facilities WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY sort_order, name LIMIT %d`, limit)
+			args = []any{idn.TenantID()}
+		}
+		rerr := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), q, args, func(rows pgx.Rows) error {
+			for rows.Next() {
+				var f facilityResp
+				var createdAt, updatedAt time.Time
+				if err := rows.Scan(&f.ID, &f.TenantID, &f.Name, &f.Type, &f.Capacity, &f.PricePerHour,
+					&f.OpenTime, &f.CloseTime, &f.Status, &createdAt, &updatedAt); err != nil {
+					return err
+				}
+				f.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+				built = append(built, f)
+			}
+			return rows.Err()
+		})
+		if rerr != nil {
+			return nil, rerr
+		}
+		out = built
+		return built, nil
 	})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	h.cacheMu.Lock()
+	if h.cache == nil {
+		h.cache = map[string]cachedFacilities{}
+	}
+	if len(h.cache) >= maxFacCacheEntries {
+		now2 := time.Now()
+		for k, v := range h.cache {
+			if now2.Sub(v.at) >= facCacheTTL {
+				delete(h.cache, k)
+			}
+		}
+		if len(h.cache) >= maxFacCacheEntries {
+			for k := range h.cache {
+				delete(h.cache, k)
+				break
+			}
+		}
+	}
+	h.cache[key] = cachedFacilities{at: time.Now(), items: out}
+	h.cacheMu.Unlock()
 	if idn.IsPublic() {
 		records.MarkPublicCache(w, 60, 120)
 	}
@@ -338,6 +418,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
+	h.evictTenant(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
 
@@ -399,5 +480,6 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
+	h.evictTenant(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
 }
