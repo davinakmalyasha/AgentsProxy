@@ -135,29 +135,25 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]itemResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, tenant_id, name, sku, quantity, unit_price, low_stock_threshold, status, created_at, updated_at
-			   FROM sports_inventory WHERE tenant_id = $1 ORDER BY name LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var it itemResp
-			var createdAt, updatedAt time.Time
-			if err := rows.Scan(&it.ID, &it.TenantID, &it.Name, &it.SKU, &it.Quantity, &it.UnitPrice,
-				&it.LowStockThreshold, &it.Status, &createdAt, &updatedAt); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, sku, quantity, unit_price, low_stock_threshold, status, created_at, updated_at
+		   FROM sports_inventory WHERE tenant_id = $1 ORDER BY name LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var it itemResp
+				var createdAt, updatedAt time.Time
+				if err := rows.Scan(&it.ID, &it.TenantID, &it.Name, &it.SKU, &it.Quantity, &it.UnitPrice,
+					&it.LowStockThreshold, &it.Status, &createdAt, &updatedAt); err != nil {
+					return err
+				}
+				it.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				it.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+				it.LowStock = it.Quantity <= it.LowStockThreshold
+				out = append(out, it)
 			}
-			it.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			it.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
-			it.LowStock = it.Quantity <= it.LowStockThreshold
-			out = append(out, it)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -173,14 +169,20 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var it itemResp
 	var createdAt, updatedAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, name, sku, quantity, unit_price, low_stock_threshold, status, created_at, updated_at
-			   FROM sports_inventory WHERE id = $1::uuid AND tenant_id = $2`,
-			id, idn.TenantID(),
-		).Scan(&it.ID, &it.TenantID, &it.Name, &it.SKU, &it.Quantity, &it.UnitPrice,
-			&it.LowStockThreshold, &it.Status, &createdAt, &updatedAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, sku, quantity, unit_price, low_stock_threshold, status, created_at, updated_at
+		   FROM sports_inventory WHERE id = $1::uuid AND tenant_id = $2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&it.ID, &it.TenantID, &it.Name, &it.SKU, &it.Quantity, &it.UnitPrice,
+				&it.LowStockThreshold, &it.Status, &createdAt, &updatedAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return

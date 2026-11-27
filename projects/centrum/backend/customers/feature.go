@@ -118,46 +118,42 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	// the legacy name/phone match for pre-FK rows; COUNT(DISTINCT) so a
 	// booking matching on both never double-counts.
 	truncated := false
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`WITH page AS (
-			   SELECT id, tenant_id, name, phone, no_show_count, notes, created_at
-			     FROM sports_customers
-			    WHERE tenant_id = $1 AND deleted_at IS NULL
-			    ORDER BY name
-			    LIMIT $2
-			 )
-			 SELECT p.id::text, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at,
-			        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed'))
-			   FROM page p
-			   LEFT JOIN sports_bookings b
-			          ON b.tenant_id = p.tenant_id
-			         AND (b.customer_id = p.id
-			              OR b.customer_name = p.name
-			              OR (p.phone <> '' AND b.customer_phone = p.phone))
-			  GROUP BY p.id, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at
-			  ORDER BY p.name`,
-			idn.TenantID(), limit+1)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var c customerResp
-			var createdAt time.Time
-			if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`WITH page AS (
+		   SELECT id, tenant_id, name, phone, no_show_count, notes, created_at
+		     FROM sports_customers
+		    WHERE tenant_id = $1 AND deleted_at IS NULL
+		    ORDER BY name
+		    LIMIT $2
+		 )
+		 SELECT p.id::text, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at,
+		        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed'))
+		   FROM page p
+		   LEFT JOIN sports_bookings b
+		          ON b.tenant_id = p.tenant_id
+		         AND (b.customer_id = p.id
+		              OR b.customer_name = p.name
+		              OR (p.phone <> '' AND b.customer_phone = p.phone))
+		  GROUP BY p.id, p.tenant_id, p.name, p.phone, p.no_show_count, p.notes, p.created_at
+		  ORDER BY p.name`,
+		[]any{idn.TenantID(), limit + 1},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var c customerResp
+				var createdAt time.Time
+				if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits); err != nil {
+					return err
+				}
+				c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, c)
+				if len(out) > limit {
+					out = out[:limit]
+					truncated = true
+					break
+				}
 			}
-			c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, c)
-			if len(out) > limit {
-				out = out[:limit]
-				truncated = true
-				break
-			}
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -181,36 +177,32 @@ func (h *handler) top(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := make([]customerResp, 0, limit)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
-			        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed')) AS visits
-			   FROM sports_customers c
-			   LEFT JOIN sports_bookings b
-			          ON b.tenant_id = c.tenant_id
-			         AND (b.customer_id = c.id
-			              OR b.customer_name = c.name
-			              OR (c.phone <> '' AND b.customer_phone = c.phone))
-			  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
-			  GROUP BY c.id
-			  ORDER BY visits DESC, c.name
-			  LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var c customerResp
-			var createdAt time.Time
-			if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
+		        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('confirmed','checked_in','completed')) AS visits
+		   FROM sports_customers c
+		   LEFT JOIN sports_bookings b
+		          ON b.tenant_id = c.tenant_id
+		         AND (b.customer_id = c.id
+		              OR b.customer_name = c.name
+		              OR (c.phone <> '' AND b.customer_phone = c.phone))
+		  WHERE c.tenant_id = $1 AND c.deleted_at IS NULL
+		  GROUP BY c.id
+		  ORDER BY visits DESC, c.name
+		  LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var c customerResp
+				var createdAt time.Time
+				if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits); err != nil {
+					return err
+				}
+				c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, c)
 			}
-			c.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, c)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
