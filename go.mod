@@ -17,7 +17,7 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/xuri/excelize/v2 v2.11.1-0.20260915055537-22f76f9acb94
 	golang.org/x/crypto v0.57.0
-	golang.org/x/sync v0.23.0
+	golang.org/x/sync v0.25.0
 	google.golang.org/adk/v2 v2.5.0
 	google.golang.org/api v0.298.0
 	google.golang.org/genai v1.71.0
