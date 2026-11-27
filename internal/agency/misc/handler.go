@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/davinakmalyasha/agents-proxy/internal/agency/response"
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -37,7 +38,7 @@ func NewHandler(logger *slog.Logger, cfg Config) *Handler {
 	return &Handler{
 		logger: logger,
 		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: httpx.NewClient(30 * time.Second),
 	}
 }
 

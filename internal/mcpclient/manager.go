@@ -26,6 +26,7 @@ import (
 
 	agentstools "github.com/davinakmalyasha/agents-proxy/AgentsTools"
 	"github.com/davinakmalyasha/agents-proxy/internal/agentconfig"
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 const (
@@ -255,7 +256,7 @@ func connect(ctx context.Context, project string, srv agentconfig.MCPServer, loo
 	// shorter client-wide timeout would cut a tool call before its own
 	// deadline; no timeout lets the context do its job.
 	client := &http.Client{
-		Transport: &headerTransport{base: http.DefaultTransport, headers: headers},
+		Transport: &headerTransport{base: httpx.SharedTransport(), headers: headers},
 	}
 	mcpClient := mcp.NewClient(&mcp.Implementation{
 		Name:    "agents-proxy",

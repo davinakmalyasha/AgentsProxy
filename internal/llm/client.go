@@ -55,6 +55,10 @@ type Client struct {
 	// chatURL is BaseURL + chatCompletionsPath, precomputed: the hot path
 	// concatenated it per request.
 	chatURL string
+	// bearer is "Bearer "+APIKey, precomputed: the hot path built it per
+	// request with a string alloc. The client is created once at boot and
+	// the key never rotates, so caching is safe.
+	bearer string
 	// SessionID is sent as x-opencode-session. OpenCode Go rejects
 	// requests without it; other OpenAI-compatible providers ignore the
 	// unknown header. Stable for the life of this client.
@@ -70,6 +74,7 @@ func New(baseURL, apiKey, model string, maxTokens int) *Client {
 		MaxTokens:    maxTokens,
 		HTTP:         httpx.NewClient(60 * time.Second),
 		chatURL:      baseURL + chatCompletionsPath,
+		bearer:       "Bearer " + apiKey,
 		SessionID:    uuid.NewString(),
 	}
 }
@@ -223,7 +228,7 @@ func (c *Client) post(ctx context.Context, payload chatRequest) ([]byte, int, er
 		return nil, 0, fmt.Errorf("new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	httpReq.Header.Set("Authorization", c.bearer)
 	if c.SessionID != "" {
 		httpReq.Header.Set("x-opencode-session", c.SessionID)
 	}
@@ -234,7 +239,10 @@ func (c *Client) post(ctx context.Context, payload chatRequest) ([]byte, int, er
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	// Bound the read: completions are kilobytes, and the bounded error
+	// scan below only needs the head. An unbounded provider body must
+	// not become an unbounded alloc on our side.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: read body", ErrProvider)
 	}

@@ -20,6 +20,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 // exactHosts are the endpoint hosts used by the major push services.
@@ -110,7 +112,8 @@ func Host(raw string) string {
 // to an internal address.
 func NewHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout: timeout,
+		Transport: httpx.SharedTransport(),
+		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return errors.New("too many push endpoint redirects")

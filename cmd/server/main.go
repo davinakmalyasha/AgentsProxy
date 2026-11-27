@@ -29,6 +29,7 @@ import (
 	// Phase 3 shared features: each registers itself in init().
 	_ "github.com/davinakmalyasha/agents-proxy/internal/platformfeatures"
 	// Phase 4/6 sports-vertical custom features.
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 	"github.com/davinakmalyasha/agents-proxy/internal/llm"
 	"github.com/davinakmalyasha/agents-proxy/internal/middleware"
 	"github.com/davinakmalyasha/agents-proxy/internal/notify"
@@ -581,7 +582,7 @@ func healthcheck() int {
 	if port == "" {
 		port = "8080"
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpx.NewClient(5 * time.Second)
 	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
 	if err != nil {
 		return 1

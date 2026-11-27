@@ -29,6 +29,13 @@ type healthzResponse struct {
 	// tenant slugs or internal config reasons; the admin tenant-health
 	// endpoint carries the detailed view.
 	TenantsFenced int `json:"tenants_fenced,omitempty"`
+	// Pool visibility for connection-budget tuning: acquired/idle/total
+	// come straight from pgxpool.Stat, no extra query. Clients ignore
+	// unknown fields; ops uses this to see MAX=2 saturation.
+	PoolAcquired uint32 `json:"pool_acquired,omitempty"`
+	PoolIdle     uint32 `json:"pool_idle,omitempty"`
+	PoolTotal    uint32 `json:"pool_total,omitempty"`
+	PoolMax      int32  `json:"pool_max,omitempty"`
 }
 
 func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +56,12 @@ func (h *Healthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	resp.DB = dbOK
 	resp.Redis = rdsOK
+	if st := h.DB.Stat(); st != nil {
+		resp.PoolAcquired = uint32(st.AcquiredConns())
+		resp.PoolIdle = uint32(st.IdleConns())
+		resp.PoolTotal = uint32(st.TotalConns())
+		resp.PoolMax = st.MaxConns()
+	}
 	if !dbOK || !rdsOK {
 		resp.Status = "degraded"
 		w.Header().Set("Content-Type", "application/json")
