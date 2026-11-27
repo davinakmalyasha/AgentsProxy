@@ -139,33 +139,28 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	out := make([]expenseResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
-			   FROM sports_expenses WHERE tenant_id=$1 AND deleted_at IS NULL`
-		args := []any{idn.TenantID()}
-		idx := 2
-		if dateStr != "" {
-			sql += fmt.Sprintf(" AND spent_at = $%d::date", idx)
-			args = append(args, dateStr)
+	sql := `SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
+		   FROM sports_expenses WHERE tenant_id=$1 AND deleted_at IS NULL`
+	args := []any{idn.TenantID()}
+	idx := 2
+	if dateStr != "" {
+		sql += fmt.Sprintf(" AND spent_at = $%d::date", idx)
+		args = append(args, dateStr)
+		idx++
+	} else {
+		if from != "" {
+			sql += fmt.Sprintf(" AND spent_at >= $%d::date", idx)
+			args = append(args, from)
 			idx++
-		} else {
-			if from != "" {
-				sql += fmt.Sprintf(" AND spent_at >= $%d::date", idx)
-				args = append(args, from)
-				idx++
-			}
-			if to != "" {
-				sql += fmt.Sprintf(" AND spent_at < $%d::date", idx)
-				args = append(args, to)
-				idx++
-			}
 		}
-		sql += fmt.Sprintf(" ORDER BY spent_at DESC, created_at DESC LIMIT %d", limit)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
+		if to != "" {
+			sql += fmt.Sprintf(" AND spent_at < $%d::date", idx)
+			args = append(args, to)
+			idx++
 		}
-		defer rows.Close()
+	}
+	sql += fmt.Sprintf(" ORDER BY spent_at DESC, created_at DESC LIMIT %d", limit)
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var e expenseResp
 			var createdAt time.Time
@@ -192,13 +187,19 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var e expenseResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
-			   FROM sports_expenses WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&e.ID, &e.TenantID, &e.Category, &e.Amount, &e.Note, &e.SpentAt, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, category, amount, note, spent_at::text, created_at
+		   FROM sports_expenses WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&e.ID, &e.TenantID, &e.Category, &e.Amount, &e.Note, &e.SpentAt, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
