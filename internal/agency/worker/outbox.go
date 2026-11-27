@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 // dispatchOutbox delivers pending agent_events to active webhook subscriptions.
@@ -69,7 +71,7 @@ func (w *Worker) dispatchOutbox(ctx context.Context) {
 	}
 	subs.Close()
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := httpx.NewClient(15 * time.Second)
 	for _, e := range events {
 		delivered := false
 		payload, _ := json.Marshal(map[string]any{

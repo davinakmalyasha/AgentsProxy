@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/davinakmalyasha/agents-proxy/internal/httpx"
 )
 
 // Service sends agency notifications.
@@ -25,7 +27,7 @@ type Service struct {
 
 // New builds a notification service.
 func New(logger *slog.Logger, agencyWhatsapp string) *Service {
-	return &Service{logger: logger, agencyWhatsapp: agencyWhatsapp, client: &http.Client{Timeout: 15 * time.Second}}
+	return &Service{logger: logger, agencyWhatsapp: agencyWhatsapp, client: httpx.NewClient(15 * time.Second)}
 }
 
 // WithResend enables real email delivery via Resend. Without it SendEmail
@@ -87,7 +89,7 @@ type Telegram struct {
 
 // NewTelegram builds a Telegram poster. Empty bot/chat disables delivery.
 func NewTelegram(logger *slog.Logger, bot, chatID string) *Telegram {
-	return &Telegram{logger: logger, bot: bot, chatID: chatID, client: &http.Client{Timeout: 15 * time.Second}}
+	return &Telegram{logger: logger, bot: bot, chatID: chatID, client: httpx.NewClient(15 * time.Second)}
 }
 
 // Post sends a message, or logs when unconfigured.
