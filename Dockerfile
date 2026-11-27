@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Multi-stage build → ~15MB static binary.
 # Stage 1: build
-FROM golang:1.27-alpine AS build
+FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 
 # Cache deps separately.
