@@ -564,3 +564,52 @@ Residual, stated deliberately:
   are still the prerequisite before lazy-init work.
 - staff/admin/agent SLOs remain `insufficient` until real traffic reaches
   20 samples/window; no synthetic tenant was introduced to fill them.
+
+### Edge TTL raise — 2026-11-27 (client-latency lever)
+
+Shipped via the normal gate: code PR #139 merged as `26d1d88`;
+deploy workflow staged, smoked, promoted, and prod smoke passed on
+`26d1d88`. No DDL, no new indexes, no synthetic tenant.
+
+What changed and why it was measured first:
+- Availability edge: `s-maxage 2 -> 10`, `SWR 5 -> 30`; in-process
+  `cacheTTL` 3 s -> 10 s (absorbs two ~5 s landing-board poll cycles).
+- Facilities/pricing edge: `s-maxage 10 -> 60`, `SWR 30 -> 120`.
+- Freshness sign-off: user approved 2026-11-27 ("go on"). Worst case
+  staleness is bounded by s-maxage: 10 s on availability, 60 s on
+  facilities/pricing. Staff writes still clear the server-side rule
+  cache; the edge window is the only added staleness.
+
+Proof:
+- Prod headers on `26d1d88`: facilities/pricing
+  `Cdn-Cache-Control: public, s-maxage=60,
+  stale-while-revalidate=120`; availability `s-maxage=10,
+  stale-while-revalidate=30` with `X-Avail-Cache: hit` on repeat
+  reads (10 s in-process window working).
+- Facilities/pricing package tests + records tests pass locally; no
+  test asserts endpoint TTL values (helper behavior only).
+- Prod smoke: health, facilities, availability, pricing, 401/404/204
+  contracts all PASS on `26d1d88`.
+
+Production edge probe (2026-11-27, `26d1d88`, non-busted, 1 conc,
+0.5 RPS, 30 samples/endpoint, 0 errors):
+
+| Scenario | p50 | p95 | Edge hits | DB p95 | Redis p95 |
+|---|---:|---:|---:|---:|---:|
+| public-facilities | 68.52 ms | 123.45 ms | 29/30 (was 24/30) | 0.00 ms | 1.95 ms |
+| public-availability | 65.45 ms | 101.04 ms | 24/30 (was 4/30) | 2.06 ms | 3.25 ms |
+| public-pricing | 66.69 ms | 123.91 ms | 29/30 (was 24/30) | 0.00 ms | 0.99 ms |
+
+One facilities cold start (coldN 1, 119.08 ms) explains the 62.86 ms
+server p95 outlier on that row; warm p50 is 63-69 ms across all
+three. DB p95 reads 0.00 ms on facilities/pricing because edge hits
+never reach Postgres. Raw artifact:
+`docs/perf/2026-11-27/prod-edge-ttl60.json`.
+
+Residual, stated deliberately:
+- Availability can serve up to 10 s stale per instance plus 10 s at
+  the edge; facilities/pricing up to 60 s at the edge. Revert is one
+  PR if the board ever needs fresher data.
+- Origin handler speed is unchanged (batch 3: server p95 6.9-7.8 ms);
+  this batch moves client-observed p50/offload, not origin execution.
+- Cold start unchanged; one cold observed in this probe as usual.
