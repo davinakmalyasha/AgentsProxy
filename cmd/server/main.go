@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -42,6 +43,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/slo"
 	"github.com/davinakmalyasha/agents-proxy/internal/tenanthealth"
 	"github.com/davinakmalyasha/agents-proxy/internal/usage"
+	"golang.org/x/sync/errgroup"
 )
 
 //go:generate go run ../../cmd/genprojects
@@ -210,26 +212,6 @@ func main() {
 	// client buckets as one IP.
 	requestip.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
 
-	// CORS origin registry (migration 058): exact origins + suffix rules
-	// loaded from the database, merged with the static env list at the
-	// router. Boot-load failure is fatal (fail closed — boot already
-	// exits without a database). Refresh runs gated like every other
-	// background loop; on serverless each cold start reloads instead.
-	originsStart := time.Now()
-	origins, err := middleware.NewDBResolver(bootCtx, pool)
-	if err != nil {
-		slog.Error("origins load", "err", err)
-		os.Exit(1)
-	}
-	phase("origins", originsStart)
-	ex, su := origins.Counts()
-	slog.Info("origins loaded", "exact", ex, "suffix", su)
-	if cfg.BackgroundTickers {
-		// Background context, NOT bootCtx (30s timeout): the loop must
-		// outlive boot. Read-only refresher; dies with the process.
-		origins.Start(context.Background(), time.Minute)
-	}
-
 	// Per-tenant agent configuration, collected not thrown: each tenant
 	// validates independently. A bad tenant is quarantined (fenced with
 	// an honest 503) while healthy tenants serve. Only zero healthy
@@ -262,15 +244,54 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Entitlement audit is the runtime half of the deploy gate. A deploy
-	// whose data backfill did not land (the Centrum failure mode) is caught
-	// by cmd/migrate check before promotion; a manual edit afterward is
-	// caught here. One bad tenant is fenced, not fatal: healthy tenants keep
-	// serving and the admin tenant-health surface names the reason.
-	entitlementBad, err := features.AuditProjectEntitlements(bootCtx, pool, projects, badTenants)
-	if err != nil {
-		slog.Error("tenant entitlement audit failed", "err", err)
+	// Independent boot DB reads run in parallel: origins registry,
+	// entitlement audit, and ADK session-table check each cost one
+	// pooler round trip, and sequential boot paid them back-to-back on
+	// every cold start. errgroup preserves fail-closed semantics: any
+	// failure logs and exits, same as the old sequential code.
+	parallelStart := time.Now()
+	bootGroup, _ := errgroup.WithContext(bootCtx)
+	var origins *middleware.DBResolver
+	var entitlementBad map[string]string
+	bootGroup.Go(func() error {
+		start := time.Now()
+		resolver, err := middleware.NewDBResolver(bootCtx, pool)
+		if err != nil {
+			return fmt.Errorf("origins load: %w", err)
+		}
+		origins = resolver
+		phase("origins", start)
+		return nil
+	})
+	bootGroup.Go(func() error {
+		start := time.Now()
+		bad, err := features.AuditProjectEntitlements(bootCtx, pool, projects, badTenants)
+		if err != nil {
+			return fmt.Errorf("tenant entitlement audit: %w", err)
+		}
+		entitlementBad = bad
+		phase("entitlement", start)
+		return nil
+	})
+	bootGroup.Go(func() error {
+		start := time.Now()
+		if err := adkrunner.VerifySessionTables(bootCtx, pool); err != nil {
+			return fmt.Errorf("adk session tables: %w", err)
+		}
+		phase("adk_session_tables", start)
+		return nil
+	})
+	if err := bootGroup.Wait(); err != nil {
+		slog.Error("parallel boot checks failed", "err", err)
 		os.Exit(1)
+	}
+	phase("boot_parallel", parallelStart)
+	ex, su := origins.Counts()
+	slog.Info("origins loaded", "exact", ex, "suffix", su)
+	if cfg.BackgroundTickers {
+		// Background context, NOT bootCtx (30s timeout): the loop must
+		// outlive boot. Read-only refresher; dies with the process.
+		origins.Start(context.Background(), time.Minute)
 	}
 	fences := make(map[string]string, len(badTenants)+len(entitlementBad))
 	for slug, reason := range badTenants {
@@ -301,12 +322,8 @@ func main() {
 	// ADK agent loop (cutover from internal/agent's hand-rolled loop):
 	// conversation sessions live on Postgres (migration 041), one
 	// llmagent per (tenant, role) built per call from the tenant's four
-	// folders. Missing session tables fail boot, same fail-loud
-	// philosophy as LoadProjects above.
-	if err := adkrunner.VerifySessionTables(bootCtx, pool); err != nil {
-		slog.Error("adk session tables", "err", err)
-		os.Exit(1)
-	}
+	// folders. Table presence was verified in the parallel boot group
+	// above; same fail-loud philosophy as LoadProjects.
 	sessSvc, err := adkrunner.NewSessionService(pool)
 	if err != nil {
 		slog.Error("adk session service", "err", err)
