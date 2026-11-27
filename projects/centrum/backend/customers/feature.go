@@ -226,18 +226,24 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var c customerResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
-			        (SELECT COUNT(DISTINCT b.id) FROM sports_bookings b
-			          WHERE b.tenant_id=c.tenant_id AND b.status IN ('confirmed','checked_in','completed')
-			            AND (b.customer_id=c.id
-			                 OR b.customer_name=c.name
-			                 OR (c.phone <> '' AND b.customer_phone=c.phone)))
-			   FROM sports_customers c WHERE c.id=$1::uuid AND c.tenant_id=$2 AND c.deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT c.id::text, c.tenant_id, c.name, c.phone, c.no_show_count, c.notes, c.created_at,
+		        (SELECT COUNT(DISTINCT b.id) FROM sports_bookings b
+		          WHERE b.tenant_id=c.tenant_id AND b.status IN ('confirmed','checked_in','completed')
+		            AND (b.customer_id=c.id
+		                 OR b.customer_name=c.name
+		                 OR (c.phone <> '' AND b.customer_phone=c.phone)))
+		   FROM sports_customers c WHERE c.id=$1::uuid AND c.tenant_id=$2 AND c.deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Phone, &c.NoShowCount, &c.Notes, &createdAt, &c.Visits)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
