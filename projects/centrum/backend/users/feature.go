@@ -101,30 +101,25 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]userResp, 0, limit+1)
 	truncated := false
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT ` + safeCols + ` FROM sports_users WHERE tenant_id = $1`
-		args := []any{idn.TenantID()}
-		if onlySelf && idn.UserID != "" {
+	sql := `SELECT ` + safeCols + ` FROM sports_users WHERE tenant_id = $1`
+	args := []any{idn.TenantID()}
+	if onlySelf && idn.UserID != "" {
+		sql += ` AND id = $2::uuid`
+		args = append(args, idn.UserID)
+	} else {
+		if filterID != "" {
 			sql += ` AND id = $2::uuid`
-			args = append(args, idn.UserID)
-		} else {
-			if filterID != "" {
-				sql += ` AND id = $2::uuid`
-				args = append(args, filterID)
-			} else if filterEmail != "" {
-				sql += ` AND lower(email) = $2`
-				args = append(args, filterEmail)
-			}
+			args = append(args, filterID)
+		} else if filterEmail != "" {
+			sql += ` AND lower(email) = $2`
+			args = append(args, filterEmail)
 		}
-		sql += ` ORDER BY created_at`
-		// One row past the cap detects truncation without a second COUNT.
-		args = append(args, limit+1)
-		sql += fmt.Sprintf(" LIMIT $%d", len(args))
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	}
+	sql += ` ORDER BY created_at`
+	// One row past the cap detects truncation without a second COUNT.
+	args = append(args, limit+1)
+	sql += fmt.Sprintf(" LIMIT $%d", len(args))
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			u, createdAt, err := scanUser(rows)
 			if err != nil {
@@ -163,24 +158,20 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	}
 	var u userResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT `+safeCols+` FROM sports_users WHERE id = $1::uuid AND tenant_id = $2`,
-			id, idn.TenantID())
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		if !rows.Next() {
-			return pgx.ErrNoRows
-		}
-		var serr error
-		u, createdAt, serr = scanUser(rows)
-		if serr != nil {
-			return serr
-		}
-		return rows.Err()
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT `+safeCols+` FROM sports_users WHERE id = $1::uuid AND tenant_id = $2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				return pgx.ErrNoRows
+			}
+			var serr error
+			u, createdAt, serr = scanUser(rows)
+			if serr != nil {
+				return serr
+			}
+			return rows.Err()
+		})
 	if err != nil {
 		if strings.Contains(err.Error(), "no rows") {
 			records.WriteJSONError(w, http.StatusNotFound, "not found")
