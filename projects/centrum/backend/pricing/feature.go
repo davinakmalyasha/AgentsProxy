@@ -26,6 +26,7 @@ import (
 	"github.com/davinakmalyasha/agents-proxy/internal/features"
 	"github.com/davinakmalyasha/agents-proxy/internal/features/shared/records"
 	"github.com/davinakmalyasha/agents-proxy/internal/pgerr"
+	"golang.org/x/sync/singleflight"
 )
 
 const featureName = "pricing"
@@ -59,6 +60,37 @@ func routes(r chi.Router, deps features.BuilderDeps) {
 
 type handler struct {
 	pool *pgxpool.Pool
+	// Small in-process list cache: the rule list changes rarely but
+	// is read on every landing-page load. 30s TTL mirrors facilities
+	// (edge already holds 60s). Writes evict the tenant's entries.
+	// Separate from ruleCache below, which caches the single active
+	// rule for booking price resolution.
+	listCache   map[string]cachedList
+	listCacheMu sync.Mutex
+	sf          singleflight.Group
+}
+
+// maxListCacheEntries bounds the pricing list cache.
+const maxListCacheEntries = 256
+
+type cachedList struct {
+	at    time.Time
+	items []ruleResp
+}
+
+// listCacheTTL bounds how long a built rule list is reused.
+const listCacheTTL = 30 * time.Second
+
+// evictList drops one tenant's cached lists after a rule write.
+func (h *handler) evictList(tenantID string) {
+	prefix := tenantID + "|"
+	h.listCacheMu.Lock()
+	for k := range h.listCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(h.listCache, k)
+		}
+	}
+	h.listCacheMu.Unlock()
 }
 
 type ruleResp struct {
@@ -340,6 +372,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ruleCacheClear()
+	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -360,28 +393,71 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
-	out := make([]ruleResp, 0, limit+1)
-	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
-		`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
-		   FROM sports_pricing_rules WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY valid_from DESC LIMIT $2`,
-		[]any{idn.TenantID(), limit},
-		func(rows pgx.Rows) error {
-			for rows.Next() {
-				var r ruleResp
-				var createdAt time.Time
-				if err := rows.Scan(&r.ID, &r.TenantID, &r.ValidFrom, &r.OpenTime, &r.CloseTime, &r.DayStart, &r.DayEnd,
-					&r.PriceDay, &r.PriceEvening, &r.IsActive, &createdAt); err != nil {
-					return err
-				}
-				r.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-				out = append(out, r)
+	key := idn.TenantID() + "|" + strconv.Itoa(limit)
+	_, isBust := r.URL.Query()["__bench_cb"]
+	now := time.Now()
+	if !isBust {
+		h.listCacheMu.Lock()
+		hit, ok := h.listCache[key]
+		h.listCacheMu.Unlock()
+		if ok && now.Sub(hit.at) < listCacheTTL {
+			if idn.IsPublic() {
+				records.MarkPublicCache(w, 60, 120)
 			}
-			return rows.Err()
-		})
+			records.WriteJSON(w, http.StatusOK, map[string]any{"items": hit.items})
+			return
+		}
+	}
+	var out []ruleResp
+	_, err, _ := h.sf.Do(key, func() (any, error) {
+		built := make([]ruleResp, 0, limit+1)
+		rerr := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
+			   FROM sports_pricing_rules WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY valid_from DESC LIMIT $2`,
+			[]any{idn.TenantID(), limit},
+			func(rows pgx.Rows) error {
+				for rows.Next() {
+					var r ruleResp
+					var createdAt time.Time
+					if err := rows.Scan(&r.ID, &r.TenantID, &r.ValidFrom, &r.OpenTime, &r.CloseTime, &r.DayStart, &r.DayEnd,
+						&r.PriceDay, &r.PriceEvening, &r.IsActive, &createdAt); err != nil {
+						return err
+					}
+					r.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+					built = append(built, r)
+				}
+				return rows.Err()
+			})
+		if rerr != nil {
+			return nil, rerr
+		}
+		out = built
+		return built, nil
+	})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	h.listCacheMu.Lock()
+	if h.listCache == nil {
+		h.listCache = map[string]cachedList{}
+	}
+	if len(h.listCache) >= maxListCacheEntries {
+		now2 := time.Now()
+		for k, v := range h.listCache {
+			if now2.Sub(v.at) >= listCacheTTL {
+				delete(h.listCache, k)
+			}
+		}
+		if len(h.listCache) >= maxListCacheEntries {
+			for k := range h.listCache {
+				delete(h.listCache, k)
+				break
+			}
+		}
+	}
+	h.listCache[key] = cachedList{at: time.Now(), items: out}
+	h.listCacheMu.Unlock()
 	if idn.IsPublic() {
 		records.MarkPublicCache(w, 60, 120)
 	}
@@ -514,6 +590,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ruleCacheClear()
+	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
 
@@ -587,6 +664,7 @@ func (h *handler) applyHours(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ruleCacheClear()
+	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]any{
 		"open_time":      open.Format("15:04"),
 		"close_time":     closeT.Format("15:04"),
@@ -625,5 +703,6 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ruleCacheClear()
+	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
 }
