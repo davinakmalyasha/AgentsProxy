@@ -20,7 +20,7 @@ require (
 	golang.org/x/sync v0.25.0
 	google.golang.org/adk/v2 v2.5.0
 	google.golang.org/api v0.298.0
-	google.golang.org/genai v1.71.0
+	google.golang.org/genai v1.79.1
 )
 
 require (
