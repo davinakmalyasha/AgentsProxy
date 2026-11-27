@@ -603,91 +603,89 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]bookingResp, 0, limit+1)
 	truncated := false
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
-		               b.date::text, b.start_time::text, b.end_time::text,
-		               b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
-		               COALESCE(b.recurring_series_id::text, ''),
-		               b.created_at, b.updated_at
-		          FROM sports_bookings b
-		          JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
-		         WHERE b.tenant_id = $1`
-		args := []any{idn.TenantID()}
-		idx := 2
-		if idFilter != "" {
-			sql += fmt.Sprintf(" AND b.id = $%d::uuid", idx)
-			args = append(args, idFilter)
+	sql := `SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
+	               b.date::text, b.start_time::text, b.end_time::text,
+	               b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
+	               COALESCE(b.recurring_series_id::text, ''),
+	               b.created_at, b.updated_at
+	          FROM sports_bookings b
+	          JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
+	         WHERE b.tenant_id = $1`
+	args := []any{idn.TenantID()}
+	idx := 2
+	if idFilter != "" {
+		sql += fmt.Sprintf(" AND b.id = $%d::uuid", idx)
+		args = append(args, idFilter)
+		idx++
+	}
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, st := range statuses {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+			args = append(args, st)
 			idx++
 		}
-		if len(statuses) > 0 {
-			placeholders := make([]string, 0, len(statuses))
-			for _, st := range statuses {
-				placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
-				args = append(args, st)
-				idx++
-			}
-			sql += fmt.Sprintf(" AND b.status IN (%s)", strings.Join(placeholders, ","))
-		}
-		for _, ex := range exclude {
-			sql += fmt.Sprintf(" AND b.status != $%d", idx)
-			args = append(args, ex)
-			idx++
-		}
-		if dateStr != "" {
-			sql += fmt.Sprintf(" AND b.date = $%d::date", idx)
-			args = append(args, dateStr)
-			idx++
-		}
-		// Date RANGE (from/to), for the payments screen: a booking from
-		// three days ago can still be unpaid, and the list only accepted a
-		// single exact date, so the UI had no way to reach it. from is
-		// inclusive, to is EXCLUSIVE (same convention as the payments and
-		// expenses endpoints) so a caller can pass the next day's date.
-		rangeStart := strings.TrimSpace(q.Get("from"))
-		rangeEnd := strings.TrimSpace(q.Get("to"))
-		hasRange := false
-		if rangeStart != "" {
-			sql += fmt.Sprintf(" AND b.date >= $%d::date", idx)
-			args = append(args, rangeStart)
-			idx++
-			hasRange = true
-		}
-		if rangeEnd != "" {
-			sql += fmt.Sprintf(" AND b.date < $%d::date", idx)
-			args = append(args, rangeEnd)
-			idx++
-			hasRange = true
-		}
-		if facilityID != "" {
-			sql += fmt.Sprintf(" AND b.facility_id = $%d::uuid", idx)
-			args = append(args, facilityID)
-			idx++
-		}
-		// Order newest-first unless the caller is reading one day, which is
-		// the schedule grid and wants chronological order.
-		//
-		// ASC was the only order, and paired with the 500-row cap it made
-		// the cap hit the OLDEST bookings: a tenant with more than 500 rows
-		// asking for its newest bookings — the payments screen, the
-		// dashboard — got a page of history instead and no error. A single
-		// ?date= is the one case where ascending is the correct answer, so
-		// that is the only case that keeps it.
-		desc := !(dateStr != "" && !hasRange)
-		order := "b.date DESC, b.start_time DESC"
-		if !desc {
-			order = "b.date, b.start_time"
-		}
-		// One row past the cap is how truncation is detected without a
-		// second COUNT query. `truncated` is reported rather than implied,
-		// because a silently shortened list is indistinguishable from a
-		// complete one — a dashboard would show real-but-incomplete
-		// numbers with no way to tell.
-		sql += fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit+1)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+		sql += fmt.Sprintf(" AND b.status IN (%s)", strings.Join(placeholders, ","))
+	}
+	for _, ex := range exclude {
+		sql += fmt.Sprintf(" AND b.status != $%d", idx)
+		args = append(args, ex)
+		idx++
+	}
+	if dateStr != "" {
+		sql += fmt.Sprintf(" AND b.date = $%d::date", idx)
+		args = append(args, dateStr)
+		idx++
+	}
+	// Date RANGE (from/to), for the payments screen: a booking from
+	// three days ago can still be unpaid, and the list only accepted a
+	// single exact date, so the UI had no way to reach it. from is
+	// inclusive, to is EXCLUSIVE (same convention as the payments and
+	// expenses endpoints) so a caller can pass the next day's date.
+	rangeStart := strings.TrimSpace(q.Get("from"))
+	rangeEnd := strings.TrimSpace(q.Get("to"))
+	hasRange := false
+	if rangeStart != "" {
+		sql += fmt.Sprintf(" AND b.date >= $%d::date", idx)
+		args = append(args, rangeStart)
+		idx++
+		hasRange = true
+	}
+	if rangeEnd != "" {
+		sql += fmt.Sprintf(" AND b.date < $%d::date", idx)
+		args = append(args, rangeEnd)
+		idx++
+		hasRange = true
+	}
+	if facilityID != "" {
+		sql += fmt.Sprintf(" AND b.facility_id = $%d::uuid", idx)
+		args = append(args, facilityID)
+		idx++
+	}
+	// Order newest-first unless the caller is reading one day, which is
+	// the schedule grid and wants chronological order.
+	//
+	// ASC was the only order, and paired with the 500-row cap it made
+	// the cap hit the OLDEST bookings: a tenant with more than 500 rows
+	// asking for its newest bookings — the payments screen, the
+	// dashboard — got a page of history instead and no error. A single
+	// ?date= is the one case where ascending is the correct answer, so
+	// that is the only case that keeps it.
+	desc := !(dateStr != "" && !hasRange)
+	order := "b.date DESC, b.start_time DESC"
+	if !desc {
+		order = "b.date, b.start_time"
+	}
+	// One row past the cap is how truncation is detected without a
+	// second COUNT query. `truncated` is reported rather than implied,
+	// because a silently shortened list is indistinguishable from a
+	// complete one — a dashboard would show real-but-incomplete
+	// numbers with no way to tell.
+	sql += fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit+1)
+	// Single-query read: WithTenantRead folds the RLS context into one
+	// simple-protocol message on production (was: BEGIN/set_config/
+	// SELECT/COMMIT = 4 round trips).
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var b bookingResp
 			var createdAt, updatedAt time.Time
@@ -730,23 +728,29 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var b bookingResp
 	var createdAt, updatedAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
-			        b.date::text, b.start_time::text, b.end_time::text,
-			        b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
-			        COALESCE(b.recurring_series_id::text, ''),
-			        b.created_at, b.updated_at
-			   FROM sports_bookings b
-			   JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
-			  WHERE b.id = $1::uuid AND b.tenant_id = $2`,
-			id, idn.TenantID(),
-		).Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.FacilityName,
-			&b.Date, &b.StartTime, &b.EndTime, &b.CustomerName, &b.CustomerPhone,
-			&b.Status, &b.Source, &b.Price, &b.OverridePrice, &b.PaymentStatus, &b.Deposit,
-			&b.RecurringSeriesID,
-			&createdAt, &updatedAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT b.id::text, b.tenant_id, b.facility_id, f.name,
+		        b.date::text, b.start_time::text, b.end_time::text,
+		        b.customer_name, b.customer_phone, b.status, b.source, b.price, b.override_price, b.payment_status, b.deposit,
+		        COALESCE(b.recurring_series_id::text, ''),
+		        b.created_at, b.updated_at
+		   FROM sports_bookings b
+		   JOIN sports_facilities f ON f.id = b.facility_id AND f.tenant_id = b.tenant_id
+		  WHERE b.id = $1::uuid AND b.tenant_id = $2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.FacilityName,
+				&b.Date, &b.StartTime, &b.EndTime, &b.CustomerName, &b.CustomerPhone,
+				&b.Status, &b.Source, &b.Price, &b.OverridePrice, &b.PaymentStatus, &b.Deposit,
+				&b.RecurringSeriesID,
+				&createdAt, &updatedAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
