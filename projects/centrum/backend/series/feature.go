@@ -153,27 +153,23 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]seriesResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
-			   FROM sports_recurring_series WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY weekday, start_time LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var s seriesResp
-			var createdAt time.Time
-			if err := rows.Scan(&s.ID, &s.TenantID, &s.FacilityID, &s.CustomerName, &s.CustomerPhone, &s.Weekday,
-				&s.StartTime, &s.EndTime, &s.StartDate, &s.EndDate, &s.Status, &createdAt); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
+		   FROM sports_recurring_series WHERE tenant_id=$1 AND deleted_at IS NULL ORDER BY weekday, start_time LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var s seriesResp
+				var createdAt time.Time
+				if err := rows.Scan(&s.ID, &s.TenantID, &s.FacilityID, &s.CustomerName, &s.CustomerPhone, &s.Weekday,
+					&s.StartTime, &s.EndTime, &s.StartDate, &s.EndDate, &s.Status, &createdAt); err != nil {
+					return err
+				}
+				s.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, s)
 			}
-			s.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, s)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -189,14 +185,20 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var s seriesResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
-			   FROM sports_recurring_series WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&s.ID, &s.TenantID, &s.FacilityID, &s.CustomerName, &s.CustomerPhone, &s.Weekday,
-			&s.StartTime, &s.EndTime, &s.StartDate, &s.EndDate, &s.Status, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, facility_id::text, customer_name, customer_phone, weekday, start_time::text, end_time::text, start_date::text, COALESCE(end_date::text,''), status, created_at
+		   FROM sports_recurring_series WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&s.ID, &s.TenantID, &s.FacilityID, &s.CustomerName, &s.CustomerPhone, &s.Weekday,
+				&s.StartTime, &s.EndTime, &s.StartDate, &s.EndDate, &s.Status, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return

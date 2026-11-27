@@ -118,28 +118,24 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]memberResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, tenant_id, name, phone, balance, status, created_at, updated_at
-			   FROM sports_members WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var m memberResp
-			var createdAt, updatedAt time.Time
-			if err := rows.Scan(&m.ID, &m.TenantID, &m.Name, &m.Phone, &m.Balance, &m.Status,
-				&createdAt, &updatedAt); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, phone, balance, status, created_at, updated_at
+		   FROM sports_members WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var m memberResp
+				var createdAt, updatedAt time.Time
+				if err := rows.Scan(&m.ID, &m.TenantID, &m.Name, &m.Phone, &m.Balance, &m.Status,
+					&createdAt, &updatedAt); err != nil {
+					return err
+				}
+				m.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				m.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, m)
 			}
-			m.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			m.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, m)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -158,13 +154,19 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var m memberResp
 	var createdAt, updatedAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, name, phone, balance, status, created_at, updated_at
-			   FROM sports_members WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&m.ID, &m.TenantID, &m.Name, &m.Phone, &m.Balance, &m.Status, &createdAt, &updatedAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, phone, balance, status, created_at, updated_at
+		   FROM sports_members WHERE id = $1::uuid AND tenant_id = $2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&m.ID, &m.TenantID, &m.Name, &m.Phone, &m.Balance, &m.Status, &createdAt, &updatedAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
