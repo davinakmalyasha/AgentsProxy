@@ -644,3 +644,13 @@ Residual, stated deliberately:
 - Connection-reuse wins appear under concurrency (2/host -> 32/host); the 1-conc probe cannot show them.
 - Facilities/pricing may serve up to 30s stale per instance (edge 60s dominates); `applyHours` cross-table edit converges within that window.
 - staff/admin/agent SLOs remain `insufficient` until real traffic reaches 20 samples/window.
+
+### Batch 4 follow-up probes — 2026-11-27 (cold + concurrency)
+
+Both run against `e826c50` (same code as `8edb179`; docs-only SHA bump). 0 handler errors in the cold burst; the concurrency run's errors are all rate-limiter 429s (see below).
+
+**Cold burst — 16 instances.** `bench -scenarios health -concurrency 16 -duration 15s -warmup 0s`: 2617 requests, 16 instances, 16 cold, cold p95 **1643.40ms** vs the `ae5ce868` baseline 1670.6ms (4-instance burst). Server p95 2.49ms, DB 0.00, Redis 1.22, 0 errors at 174 rps. Verdict: **flat within noise, still under the 3s target.** The parallel boot removes ~2 sequential pooler RTTs by construction, but cold is dominated by Vercel instance boot/network (~1.6s), not our query sequence — so no measured cold-p95 movement. Raw: `docs/perf/2026-11-27/prod-coldburst-16.*`.
+
+**Concurrency — single-IP saturation is rate-limit bound by design.** `bench -scenarios public-facilities -concurrency 8 -duration 30s -cache-bust` (closed loop): 2241 requests, 60×200, **2181×429**, 9 instances. The anonymous 180/min/IP limiter rejects the flood in ~80ms p50; the 60 admitted origin requests show server p95 6.07ms (app still fast), Redis 1.93ms. Pool reads 2/2 idle immediately after — never saturated because the limiter sheds first. Verdict: **the pool cannot be saturated from one IP; the limiter protects it.** A pool-saturation finding would need distributed load, which we are not running against prod. Raw: `docs/perf/2026-11-27/prod-conc-8.*`.
+
+**Staff reads remain unprobed in prod** — no staff token available and no fake traffic will be generated for it. The wins stand on round-trip removal (4→1 per read, proven by framing) plus local suites, stated as such.
