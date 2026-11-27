@@ -613,3 +613,34 @@ Residual, stated deliberately:
 - Origin handler speed is unchanged (batch 3: server p95 6.9-7.8 ms);
   this batch moves client-observed p50/offload, not origin execution.
 - Cold start unchanged; one cold observed in this probe as usual.
+
+### Batch 4 — 2026-11-27 (Go + DB round trips, boot, transport)
+
+Shipped via the normal gate as PRs #141/#142/#143/#144/#145/#146/#147/#148/#149, live on `8edb179`. No DDL, no new indexes, no synthetic tenant.
+
+What changed and why it was measured first:
+- **Single-query reads off tx framing.** `WithTenantTx` (BEGIN/set_config/SELECT/COMMIT) -> `WithTenantRead` (one simple-protocol message on prod) for every single-SELECT list/getOne/top: bookings, courtblocks, payments, customers, inventory, expenses, users, members, series, kantin products/movements. Query text is identical; only framing leaves. Writes stay on `WithTx` (atomicity + 40P01 retry).
+- **courtblocks create in one checkout.** Validate SELECT + INSERT were two separate `WithTenantTx` checkouts; now one Tx with a sentinel preserving the 404/500 contract.
+- **Outbound HTTP on one pool.** pushsafe, MCP header transport, agency outbox/notify/misc, server healthcheck move off `DefaultTransport` (2/host) to `httpx.SharedTransport` (32/host). CLI tools untouched (one-shot). LLM: precomputed bearer, 8MB `LimitReader` (was unbounded).
+- **Pool visibility.** `/healthz` exposes `pool_acquired/idle/total/max` from `pgxpool.Stat`. Live reads 2/2 idle at rest — no saturation, so MAX stays 2.
+- **Parallel boot.** Origins registry, entitlement audit, and ADK session-table check run in `errgroup` instead of back-to-back (each one pooler RTT). Fail-closed preserved; fences/reconcile stay after.
+- **Facilities/pricing in-process cache.** 30s bounded + `singleflight` mirroring availability, tenant eviction on writes, `__bench_cb` bypass for origin probes. `applyHours` cross-writes facilities hours from the pricing handler; that edit converges within the 30s facilities TTL (edge holds 60s anyway).
+
+Proof:
+- Package suites pass locally for every touched domain: bookings, courtblocks, payments, customers, inventory, expenses, users, members, series, kantin, facilities, pricing, plus llm/mcpclient/pushsafe.
+- Prod smoke PASS on `8edb179`; `/healthz` shows pool fields; edge headers unchanged (60/120 facilities-pricing, 10/30 availability, `X-Avail-Cache` working).
+
+Production probes (2026-11-27, `8edb179`, 0 errors):
+- Origin cache-busted, 45 samples/endpoint: facilities server p95 10.29ms / DB 2.39 / Redis 3.85; availability 10.79 / 2.18 / 3.96; pricing 10.73 / 2.35 / 3.71. Public origin is flat-to-noisy vs batch 3 (6.9-7.8ms) — expected: public reads were already on `WithTenantRead`, the new caches are bypassed by `__bench_cb` by design, and the Tx->Read wins land on staff reads the public probe never exercises. p99 outliers (500-670ms) are edge/network, not origin (server p95 ~10ms).
+- Edge non-busted, 30 samples/endpoint: facilities 29/30 hits p50 62.17ms, pricing 29/30 p50 65.66ms, availability 24/30 p50 64.47ms (in-process 11/19). DB p95 0.00 on facilities/pricing. Raw artifacts: `docs/perf/2026-11-27/prod-batch4-origin.*` and `prod-batch4-edge.*`.
+
+Deliberately not done:
+- Typed `map[string]any` -> struct envelopes: saves ~one small alloc per response against a ~7ms origin; byte order would churn for zero SLO movement. Skipped with data.
+- New indexes: none. Converted queries keep identical SQL text (framing only), so plans are unchanged; batch-2 EXPLAIN verdict stands.
+- Cold-start number: boot now saves 2-3 sequential pooler RTTs (~150-300ms of the 1.67s cold p95), but no labeled cold-start probe has run yet against `8edb179` — the two probes above both show coldN 0. The saving is estimated from removed RTTs, not measured.
+
+Residual, stated deliberately:
+- Staff-read latency wins are real (3 RTTs removed per read) but unprobed — the bench only covers public endpoints.
+- Connection-reuse wins appear under concurrency (2/host -> 32/host); the 1-conc probe cannot show them.
+- Facilities/pricing may serve up to 30s stale per instance (edge 60s dominates); `applyHours` cross-table edit converges within that window.
+- staff/admin/agent SLOs remain `insufficient` until real traffic reaches 20 samples/window.
