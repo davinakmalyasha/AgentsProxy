@@ -654,3 +654,29 @@ Both run against `e826c50` (same code as `8edb179`; docs-only SHA bump). 0 handl
 **Concurrency — single-IP saturation is rate-limit bound by design.** `bench -scenarios public-facilities -concurrency 8 -duration 30s -cache-bust` (closed loop): 2241 requests, 60×200, **2181×429**, 9 instances. The anonymous 180/min/IP limiter rejects the flood in ~80ms p50; the 60 admitted origin requests show server p95 6.07ms (app still fast), Redis 1.93ms. Pool reads 2/2 idle immediately after — never saturated because the limiter sheds first. Verdict: **the pool cannot be saturated from one IP; the limiter protects it.** A pool-saturation finding would need distributed load, which we are not running against prod. Raw: `docs/perf/2026-11-27/prod-conc-8.*`.
 
 **Staff reads remain unprobed in prod** — no staff token available and no fake traffic will be generated for it. The wins stand on round-trip removal (4→1 per read, proven by framing) plus local suites, stated as such.
+
+### Boot-phase verdict — 2026-11-27 (stop on lazy init)
+
+Pulled production cold-boot logs via `vercel logs` (4 samples, `docs/perf/2026-11-27/boot-phase-cold.txt`). Go-side boot is **150–375 ms** against the 1643 ms cold p95 — the platform owns ~80–90% of every cold start.
+
+Measured breakdown (consistent across samples):
+
+| Phase | Observed |
+|---|---|
+| config / db_pool / admin_pool | 0–5 ms (pools lazy, no ping) |
+| runtime role check | ~32–40 ms (one pooler RTT; one 199 ms outlier = pooler hiccup) |
+| redis connect | ~80–115 ms (Upstash TLS + PING) |
+| manifest (embed FS scan) | 0 ms — the FS-scan hypothesis is dead |
+| parallel group (session/entitlement/origins) | 16–58 ms total (was ~3 sequential RTTs) |
+| adk runner (tools + schema parse) | ~6–16 ms — the schema-parse hypothesis is dead |
+| total `boot_ms` | 150–375 ms |
+
+Why lazy init stops here:
+- Redis (~90 ms) cannot be removed, only deferred — and deferring moves it onto the first request, which is exactly what cold p95 measures. Zero-sum.
+- Role check (~35 ms) is fail-closed by design; skipping it weakens the RLS guarantee for 35 ms.
+- Manifest is already 0 ms; ADK materialization is 6–16 ms. There is no fat left to cut.
+- The parallel-boot PR (#145) is confirmed working in the logs (`boot_parallel` 16–58 ms replaces three sequential RTTs), but the saving (~30 ms) sits inside platform noise — consistent with the flat cold-burst result (1643 vs 1670 ms).
+
+Decision: **no further cold-start work.** The next cold-start lever, if any, is platform-side (provisioned concurrency / warmer), not Go code. Revisit only if `boot_ms` regresses past 500 ms in these logs.
+
+Also live in this window: Go 1.27.0 → 1.27.4 (PR #152, latest patch per go.dev), redis 9.22→9.23 (#104), x/sync 0.23→0.25 (#102, the errgroup in use), excelize pseudo→release (#97). Each through the normal gate with prod smoke PASS.
