@@ -256,38 +256,33 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
-		          FROM sports_payments WHERE tenant_id = $1 AND deleted_at IS NULL`
-		args := []any{idn.TenantID()}
-		idx := 2
-		if bookingID != "" {
-			sql += fmt.Sprintf(" AND booking_id = $%d::uuid", idx)
-			args = append(args, bookingID)
-			idx++
-		}
-		if recordedBy != "" {
-			sql += fmt.Sprintf(" AND recorded_by = $%d::uuid", idx)
-			args = append(args, recordedBy)
-			idx++
-		}
-		if from != "" {
-			sql += fmt.Sprintf(" AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $%d::date", idx)
-			args = append(args, from)
-			idx++
-		}
-		if to != "" {
-			sql += fmt.Sprintf(" AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date < $%d::date", idx)
-			args = append(args, to)
-			idx++
-		}
-		// One row past the cap detects truncation without a second COUNT.
-		sql += fmt.Sprintf(" ORDER BY paid_at DESC LIMIT %d", limit+1)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	sql := `SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
+	          FROM sports_payments WHERE tenant_id = $1 AND deleted_at IS NULL`
+	args := []any{idn.TenantID()}
+	idx := 2
+	if bookingID != "" {
+		sql += fmt.Sprintf(" AND booking_id = $%d::uuid", idx)
+		args = append(args, bookingID)
+		idx++
+	}
+	if recordedBy != "" {
+		sql += fmt.Sprintf(" AND recorded_by = $%d::uuid", idx)
+		args = append(args, recordedBy)
+		idx++
+	}
+	if from != "" {
+		sql += fmt.Sprintf(" AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date >= $%d::date", idx)
+		args = append(args, from)
+		idx++
+	}
+	if to != "" {
+		sql += fmt.Sprintf(" AND (paid_at AT TIME ZONE 'Asia/Jakarta')::date < $%d::date", idx)
+		args = append(args, to)
+		idx++
+	}
+	// One row past the cap detects truncation without a second COUNT.
+	sql += fmt.Sprintf(" ORDER BY paid_at DESC LIMIT %d", limit+1)
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var p paymentResp
 			var paidAt, createdAt time.Time
@@ -327,13 +322,19 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var p paymentResp
 	var paidAt, createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
-			   FROM sports_payments WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-			id, idn.TenantID(),
-		).Scan(&p.ID, &p.TenantID, &p.BookingID, &p.Amount, &p.Method, &paidAt, &p.Note, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, booking_id::text, amount, method, paid_at, note, created_at
+		   FROM sports_payments WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&p.ID, &p.TenantID, &p.BookingID, &p.Amount, &p.Method, &paidAt, &p.Note, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
