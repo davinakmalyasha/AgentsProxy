@@ -7,6 +7,7 @@ package courtblocks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -88,27 +89,31 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	if req.EndTime == "" {
 		req.EndTime = "23:00"
 	}
-	// Validate the facility if given.
-	if req.FacilityID != "" {
-		var one int
-		err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-			return tx.QueryRow(r.Context(),
-				`SELECT 1 FROM sports_facilities WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
-				req.FacilityID, idn.TenantID()).Scan(&one)
-		})
-		if err != nil {
-			records.WriteJSONError(w, http.StatusNotFound, "facility not found")
-			return
-		}
-	}
+	// Validate the facility if given, then insert, in one checkout:
+	// two separate WithTenantTx calls cost two pool checkouts
+	// (BEGIN/set_config.../COMMIT each); one Tx holds the connection
+	// once for both statements.
+	var errFacilityNotFound = errors.New("facility not found")
 	var id string
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if req.FacilityID != "" {
+			var one int
+			if err := tx.QueryRow(r.Context(),
+				`SELECT 1 FROM sports_facilities WHERE id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL`,
+				req.FacilityID, idn.TenantID()).Scan(&one); err != nil {
+				return errFacilityNotFound
+			}
+		}
 		return tx.QueryRow(r.Context(),
 			`INSERT INTO sports_court_blocks (tenant_id, facility_id, block_date, start_time, end_time, reason)
 			 VALUES ($1, NULLIF($2,'')::uuid, $3::date, $4::time, $5::time, $6) RETURNING id::text`,
 			idn.TenantID(), req.FacilityID, req.BlockDate, req.StartTime, req.EndTime, req.Reason).Scan(&id)
 	})
 	if err != nil {
+		if errors.Is(err, errFacilityNotFound) {
+			records.WriteJSONError(w, http.StatusNotFound, "facility not found")
+			return
+		}
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -127,20 +132,15 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]blockResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		sql := `SELECT id::text, tenant_id, COALESCE(facility_id::text,''), block_date::text, start_time::text, end_time::text, reason, created_at
-		          FROM sports_court_blocks WHERE tenant_id=$1`
-		args := []any{idn.TenantID()}
-		if date != "" {
-			sql += " AND block_date=$2::date"
-			args = append(args, date)
-		}
-		sql += fmt.Sprintf(" ORDER BY block_date DESC LIMIT %d", limit)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	sql := `SELECT id::text, tenant_id, COALESCE(facility_id::text,''), block_date::text, start_time::text, end_time::text, reason, created_at
+	          FROM sports_court_blocks WHERE tenant_id=$1`
+	args := []any{idn.TenantID()}
+	if date != "" {
+		sql += " AND block_date=$2::date"
+		args = append(args, date)
+	}
+	sql += fmt.Sprintf(" ORDER BY block_date DESC LIMIT %d", limit)
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var b blockResp
 			var createdAt time.Time
@@ -167,13 +167,19 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var b blockResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, COALESCE(facility_id::text,''), block_date::text, start_time::text, end_time::text, reason, created_at
-			   FROM sports_court_blocks WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID(),
-		).Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.BlockDate, &b.StartTime, &b.EndTime, &b.Reason, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, COALESCE(facility_id::text,''), block_date::text, start_time::text, end_time::text, reason, created_at
+		   FROM sports_court_blocks WHERE id=$1::uuid AND tenant_id=$2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&b.ID, &b.TenantID, &b.FacilityID, &b.BlockDate, &b.StartTime, &b.EndTime, &b.Reason, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
