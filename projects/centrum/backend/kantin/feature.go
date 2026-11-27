@@ -157,27 +157,23 @@ func (h *handler) listProducts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]productResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
-			   FROM sports_kantin_products WHERE tenant_id=$1 ORDER BY name LIMIT $2`,
-			idn.TenantID(), limit)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var p productResp
-			var createdAt time.Time
-			if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
-				&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt); err != nil {
-				return err
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
+		   FROM sports_kantin_products WHERE tenant_id=$1 ORDER BY name LIMIT $2`,
+		[]any{idn.TenantID(), limit},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var p productResp
+				var createdAt time.Time
+				if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
+					&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt); err != nil {
+					return err
+				}
+				p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+				out = append(out, p)
 			}
-			p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-			out = append(out, p)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
@@ -193,14 +189,20 @@ func (h *handler) getProduct(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var p productResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
-			   FROM sports_kantin_products WHERE id=$1::uuid AND tenant_id=$2`,
-			id, idn.TenantID(),
-		).Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
-			&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt)
-	})
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT id::text, tenant_id, name, category, price, cost_price, track_stock, stock, low_stock_threshold, is_active, created_at
+		   FROM sports_kantin_products WHERE id=$1::uuid AND tenant_id=$2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Category, &p.Price, &p.CostPrice,
+				&p.TrackStock, &p.Stock, &p.LowStockThreshold, &p.IsActive, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
@@ -494,19 +496,14 @@ func (h *handler) listProductMovements(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) writeMovements(w http.ResponseWriter, r *http.Request, tenant, productID string, limit int) {
 	out := make([]movementResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, tenant, func(tx pgx.Tx) error {
-		sql := movementSelect
-		args := []any{tenant}
-		if productID != "" {
-			sql += " AND m.product_id = $2::uuid"
-			args = append(args, productID)
-		}
-		sql += fmt.Sprintf(" ORDER BY m.created_at DESC, m.id DESC LIMIT %d", limit)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	sql := movementSelect
+	args := []any{tenant}
+	if productID != "" {
+		sql += " AND m.product_id = $2::uuid"
+		args = append(args, productID)
+	}
+	sql += fmt.Sprintf(" ORDER BY m.created_at DESC, m.id DESC LIMIT %d", limit)
+	err := records.WithTenantRead(r.Context(), h.pool, tenant, sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var m movementResp
 			var createdAt time.Time
