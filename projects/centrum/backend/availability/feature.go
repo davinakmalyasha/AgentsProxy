@@ -45,11 +45,11 @@ func routes(r chi.Router, deps features.BuilderDeps) {
 type handler struct {
 	pool *pgxpool.Pool
 	// Short in-process cache: the landing board polls this endpoint
-	// every ~5s per open tab. A 3s TTL absorbs the poll burst without
-	// going to Postgres each time — busy intervals can be up to 3s
+	// every ~5s per open tab. A 10s TTL absorbs two poll cycles without
+	// going to Postgres each time — busy intervals can be up to 10s
 	// stale, which is invisible for a "free slot" board and far kinder
 	// to the DB. Per-instance is fine: it's a cache, not a source of
-	// truth (a write just isn't visible for ~3s on this instance).
+	// truth (a write just isn't visible for ~10s on this instance).
 	//
 	// Bounded: maxAvailCacheEntries caps tenants × dates × types, and
 	// every write evicts expired entries first, so the map cannot grow
@@ -73,7 +73,7 @@ type cachedAvail struct {
 }
 
 // cacheTTL bounds how long a built availability payload is reused.
-const cacheTTL = 3 * time.Second
+const cacheTTL = 10 * time.Second
 
 type busyInterval struct {
 	Start string `json:"start"`
@@ -126,7 +126,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		if ok && now.Sub(hit.at) < cacheTTL {
 			w.Header().Set("X-Avail-Cache", "hit")
 			if idn.IsPublic() {
-				records.MarkPublicCache(w, 2, 5)
+				records.MarkPublicCache(w, 10, 30)
 			}
 			records.WriteJSON(w, http.StatusOK, hit.payload)
 			return
@@ -155,7 +155,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	if h.cache == nil {
 		h.cache = map[string]cachedAvail{}
 	}
-	// Lazy evict: the map is tiny and entries expire in 3s, so scanning
+	// Lazy evict: the map is tiny and entries expire in 10s, so scanning
 	// on every miss is pure O(cap) overhead on the hottest endpoint.
 	// Scan only when the cap is actually reached.
 	if len(h.cache) >= maxAvailCacheEntries {
@@ -175,7 +175,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
 	h.cacheMu.Unlock()
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 2, 5)
+		records.MarkPublicCache(w, 10, 30)
 	}
 	records.WriteJSON(w, http.StatusOK, payload)
 }
