@@ -692,3 +692,25 @@ Shipped via the normal gate: code PR #154 merged as `6cdb3d7`; deploy promoted, 
 Safety, stated: a stale availability board degrades to a clean 409 (the exclusion constraint rejects overlaps), never a double booking. Actual booking charges resolve server-side (`ruleCache` 30s + DB), so edge staleness on pricing/facilities is display-only.
 
 Production edge probe (2026-11-28, `6cdb3d7`, non-busted, 1 conc, 0.5 RPS, 0 errors): facilities **28/28** hits, pricing **30/30**, availability **26/28**; p50 88–108ms. Two notes, honestly: p50 reads ~25ms higher than the 63–69ms of the previous run, but facilities/pricing had **zero origin contact** (server p95 0.00) — the delta is pure edge/network variance between runs, not server code (same code path, header values only). Availability's two origin passes show one slow DB sample (db p95 42.5ms over n=2, pooler hiccup class); the 7s p99s are single edge outliers. Offload improved (near-100% hits); client latency flat within edge noise. Raw: `docs/perf/2026-11-28/prod-ttl2-edge.*`.
+
+### Streaming chat — 2026-11-28 (perceived latency, additive)
+
+Shipped via the normal gate: code PR #156 merged as `9146a2e`; deploy promoted, prod smoke PASS on `9146a2e`.
+
+`POST /v1/chat/stream`: the same gate as `/v1/chat` (validation, token auth, quarantine, per-client rate limit, quota) through a shared prologue, then the reply streams as server-sent events — `{"delta":...}` chunks plus a terminal `{"done":true,"reply":"...","usage":{...}}` — so first token arrives at provider-TTFB instead of after the full completion. No contract change to any existing route; the old endpoint is byte-identical (prologue extracted verbatim, full suite green).
+
+- `llm.Client.Stream`: `stream:true` + `include_usage`, OpenAI-SSE parsing, same shaping/retry as `Complete`, bounded 1MB line buffer, abort-safe metering (disconnect mid-stream still meters what accumulated; truncation meters the partial and reports).
+- Headers flush before dialing the provider; pre-stream failures keep the JSON+status contract; post-200 provider failures arrive as an `{"error":...}` event; no-Flusher degrades to JSON.
+- mockllm serves SSE when `stream:true` (dev-only).
+
+Proof: 5 new `llm` stream tests + 3 API stream tests pass (deltas, done+usage, 401 JSON, provider-error event, metering row); full `internal/api` suite green; live route verified on prod (401 JSON on missing token, not 404). End-to-end SSE against the real gateway rides with frontend integration (dfdagency holds real client tokens; no synthetic traffic was generated for this).
+
+### Micro-opts declined with data — 2026-11-28
+
+Three candidates were measured against the code and rejected; recording the reasoning so they are not re-proposed without new evidence:
+
+- **Tenant L1 5s → longer.** L1 `tenantInfoL1TTL` is the cross-instance staleness bound after an admin write (pause/provision). Lengthening it trades ~1 Redis GET on a fraction of requests for a longer fencing/launch window. Declined: security-relevant, gain inside noise.
+- **Combine tenant-check + rate limit into one Lua EVAL.** Saves ~1 Redis RTT (~1–2 ms) on some paths but merges two separately-tested security mechanisms (tenant gate + abuse limiter) into one script. Declined: complexity + lock-in for ~1 ms.
+- **Payments patch 4→3 statements.** Would fold price+SUM into one SELECT but weakens the `FOR UPDATE` locking the overpay check depends on (concurrent create could slip between check and update). Declined without a concurrency proof; the endpoint is staff-only and unprobed in prod.
+
+None of the three moves a public SLO; all three add risk. The optimization program stays complete.
