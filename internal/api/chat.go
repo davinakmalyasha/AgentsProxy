@@ -255,10 +255,6 @@ func (h *Chat) resolveAuth(w http.ResponseWriter, r *http.Request) (*http.Reques
 			return fail(http.StatusBadRequest, "message too long")
 		}
 	}
-	// Force a single model for this shared-key endpoint. req.Model only
-	// selects among the allowlist; anything else uses the default.
-	req.Model = sanitizeModel(req.Model, h.LLM.DefaultModel)
-
 	clientModel, err := h.Cache.GetByToken(r.Context(), req.ClientToken)
 	if err != nil {
 		if errors.Is(err, cache.ErrInvalidToken) {
@@ -305,6 +301,10 @@ func (h *Chat) resolveAuth(w http.ResponseWriter, r *http.Request) (*http.Reques
 		return fail(http.StatusInternalServerError, "internal")
 	}
 
+	// Force a single model for this shared-key endpoint in one place
+	// (post-auth): req.Model only selects among the allowlist, anything
+	// else uses the default. sanitize is idempotent, so no pre-auth pass
+	// is needed -- validation above already rejected bad shapes.
 	model := sanitizeModel(req.Model, h.LLM.DefaultModel)
 	return r, &req, clientModel, model, true
 }
