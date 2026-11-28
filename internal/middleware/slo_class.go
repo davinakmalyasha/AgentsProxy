@@ -22,7 +22,7 @@ func SLOClass(r *http.Request) string {
 		return "admin"
 	case strings.HasPrefix(p, "/v1/agent/"):
 		return "agent"
-	case p == "/v1/chat":
+	case p == "/v1/chat" || p == "/v1/chat/stream":
 		return "chat"
 	case strings.HasPrefix(p, "/v1/auth/"):
 		return "staff"

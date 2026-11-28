@@ -98,7 +98,12 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.meter(r, clientModel.ID, model, inTok, outTok)
+	// Skip zero-token rows: cost is $0, quota counts tokens (unchanged),
+	// and the write would cost 1 DB RPC + 1 Lua to record $0. Request
+	// volume is still observed via SLO/logging, not the usage ledger.
+	if inTok != 0 || outTok != 0 {
+		h.meter(r, clientModel.ID, model, inTok, outTok)
+	}
 
 	cost := usage.EstimateCost(inTok, outTok)
 	writeJSON(w, http.StatusOK, chatResponse{
@@ -148,7 +153,9 @@ func (h *Chat) ServeStream(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadGateway, "provider error")
 			return
 		}
-		h.meter(r, clientModel.ID, model, inTok, outTok)
+		if inTok != 0 || outTok != 0 {
+			h.meter(r, clientModel.ID, model, inTok, outTok)
+		}
 		cost := usage.EstimateCost(inTok, outTok)
 		writeJSON(w, http.StatusOK, chatResponse{
 			Reply: reply,
@@ -181,7 +188,10 @@ func (h *Chat) ServeStream(w http.ResponseWriter, r *http.Request) {
 	reply, inTok, outTok, lerr := h.LLM.Stream(llmCtx, req.Messages, model, func(delta string) error {
 		return writeEvent(map[string]string{"delta": delta})
 	})
-	if reply != "" || inTok != 0 || outTok != 0 {
+	// Same zero-token skip as ServeHTTP: a $0 row costs a DB RPC + Lua
+	// and leaves quota unchanged. Partial streams with real tokens still
+	// meter (provider bills what was generated).
+	if inTok != 0 || outTok != 0 {
 		h.meter(r, clientModel.ID, model, inTok, outTok)
 	}
 	if lerr != nil {
