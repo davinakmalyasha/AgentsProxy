@@ -35,6 +35,9 @@ func buildProjectRouter(project, schema string, deps BuilderDeps, vertical strin
 	}
 	recDeps := records.Deps{Pool: deps.Pool, Cache: deps.Cache}
 	r := chi.NewRouter()
+	// Bound JSON writes early: a huge body fails fast instead of
+	// materializing in a decoder on a free-plan instance.
+	r.Use(middleware.LimitJSONBody(middleware.MaxProjectJSONBody))
 	if deps.Auth != nil {
 		r.Use(records.WithIdentity(records.IdentityDeps{Pool: deps.Pool, Cache: deps.Cache, Auth: deps.Auth}))
 	} else {

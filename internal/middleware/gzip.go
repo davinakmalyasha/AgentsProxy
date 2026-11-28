@@ -14,7 +14,16 @@ import (
 const gzipThreshold = 1024
 
 var gzipWriterPool = sync.Pool{
-	New: func() any { return gzip.NewWriter(io.Discard) },
+	New: func() any {
+		// BestSpeed (level 1): list endpoints are CPU-bound on gzip at
+		// DefaultCompression, and the edge caches the bytes anyway.
+		// Compression ratio drops ~10-20% (still 4-8x on JSON), CPU
+		// drops roughly by half on 200-2000 row payloads.
+		if w, err := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed); err == nil {
+			return w
+		}
+		return gzip.NewWriter(io.Discard)
+	},
 }
 
 // Gzip compresses responses for clients that accept it. Threshold-gated:

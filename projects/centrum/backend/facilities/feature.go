@@ -222,8 +222,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []facilityResp
-	_, err, _ := h.sf.Do(key, func() (any, error) {
+	v, err, _ := h.sf.Do(key, func() (any, error) {
 		built := make([]facilityResp, 0, limit+1)
 		var q string
 		var args []any
@@ -253,12 +252,18 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		if rerr != nil {
 			return nil, rerr
 		}
-		out = built
 		return built, nil
 	})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	// Use the shared singleflight result: duplicate waiters never run
+	// the closure, so reading an outer variable would hand them nil
+	// and poison the cache with an empty entry under burst.
+	out, _ := v.([]facilityResp)
+	if out == nil {
+		out = []facilityResp{}
 	}
 	h.cacheMu.Lock()
 	if h.cache == nil {
