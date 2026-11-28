@@ -103,25 +103,27 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	if idemErr != nil {
 		return
 	}
-	if haveIdem {
-		var existing string
-		qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-			return tx.QueryRow(r.Context(),
-				`SELECT id::text FROM sports_payments WHERE tenant_id=$1 AND idempotency_key=$2`,
-				idn.TenantID(), idemKey).Scan(&existing)
-		})
-		if qerr == nil {
-			records.WriteJSON(w, http.StatusOK, map[string]any{"id": existing, "deduplicated": true})
-			return
-		}
-		if qerr != pgx.ErrNoRows {
-			records.WriteJSONError(w, http.StatusInternalServerError, "internal")
-			return
-		}
-	}
+	// Single transaction (members-topup shape): the dedup check runs
+	// inside the write Tx, not in its own Tx before it. The old
+	// pre-check paid a full Tx (BEGIN/set_config/COMMIT ≈ 4 RTT) on
+	// every keyed call; the partial unique index stays the arbiter and
+	// the fallback below returns the winner on a race.
 	var id string
 	var overpayErr error
+	deduplicated := false
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if haveIdem {
+			qerr := tx.QueryRow(r.Context(),
+				`SELECT id::text FROM sports_payments WHERE tenant_id=$1 AND idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&id)
+			if qerr == nil {
+				deduplicated = true
+				return nil
+			}
+			if qerr != pgx.ErrNoRows {
+				return qerr
+			}
+		}
 		// One row lock + one read: booking price and already-paid sum in a
 		// single SELECT (was two sequential round trips). The trigger still
 		// recomputes payment_status after INSERT — that is correctness, not
@@ -193,6 +195,10 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if deduplicated {
+		records.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "deduplicated": true})
 		return
 	}
 	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})

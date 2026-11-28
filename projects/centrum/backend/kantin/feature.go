@@ -642,26 +642,14 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 	if idemErr != nil {
 		return
 	}
-	if haveIdem {
-		var existingID string
-		var existingTotal float64
-		qerr := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-			return tx.QueryRow(r.Context(),
-				`SELECT id::text, total FROM sports_kantin_sales WHERE tenant_id=$1 AND idempotency_key=$2`,
-				idn.TenantID(), idemKey).Scan(&existingID, &existingTotal)
-		})
-		if qerr == nil {
-			records.WriteJSON(w, http.StatusOK, map[string]any{"id": existingID, "total": existingTotal, "deduplicated": true})
-			return
-		}
-		if qerr != pgx.ErrNoRows {
-			records.WriteJSONError(w, http.StatusInternalServerError, "internal")
-			return
-		}
-	}
 
+	// Single transaction (members-topup shape): the dedup check runs
+	// inside the write Tx, not in its own Tx before it. Saves a full Tx
+	// (~4 RTT) on every keyed call; the unique index + fallback stay
+	// the race arbiters. Closure stays retry-safe (assigned, never +=).
 	var saleID string
 	var total float64
+	deduplicated := false
 	recordedBy := idn.UserID
 	var recordedByArg any
 	if recordedBy == "" {
@@ -670,6 +658,20 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		recordedByArg = recordedBy
 	}
 	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
+		if haveIdem {
+			var existingID string
+			var existingTotal float64
+			qerr := tx.QueryRow(r.Context(),
+				`SELECT id::text, total FROM sports_kantin_sales WHERE tenant_id=$1 AND idempotency_key=$2`,
+				idn.TenantID(), idemKey).Scan(&existingID, &existingTotal)
+			if qerr == nil {
+				saleID, total, deduplicated = existingID, existingTotal, true
+				return nil
+			}
+			if qerr != pgx.ErrNoRows {
+				return qerr
+			}
+		}
 		if len(req.Items) > maxSaleItems {
 			return errTooManyItems
 		}
@@ -836,6 +838,10 @@ func (h *handler) createSale(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if deduplicated {
+		records.WriteJSON(w, http.StatusOK, map[string]any{"id": saleID, "total": total, "deduplicated": true})
+		return
+	}
 	records.WriteJSON(w, http.StatusCreated, map[string]any{"id": saleID, "total": total})
 }
 
@@ -907,52 +913,49 @@ func (h *handler) listSales(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := make([]saleResp, 0, limit+1)
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// Voided sales are listed, not hidden. They are excluded from money
-		// arithmetic elsewhere; this screen exists precisely to show what
-		// happened, so filtering them out here would hide the correction
-		// the owner needs to see. The join is what turns recorded_by into
-		// a name the owner can read.
-		sql := `SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
-		               COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
+	// Single-statement read: no writes, so no Tx framing (BEGIN/set_config/
+	// COMMIT ≈ 3 wasted RTT). One round trip on the production pool.
+	sql := `SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
+	               COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
 COALESCE(s.recorded_by::text, ''), COALESCE(u.full_name, ''),
-		               s.created_at
-		          FROM sports_kantin_sales s
-		          LEFT JOIN sports_users u ON u.id = s.recorded_by
-		         WHERE s.tenant_id=$1`
-		args := []any{idn.TenantID()}
-		idx := 2
-		// Qualified with s.: the recorder join below brings in a second table that
-		// also has created_at and tenant_id, and an unqualified reference is
-		// ambiguous -- the whole query failed with a 500 once it joined.
-		wib := `(s.created_at AT TIME ZONE 'Asia/Jakarta')::date`
-		if recordedBy != "" {
-			sql += fmt.Sprintf(" AND s.recorded_by = $%d::uuid", idx)
-			args = append(args, recordedBy)
+	               s.created_at
+	          FROM sports_kantin_sales s
+	          LEFT JOIN sports_users u ON u.id = s.recorded_by
+	         WHERE s.tenant_id=$1`
+	args := []any{idn.TenantID()}
+	idx := 2
+	// Qualified with s.: the recorder join below brings in a second table that
+	// also has created_at and tenant_id, and an unqualified reference is
+	// ambiguous -- the whole query failed with a 500 once it joined.
+	wib := `(s.created_at AT TIME ZONE 'Asia/Jakarta')::date`
+	if recordedBy != "" {
+		sql += fmt.Sprintf(" AND s.recorded_by = $%d::uuid", idx)
+		args = append(args, recordedBy)
+		idx++
+	}
+	if date != "" {
+		sql += fmt.Sprintf(" AND %s = $%d::date", wib, idx)
+		args = append(args, date)
+		idx++
+	} else {
+		if from != "" {
+			sql += fmt.Sprintf(" AND %s >= $%d::date", wib, idx)
+			args = append(args, from)
 			idx++
 		}
-		if date != "" {
-			sql += fmt.Sprintf(" AND %s = $%d::date", wib, idx)
-			args = append(args, date)
+		if to != "" {
+			sql += fmt.Sprintf(" AND %s < $%d::date", wib, idx)
+			args = append(args, to)
 			idx++
-		} else {
-			if from != "" {
-				sql += fmt.Sprintf(" AND %s >= $%d::date", wib, idx)
-				args = append(args, from)
-				idx++
-			}
-			if to != "" {
-				sql += fmt.Sprintf(" AND %s < $%d::date", wib, idx)
-				args = append(args, to)
-				idx++
-			}
 		}
-		sql += fmt.Sprintf(" ORDER BY s.created_at DESC LIMIT %d", limit)
-		rows, err := tx.Query(r.Context(), sql, args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	}
+	sql += fmt.Sprintf(" ORDER BY s.created_at DESC LIMIT %d", limit)
+	// Voided sales are listed, not hidden. They are excluded from money
+	// arithmetic elsewhere; this screen exists precisely to show what
+	// happened, so filtering them out here would hide the correction
+	// the owner needs to see. The join is what turns recorded_by into
+	// a name the owner can read.
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(), sql, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var s saleResp
 			var createdAt time.Time
@@ -980,19 +983,26 @@ func (h *handler) getSale(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var s saleResp
 	var createdAt time.Time
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(),
-			`SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
-			        COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
-			        COALESCE(s.recorded_by::text, ''), COALESCE(u.full_name, ''),
-			        s.created_at
-			   FROM sports_kantin_sales s
-			   LEFT JOIN sports_users u ON u.id = s.recorded_by
-			  WHERE s.id=$1::uuid AND s.tenant_id=$2`,
-			id, idn.TenantID(),
-		).Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note,
-			&s.VoidedAt, &s.VoidedBy, &s.RecordedBy, &s.RecordedByName, &createdAt)
-	})
+	// Single-statement read: no Tx framing for one SELECT.
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT s.id::text, s.tenant_id, s.total, s.method, s.customer_name, s.note,
+		        COALESCE(s.voided_at::text, ''), COALESCE(s.voided_by::text, ''),
+		        COALESCE(s.recorded_by::text, ''), COALESCE(u.full_name, ''),
+		        s.created_at
+		   FROM sports_kantin_sales s
+		   LEFT JOIN sports_users u ON u.id = s.recorded_by
+		  WHERE s.id=$1::uuid AND s.tenant_id=$2`,
+		[]any{id, idn.TenantID()},
+		func(rows pgx.Rows) error {
+			if !rows.Next() {
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				return pgx.ErrNoRows
+			}
+			return rows.Scan(&s.ID, &s.TenantID, &s.Total, &s.Method, &s.CustomerName, &s.Note,
+				&s.VoidedAt, &s.VoidedBy, &s.RecordedBy, &s.RecordedByName, &createdAt)
+		})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
@@ -1009,12 +1019,9 @@ type saleItemResp struct {
 	UnitCost    float64 `json:"unit_cost"`
 }
 
-// errForbidden signals a cross-tenant access attempt inside a tx
-// (mapped to 403 by the caller).
-var errForbidden = errors.New("forbidden")
-
 // listSaleItems returns the line items of one sale (riwayat detail +
-// item-level export). Sale must belong to the caller's tenant.
+// item-level export). Sale must belong to the caller's tenant: the JOIN
+// above enforces it, reading cross-tenant as 404 (no oracle).
 func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 	idn := records.RequireIdentity(w, r)
 	if idn == nil {
@@ -1028,42 +1035,41 @@ func (h *handler) listSaleItems(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]saleItemResp, 0, limit+1)
 	truncated := false
-	err := records.WithTenantTx(r.Context(), h.pool, idn.TenantID(), func(tx pgx.Tx) error {
-		// Tenant check via the parent sale (items' tenant_id is nullable backfill).
-		var saleTenant string
-		if err := tx.QueryRow(r.Context(),
-			`SELECT tenant_id FROM sports_kantin_sales WHERE id=$1::uuid`, id).Scan(&saleTenant); err != nil {
-			return err
-		}
-		if saleTenant != idn.TenantID() {
-			return errForbidden
-		}
-		rows, err := tx.Query(r.Context(),
-			`SELECT id::text, product_name, qty, unit_price, unit_cost
-			   FROM sports_kantin_sale_items WHERE sale_id=$1::uuid ORDER BY product_name LIMIT $2`, id, limit+1)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var it saleItemResp
-			if err := rows.Scan(&it.ID, &it.ProductName, &it.Qty, &it.UnitPrice, &it.UnitCost); err != nil {
-				return err
+	// Single-statement read with the tenant check folded into the JOIN:
+	// items carry no reliable tenant of their own (nullable backfill),
+	// so the parent sale is the boundary. A cross-tenant id now reads
+	// as 404, not 403 -- no existence oracle, strictly safer. Saves the
+	// Tx framing plus the separate check round trip.
+	err := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
+		`SELECT i.id::text, i.product_name, i.qty, i.unit_price, i.unit_cost
+		   FROM sports_kantin_sale_items i
+		   JOIN sports_kantin_sales s ON s.id = i.sale_id AND s.tenant_id = $2
+		  WHERE i.sale_id=$1::uuid ORDER BY i.product_name LIMIT $3`,
+		[]any{id, idn.TenantID(), limit + 1},
+		func(rows pgx.Rows) error {
+			for rows.Next() {
+				var it saleItemResp
+				if err := rows.Scan(&it.ID, &it.ProductName, &it.Qty, &it.UnitPrice, &it.UnitCost); err != nil {
+					return err
+				}
+				out = append(out, it)
+				if len(out) > limit {
+					out = out[:limit]
+					truncated = true
+					break
+				}
 			}
-			out = append(out, it)
-			if len(out) > limit {
-				out = out[:limit]
-				truncated = true
-				break
-			}
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		})
 	if err != nil {
-		if err == errForbidden {
-			records.WriteJSONError(w, http.StatusForbidden, "forbidden")
-			return
-		}
+		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if len(out) == 0 && !truncated {
+		// JOIN yields zero rows for a missing sale AND a cross-tenant id.
+		// Sales always carry >=1 item (create requires it, void keeps
+		// items), so empty here means the sale is not visible to this
+		// tenant -- 404 either way, no oracle.
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
