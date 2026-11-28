@@ -77,6 +77,11 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	r.Route("/v1", func(r chi.Router) {
+		// Bound JSON bodies before any auth/DB work: valid /v1 writes are
+		// KBs, 1 MiB is generous. GETs pass through (method-gated inside).
+		// Chat re-bounds inline (same limit, harmless double-wrap) because
+		// it reads the token from the body after routing.
+		r.Use(middleware.LimitJSONBody(middleware.MaxProjectJSONBody))
 		// Global per-client/IP rate limit (default 180). Chat gets stricter sub-limit below.
 		r.Use(middleware.RateLimit(d.Redis, d.Cfg.RateLimitPerMinute))
 

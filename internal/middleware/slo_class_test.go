@@ -17,6 +17,7 @@ func TestSLOClass(t *testing.T) {
 		{http.MethodPost, "/v1/agent/chat", "agent"},
 		{http.MethodPost, "/v1/agent/client-chat", "agent"},
 		{http.MethodPost, "/v1/chat", "chat"},
+		{http.MethodPost, "/v1/chat/stream", "chat"},
 		{http.MethodPost, "/v1/auth/login", "staff"},
 		{http.MethodGet, "/v1/reports/jobs/abc", "staff"},
 		{http.MethodPost, "/v1/push/subscriptions", "staff"},

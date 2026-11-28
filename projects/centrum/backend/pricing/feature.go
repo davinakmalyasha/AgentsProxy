@@ -178,6 +178,24 @@ func ruleCacheClear() {
 	ruleCacheMu.Unlock()
 }
 
+// ruleCacheEvictTenant drops one tenant's cached rules after a rule write.
+// The old global reset cold-missed every tenant on any tenant's edit;
+// prefix-scoped evict (same shape as evictList) keeps the blast radius
+// to the writer.
+func ruleCacheEvictTenant(tenantID string) {
+	if tenantID == "" {
+		return
+	}
+	prefix := tenantID + "|"
+	ruleCacheMu.Lock()
+	for k := range ruleCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(ruleCache, k)
+		}
+	}
+	ruleCacheMu.Unlock()
+}
+
 func (h *handler) resolveRule(ctx context.Context, tx pgx.Tx, tenantID string, date time.Time) (*Rule, error) {
 	// Contract gate: a tenant rolled forward past this binary refuses
 	// here, before any price is computed — one choke point for RuleFor,
@@ -371,7 +389,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	ruleCacheClear()
+	ruleCacheEvictTenant(idn.TenantID())
 	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
@@ -593,7 +611,7 @@ func (h *handler) patch(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
-	ruleCacheClear()
+	ruleCacheEvictTenant(idn.TenantID())
 	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
@@ -667,7 +685,7 @@ func (h *handler) applyHours(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	ruleCacheClear()
+	ruleCacheEvictTenant(idn.TenantID())
 	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]any{
 		"open_time":      open.Format("15:04"),
@@ -706,7 +724,7 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 		records.WriteJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
-	ruleCacheClear()
+	ruleCacheEvictTenant(idn.TenantID())
 	h.evictList(idn.TenantID())
 	records.WriteJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
 }
