@@ -14,7 +14,3 @@ ANALYZE public.tenant_records;
 ANALYZE public.events;
 ANALYZE public.notify_jobs;
 ANALYZE public.agent_reminders;
-ANALYZE project_centrum.sports_bookings;
-ANALYZE project_centrum.sports_facilities;
-ANALYZE project_centrum.sports_pricing_rules;
-ANALYZE project_centrum.sports_court_blocks;
