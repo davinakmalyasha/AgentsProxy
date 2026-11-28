@@ -725,3 +725,18 @@ Shipped via the gate: migration-only PR #158 (`6075ff1`, db-migrate apply succes
 - Deliberately unchanged with reasons: staff keyset pagination (already LIMIT+1 truncated), rule-cache cross-TX singleflight (isolation), auth Redis pipelining (provider-bound noise), RLS definer (no measured win), L1/Lua/payments micro-opts (prior verdicts stand), third TTL notch (product sign-off), region affinity (residual edge variance).
 
 Details: `docs/perf/2026-11-28/batch5-code-db.md`.
+
+### Last sweep — batches 6-9 (2026-11-28, five-subagent audit)
+
+Deep audit across Go path, DB, backend handlers, Redis/pool/edge, chat/SLO. Origin 7-15 ms, edge offload ~100%: the sweep is tail survival + correctness.
+
+- Batch 6 (`8271238`): SLO stream mapping, /v1 body bound, zero-token meter skip, per-tenant rule evict.
+- Batch 7 (`807e89f`): money-Tx folds (payments, kantin), kantin reads off Tx path. Patch-collapse declined (lock order).
+- Batch 8 (`fd06cfc`): stale-if-error, quota singleflight, sanitize once, boot phase timer.
+- Batch 9 (`42ea508`): agent set/prompt stampede guards, burn warning. Chat pipeline declined (provider-bound noise).
+
+Declined/deferred with data: healthz bypass (header compat), gzip lazy (tested state machine), pool-acquire 429 (needs staging proof), cap unification (contract), RLS definer (no measured win), third TTL (product sign-off), L1/Lua-merge/4→3 (prior verdicts).
+
+Manual residuals: Upstash region console read, `ADMIN_API_KEY`, dfdagency streaming, distributed saturation test.
+
+Details: `docs/perf/2026-11-28/sweep-batches-6-9.md`.
