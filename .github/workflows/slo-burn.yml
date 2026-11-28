@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ADMIN_API_KEY:-}" ]; then
-            echo "::notice::ADMIN_API_KEY secret is not set; skipping automated SLO burn check"
+            echo "::warning::ADMIN_API_KEY secret is not set; automated SLO burn check has no coverage (endpoint still readable manually)"
             echo "skip=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi

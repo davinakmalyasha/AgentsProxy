@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/openai/openai-go/v3/option"
+	"golang.org/x/sync/singleflight"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
@@ -81,6 +82,11 @@ type Runner struct {
 	cacheGen uint64
 	toolSets map[string]*cachedTools
 	prompts  map[string]string
+	// setFlight collapses concurrent cold builds for one
+	// (tenant, toolsRole): without it N simultaneous cold agent turns
+	// each run MCP discovery. Only the built value is shared; refresh
+	// and generation checks still run per caller.
+	setFlight singleflight.Group
 }
 
 // cachedTools is one role-filtered, ADK-adapted tool set.
@@ -121,41 +127,51 @@ func (r *Runner) cachedSet(ctx context.Context, tenantID, toolsRole string) (*ca
 		return ct, nil
 	}
 
-	ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
-	if p != nil && len(p.Agent.Tools) > 0 {
-		ts = ts.Only(p.Agent.Tools)
-	}
-	ts = r.withMCP(ctx, ts, p, tenantID, toolsRole)
-	names := ts.Names()
-	adapted := make([]tool.Tool, 0, len(names))
-	for _, name := range names {
-		t, ok := ts.Get(name)
-		if !ok {
-			continue
+	// Collapse concurrent cold builds: N simultaneous turns for a fresh
+	// (tenant, role) share one MCP discovery + adaptation. Failures are
+	// not cached -- the store below only runs on success.
+	v, err, _ := r.setFlight.Do(key, func() (any, error) {
+		ts := r.newToolSet(r.cfg.Pool, tenantID, toolsRole)
+		if p != nil && len(p.Agent.Tools) > 0 {
+			ts = ts.Only(p.Agent.Tools)
 		}
-		at, err := adaptTool(t, tenantID)
-		if err != nil {
-			// Native tool schemas are proven at boot. A remote MCP
-			// server can publish a schema the ADK cannot parse; skip
-			// that tool instead of making the whole agent unusable.
-			if strings.HasPrefix(t.Name, "mcp_") {
-				slog.Warn("adkrunner: skipping MCP tool with unparsable schema",
-					"tenant", tenantID, "tool", t.Name, "err", err)
+		ts = r.withMCP(ctx, ts, p, tenantID, toolsRole)
+		names := ts.Names()
+		adapted := make([]tool.Tool, 0, len(names))
+		for _, name := range names {
+			t, ok := ts.Get(name)
+			if !ok {
 				continue
 			}
-			return nil, err
+			at, err := adaptTool(t, tenantID)
+			if err != nil {
+				// Native tool schemas are proven at boot. A remote MCP
+				// server can publish a schema the ADK cannot parse; skip
+				// that tool instead of making the whole agent unusable.
+				if strings.HasPrefix(t.Name, "mcp_") {
+					slog.Warn("adkrunner: skipping MCP tool with unparsable schema",
+						"tenant", tenantID, "tool", t.Name, "err", err)
+					continue
+				}
+				return nil, err
+			}
+			adapted = append(adapted, at)
 		}
-		adapted = append(adapted, at)
-	}
-	ct = &cachedTools{names: names, adapted: adapted, defs: ts.Definitions()}
-	r.cacheMu.Lock()
-	if r.cacheGen == gen {
-		if r.toolSets == nil {
-			r.toolSets = map[string]*cachedTools{}
+		built := &cachedTools{names: names, adapted: adapted, defs: ts.Definitions()}
+		r.cacheMu.Lock()
+		if r.cacheGen == gen {
+			if r.toolSets == nil {
+				r.toolSets = map[string]*cachedTools{}
+			}
+			r.toolSets[key] = built
 		}
-		r.toolSets[key] = ct
+		r.cacheMu.Unlock()
+		return built, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	r.cacheMu.Unlock()
+	ct, _ = v.(*cachedTools)
 	return ct, nil
 }
 
@@ -251,15 +267,18 @@ func (r *Runner) cachedPrompt(tenantID, role, date string, build func() string) 
 		}
 	}
 	r.cacheMu.RUnlock()
+	// Build outside the write lock: assembly is pure string work and the
+	// old shape blocked every tenant while one prompt built. Double-check
+	// under the lock so concurrent builders store once.
+	p := build()
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 	if r.prompts == nil {
 		r.prompts = map[string]string{}
 	}
-	if p, ok := r.prompts[key]; ok {
-		return p
+	if existing, ok := r.prompts[key]; ok {
+		return existing
 	}
-	p := build()
 	r.prompts[key] = p
 	for k := range r.prompts {
 		if !strings.HasSuffix(k, "\x00"+date) {
