@@ -680,3 +680,15 @@ Why lazy init stops here:
 Decision: **no further cold-start work.** The next cold-start lever, if any, is platform-side (provisioned concurrency / warmer), not Go code. Revisit only if `boot_ms` regresses past 500 ms in these logs.
 
 Also live in this window: Go 1.27.0 → 1.27.4 (PR #152, latest patch per go.dev), redis 9.22→9.23 (#104), x/sync 0.23→0.25 (#102, the errgroup in use), excelize pseudo→release (#97). Each through the normal gate with prod smoke PASS.
+
+### Edge TTL second notch — 2026-11-28 (user-signed)
+
+Shipped via the normal gate: code PR #154 merged as `6cdb3d7`; deploy promoted, prod smoke PASS on `6cdb3d7`.
+
+- Availability edge: `s-maxage 10 -> 30`, SWR `30 -> 60` (in-process 10s unchanged; worst stale ~40s).
+- Facilities/pricing edge: `s-maxage 60 -> 120`, SWR `120 -> 300` (in-process 30s unchanged; worst stale ~150s).
+- Hit and miss paths verified to carry identical headers (a short-header hit would pin the edge entry short); previously the facilities/pricing in-process hit paths still emitted the old `(60,120)`.
+
+Safety, stated: a stale availability board degrades to a clean 409 (the exclusion constraint rejects overlaps), never a double booking. Actual booking charges resolve server-side (`ruleCache` 30s + DB), so edge staleness on pricing/facilities is display-only.
+
+Production edge probe (2026-11-28, `6cdb3d7`, non-busted, 1 conc, 0.5 RPS, 0 errors): facilities **28/28** hits, pricing **30/30**, availability **26/28**; p50 88–108ms. Two notes, honestly: p50 reads ~25ms higher than the 63–69ms of the previous run, but facilities/pricing had **zero origin contact** (server p95 0.00) — the delta is pure edge/network variance between runs, not server code (same code path, header values only). Availability's two origin passes show one slow DB sample (db p95 42.5ms over n=2, pooler hiccup class); the 7s p99s are single edge outliers. Offload improved (near-100% hits); client latency flat within edge noise. Raw: `docs/perf/2026-11-28/prod-ttl2-edge.*`.
