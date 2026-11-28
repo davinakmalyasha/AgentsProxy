@@ -82,6 +82,7 @@ func NewRouter(d Deps) http.Handler {
 
 		chatH := NewChat(d.Pool, d.Cache, d.LLM, d.Redis, d.Cfg.RateLimitPerMinute)
 		r.Post("/chat", chatH.ServeHTTP)
+		r.Post("/chat/stream", chatH.ServeStream)
 
 		// Agent chat — single shared LLM_API_KEY, 3 doors (client/pegawai/owner)
 		// Client: public landing widget (FAQ/availability only), no money

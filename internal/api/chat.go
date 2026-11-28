@@ -85,36 +85,164 @@ func sanitizeModel(requested, def string) string {
 }
 
 func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r, req, clientModel, model, ok := h.resolveAuth(w, r)
+	if !ok {
+		return
+	}
+
+	llmCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	reply, inTok, outTok, lerr := h.LLM.Chat(llmCtx, req.Messages, model)
+	if lerr != nil {
+		writeJSONError(w, http.StatusBadGateway, "provider error")
+		return
+	}
+
+	h.meter(r, clientModel.ID, model, inTok, outTok)
+
+	cost := usage.EstimateCost(inTok, outTok)
+	writeJSON(w, http.StatusOK, chatResponse{
+		Reply: reply,
+		Usage: chatUsage{PromptTokens: inTok, CompletionTokens: outTok, CostUSD: cost},
+	})
+}
+
+// streamDone is the terminal event of /v1/chat/stream. Clients that
+// accumulate deltas ignore Reply; clients that only want the final
+// answer read Reply + Usage here.
+type streamDone struct {
+	Done  bool      `json:"done"`
+	Reply string    `json:"reply"`
+	Usage chatUsage `json:"usage"`
+}
+
+// ServeStream is POST /v1/chat/stream: the same gate and metering as
+// ServeHTTP, but the reply streams as server-sent events so the first
+// token arrives at provider-TTFB instead of after the full completion.
+// Every event is `data: <json>\n\n`:
+//
+//	{"delta":"..."}   content deltas, in order; concatenated they are the reply
+//	{"done":true,"reply":"...","usage":{"prompt_tokens":N,"completion_tokens":M,"cost_usd":F}}
+//	{"error":"provider error"}   only if the provider fails mid-stream
+//
+// Pre-stream failures (auth, validation, quota, rate limit) are plain
+// JSON with the same status codes as /v1/chat, because headers are not
+// sent until the gate passes. Only post-200 failures become events.
+// Metering runs detached like ServeHTTP, including on partial streams
+// (the provider bills what it generated), but is skipped when nothing
+// was produced at all.
+func (h *Chat) ServeStream(w http.ResponseWriter, r *http.Request) {
+	r, req, clientModel, model, ok := h.resolveAuth(w, r)
+	if !ok {
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// No streaming support (never true on a real server, possible
+		// in exotic tests): degrade to the JSON reply, same contract
+		// as /v1/chat.
+		llmCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		reply, inTok, outTok, lerr := h.LLM.Chat(llmCtx, req.Messages, model)
+		if lerr != nil {
+			writeJSONError(w, http.StatusBadGateway, "provider error")
+			return
+		}
+		h.meter(r, clientModel.ID, model, inTok, outTok)
+		cost := usage.EstimateCost(inTok, outTok)
+		writeJSON(w, http.StatusOK, chatResponse{
+			Reply: reply,
+			Usage: chatUsage{PromptTokens: inTok, CompletionTokens: outTok, CostUSD: cost},
+		})
+		return
+	}
+	// Headers first, before the provider is even dialed: intermediaries
+	// must see an event stream, not a stalled JSON body, so nothing
+	// buffers waiting for the full completion.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	writeEvent := func(v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	llmCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	reply, inTok, outTok, lerr := h.LLM.Stream(llmCtx, req.Messages, model, func(delta string) error {
+		return writeEvent(map[string]string{"delta": delta})
+	})
+	if reply != "" || inTok != 0 || outTok != 0 {
+		h.meter(r, clientModel.ID, model, inTok, outTok)
+	}
+	if lerr != nil {
+		_ = writeEvent(map[string]string{"error": "provider error"})
+		return
+	}
+	cost := usage.EstimateCost(inTok, outTok)
+	_ = writeEvent(streamDone{
+		Done:  true,
+		Reply: reply,
+		Usage: chatUsage{PromptTokens: inTok, CompletionTokens: outTok, CostUSD: cost},
+	})
+}
+
+// meter records usage detached from client cancellation. It must never
+// break the reply the user already paid latency for — but it must not
+// be lost either. A client that disconnects after the model call still
+// gets metered. Warn, not Error: Error records auto-forward to Sentry
+// with a stack trace, and a metering blip must not page.
+func (h *Chat) meter(r *http.Request, clientID, model string, inTok, outTok int) {
+	mctx, mcancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer mcancel()
+	if err := usage.Record(mctx, h.Pool, h.RDB, clientID, model, "chat", inTok, outTok); err != nil {
+		slog.Warn("usage record failed", "client_id", clientID, "err", err)
+	}
+}
+
+// resolveAuth runs the shared pre-LLM gate for /v1/chat and
+// /v1/chat/stream: body validation, token auth, quarantine, the
+// per-client rate limit, and quota. It writes the error response and
+// returns ok=false on any failure; callers must stop. On success it
+// returns the updated request (client ID in context), the validated
+// body, the client model, and the sanitized model.
+func (h *Chat) resolveAuth(w http.ResponseWriter, r *http.Request) (*http.Request, *chatRequest, *cache.ClientModel, string, bool) {
+	fail := func(status int, msg string) (*http.Request, *chatRequest, *cache.ClientModel, string, bool) {
+		writeJSONError(w, status, msg)
+		return nil, nil, nil, "", false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid json")
-		return
+		return fail(http.StatusBadRequest, "invalid json")
 	}
 	if req.ClientToken == "" {
-		writeJSONError(w, http.StatusUnauthorized, "missing client_token")
-		return
+		return fail(http.StatusUnauthorized, "missing client_token")
 	}
 	if len(req.Messages) == 0 {
-		writeJSONError(w, http.StatusBadRequest, "messages required")
-		return
+		return fail(http.StatusBadRequest, "messages required")
 	}
 	if len(req.Messages) > maxChatMessages {
-		writeJSONError(w, http.StatusBadRequest, "too many messages")
-		return
+		return fail(http.StatusBadRequest, "too many messages")
 	}
 	for _, m := range req.Messages {
 		if m.Content == "" {
-			writeJSONError(w, http.StatusBadRequest, "empty message content")
-			return
+			return fail(http.StatusBadRequest, "empty message content")
 		}
 		if m.Role != "system" && m.Role != "user" && m.Role != "assistant" {
-			writeJSONError(w, http.StatusBadRequest, "invalid message role")
-			return
+			return fail(http.StatusBadRequest, "invalid message role")
 		}
 		if utf8.RuneCountInString(m.Content) > maxMessageRunes {
-			writeJSONError(w, http.StatusBadRequest, "message too long")
-			return
+			return fail(http.StatusBadRequest, "message too long")
 		}
 	}
 	// Force a single model for this shared-key endpoint. req.Model only
@@ -124,20 +252,16 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientModel, err := h.Cache.GetByToken(r.Context(), req.ClientToken)
 	if err != nil {
 		if errors.Is(err, cache.ErrInvalidToken) {
-			writeJSONError(w, http.StatusUnauthorized, "invalid token")
-			return
+			return fail(http.StatusUnauthorized, "invalid token")
 		}
-		writeJSONError(w, http.StatusInternalServerError, "internal")
-		return
+		return fail(http.StatusInternalServerError, "internal")
 	}
 	if clientModel.Status != "active" {
-		writeJSONError(w, http.StatusForbidden, "client "+clientModel.Status)
-		return
+		return fail(http.StatusForbidden, "client "+clientModel.Status)
 	}
 	if q, reason := tenanthealth.Check(clientModel.TenantID); q {
 		slog.Warn("quarantined tenant blocked from chat", "tenant", clientModel.TenantID, "reason", reason)
-		writeJSONError(w, http.StatusServiceUnavailable, tenanthealth.ResponseBody)
-		return
+		return fail(http.StatusServiceUnavailable, tenanthealth.ResponseBody)
 	}
 
 	// Make client_id visible to logging + rate-limit middleware.
@@ -153,7 +277,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "rate limit exceeded"})
-		return
+		return nil, nil, nil, "", false
 	}
 
 	if _, _, qerr := quota.Check(r.Context(), h.Pool, h.RDB, clientModel.ID, clientModel.MonthlyQuotaTokens); qerr != nil {
@@ -166,35 +290,11 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"error":   "quota exceeded",
 				"resetAt": resetAt.UTC().Format(time.RFC3339),
 			})
-			return
+			return nil, nil, nil, "", false
 		}
-		writeJSONError(w, http.StatusInternalServerError, "internal")
-		return
+		return fail(http.StatusInternalServerError, "internal")
 	}
 
-	llmCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
 	model := sanitizeModel(req.Model, h.LLM.DefaultModel)
-	reply, inTok, outTok, lerr := h.LLM.Chat(llmCtx, req.Messages, model)
-	if lerr != nil {
-		writeJSONError(w, http.StatusBadGateway, "provider error")
-		return
-	}
-
-	// Metering must never break the reply the user already paid
-	// latency for — but it must not be lost either. Detached context:
-	// a client that disconnects after the model call still gets
-	// metered. Warn, not Error: Error records auto-forward to Sentry
-	// with a stack trace, and a metering blip must not page.
-	mctx, mcancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer mcancel()
-	if err := usage.Record(mctx, h.Pool, h.RDB, clientModel.ID, model, "chat", inTok, outTok); err != nil {
-		slog.Warn("usage record failed", "client_id", clientModel.ID, "err", err)
-	}
-
-	cost := usage.EstimateCost(inTok, outTok)
-	writeJSON(w, http.StatusOK, chatResponse{
-		Reply: reply,
-		Usage: chatUsage{PromptTokens: inTok, CompletionTokens: outTok, CostUSD: cost},
-	})
+	return r, &req, clientModel, model, true
 }

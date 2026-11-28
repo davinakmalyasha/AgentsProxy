@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +20,13 @@ type chatReq struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
+	Stream bool `json:"stream"`
+}
+
+// quote JSON-quotes s for the hand-built SSE chunks above.
+func quote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func main() {
@@ -44,6 +52,18 @@ func main() {
 		content := "echo: ok"
 		if len(req.Messages) > 0 {
 			content = "echo: " + req.Messages[len(req.Messages)-1].Content
+		}
+		if req.Stream {
+			// Minimal OpenAI-compatible SSE: two content deltas, a
+			// usage-bearing final chunk, then [DONE]. Split mid-word on
+			// purpose so clients cannot assume word boundaries.
+			mid := len(content) / 2
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%s}}]}\n\n", quote(content[:mid]))
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%s}}]}\n\n", quote(content[mid:]))
+			fmt.Fprintf(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":18}}\n\n")
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
