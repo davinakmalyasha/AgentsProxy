@@ -408,8 +408,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var out []ruleResp
-	_, err, _ := h.sf.Do(key, func() (any, error) {
+	v, err, _ := h.sf.Do(key, func() (any, error) {
 		built := make([]ruleResp, 0, limit+1)
 		rerr := records.WithTenantRead(r.Context(), h.pool, idn.TenantID(),
 			`SELECT id::text, tenant_id, valid_from::text, open_time::text, close_time::text, day_start::text, day_end::text, price_day, price_evening, is_active, created_at
@@ -431,12 +430,17 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		if rerr != nil {
 			return nil, rerr
 		}
-		out = built
 		return built, nil
 	})
 	if err != nil {
 		records.WriteJSONError(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	// Same shared-result contract as facilities: duplicate waiters get
+	// the first build via the return value, never a nil outer variable.
+	out, _ := v.([]ruleResp)
+	if out == nil {
+		out = []ruleResp{}
 	}
 	h.listCacheMu.Lock()
 	if h.listCache == nil {
