@@ -714,3 +714,14 @@ Three candidates were measured against the code and rejected; recording the reas
 - **Payments patch 4→3 statements.** Would fold price+SUM into one SELECT but weakens the `FOR UPDATE` locking the overpay check depends on (concurrent create could slip between check and update). Declined without a concurrency proof; the endpoint is staff-only and unprobed in prod.
 
 None of the three moves a public SLO; all three add risk. The optimization program stays complete.
+
+### Batch 5 — code correctness + maintenance (2026-11-28)
+
+Shipped via the gate: migration-only PR #158 (`6075ff1`, db-migrate apply success) → code PR #159 (`29c77b7`), deploy success, prod smoke PASS on `29c77b7`.
+
+- Singleflight shared-result fix (facilities + pricing lists): duplicate waiters got nil and poisoned the cache under burst; now uses the `Do` return value. Correctness fix with a perf tail (no more empty-cache stampedes).
+- gzip BestSpeed, 1 MiB body bound on project/vertical routers.
+- ANALYZE-only migrations (public 098 + centrum 0017); fresh EXPLAIN re-confirms no new index (facilities/pricing/bookings/blocks all Index Scan; clients/usage seq scans correct at tiny volume with proper indexes for scale).
+- Deliberately unchanged with reasons: staff keyset pagination (already LIMIT+1 truncated), rule-cache cross-TX singleflight (isolation), auth Redis pipelining (provider-bound noise), RLS definer (no measured win), L1/Lua/payments micro-opts (prior verdicts stand), third TTL notch (product sign-off), region affinity (residual edge variance).
+
+Details: `docs/perf/2026-11-28/batch5-code-db.md`.
