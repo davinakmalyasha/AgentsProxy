@@ -216,7 +216,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		h.cacheMu.Unlock()
 		if ok && now.Sub(hit.at) < facCacheTTL {
 			if idn.IsPublic() {
-				records.MarkPublicCache(w, 60, 120)
+				records.MarkPublicCache(w, 120, 300)
 			}
 			records.WriteJSON(w, http.StatusOK, map[string]any{"items": hit.items})
 			return
@@ -281,7 +281,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	h.cache[key] = cachedFacilities{at: time.Now(), items: out}
 	h.cacheMu.Unlock()
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 60, 120)
+		records.MarkPublicCache(w, 120, 300)
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
@@ -315,7 +315,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	f.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 	f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 60, 120)
+		records.MarkPublicCache(w, 120, 300)
 	}
 	records.WriteJSON(w, http.StatusOK, f)
 }

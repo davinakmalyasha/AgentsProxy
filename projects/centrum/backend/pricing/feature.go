@@ -402,7 +402,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		h.listCacheMu.Unlock()
 		if ok && now.Sub(hit.at) < listCacheTTL {
 			if idn.IsPublic() {
-				records.MarkPublicCache(w, 60, 120)
+				records.MarkPublicCache(w, 120, 300)
 			}
 			records.WriteJSON(w, http.StatusOK, map[string]any{"items": hit.items})
 			return
@@ -459,7 +459,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	h.listCache[key] = cachedList{at: time.Now(), items: out}
 	h.listCacheMu.Unlock()
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 60, 120)
+		records.MarkPublicCache(w, 120, 300)
 	}
 	records.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
@@ -492,7 +492,7 @@ func (h *handler) getOne(w http.ResponseWriter, r *http.Request) {
 	}
 	rr.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 60, 120)
+		records.MarkPublicCache(w, 120, 300)
 	}
 	records.WriteJSON(w, http.StatusOK, rr)
 }

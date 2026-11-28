@@ -126,7 +126,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		if ok && now.Sub(hit.at) < cacheTTL {
 			w.Header().Set("X-Avail-Cache", "hit")
 			if idn.IsPublic() {
-				records.MarkPublicCache(w, 10, 30)
+				records.MarkPublicCache(w, 30, 60)
 			}
 			records.WriteJSON(w, http.StatusOK, hit.payload)
 			return
@@ -175,7 +175,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	h.cache[key] = cachedAvail{at: time.Now(), payload: payload}
 	h.cacheMu.Unlock()
 	if idn.IsPublic() {
-		records.MarkPublicCache(w, 10, 30)
+		records.MarkPublicCache(w, 30, 60)
 	}
 	records.WriteJSON(w, http.StatusOK, payload)
 }
