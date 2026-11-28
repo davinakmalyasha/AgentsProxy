@@ -26,6 +26,11 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 // SecurityHeaders keeps browser/proxy caching at no-store, while Vercel's
 // CDN honors the more specific header. Only public GET 200 responses may
 // call this; authenticated responses must never carry it.
+//
+// stale-if-error is error-path only (zero freshness cost): when the origin
+// 500s during revalidation, the edge may serve up to 5 minutes stale
+// instead of passing the 500 through. Booking correctness stays
+// server-side, so a stale board can only degrade to a clean 409.
 func MarkPublicCache(w http.ResponseWriter, maxAge, staleWhileRevalidate int) {
 	if maxAge <= 0 {
 		return
@@ -33,7 +38,7 @@ func MarkPublicCache(w http.ResponseWriter, maxAge, staleWhileRevalidate int) {
 	if staleWhileRevalidate < maxAge {
 		staleWhileRevalidate = maxAge
 	}
-	value := fmt.Sprintf("public, s-maxage=%d, stale-while-revalidate=%d", maxAge, staleWhileRevalidate)
+	value := fmt.Sprintf("public, s-maxage=%d, stale-while-revalidate=%d, stale-if-error=300", maxAge, staleWhileRevalidate)
 	h := w.Header()
 	h.Set("Vercel-CDN-Cache-Control", value)
 	h.Set("CDN-Cache-Control", value)

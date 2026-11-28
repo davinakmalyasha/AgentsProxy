@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -37,6 +38,13 @@ type QuotaExceededError struct {
 	Used    int
 	Limit   int
 }
+
+// quotaLoads collapses concurrent month-SUM repopulates for one
+// (client, month). The Redis key expires monthly; without this the first
+// burst after rollover (or an eviction) fires N identical SUMs that also
+// race on the repopulating SET. Only the integer is shared; every caller
+// still runs its own limit comparison, and a SUM error still denies.
+var quotaLoads singleflight.Group
 
 func (e *QuotaExceededError) Error() string {
 	return fmt.Sprintf("quota exceeded: used=%d limit=%d reset_at=%s", e.Used, e.Limit, e.ResetAt.Format(time.RFC3339))
@@ -78,26 +86,37 @@ func Check(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, clientID st
 		slog.Warn("quota cache unavailable, using DB", "client_id", clientID, "err", gerr)
 	}
 	if !fromCache {
-		var err error
-		used, err = sumMonthUsage(ctx, db, clientID)
-		if err != nil {
-			slog.Error("quota sum failed, denying", "client_id", clientID, "err", err)
-			return 0, time.Time{}, fmt.Errorf("quota sum: %w", err)
+		v, verr, _ := quotaLoads.Do(rkey, func() (any, error) {
+			// Detached: one caller hanging up must not fail every
+			// request sharing this cold miss. Fail-closed stays:
+			// a SUM error still denies every waiter.
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			used, err := sumMonthUsage(dctx, db, clientID)
+			if err != nil {
+				return 0, err
+			}
+			if used < 0 {
+				used = 0
+			}
+			// Repopulate with the SAME month-anchored expiry the counter
+			// writes use. The old 30s TTL here meant a repopulated key
+			// silently became a 30-second key and the next request re-ran
+			// the full month SUM.
+			ttl := time.Until(nextMonthStart(now).Add(24 * time.Hour))
+			if ttl < time.Minute {
+				ttl = time.Minute
+			}
+			if err := rdb.Set(dctx, rkey, used, ttl).Err(); err != nil {
+				slog.Warn("quota cache repopulate", "client_id", clientID, "err", err)
+			}
+			return used, nil
+		})
+		if verr != nil {
+			slog.Error("quota sum failed, denying", "client_id", clientID, "err", verr)
+			return 0, time.Time{}, fmt.Errorf("quota sum: %w", verr)
 		}
-		if used < 0 {
-			used = 0
-		}
-		// Repopulate with the SAME month-anchored expiry the counter
-		// writes use. The old 30s TTL here meant a repopulated key
-		// silently became a 30-second key and the next request re-ran
-		// the full month SUM.
-		ttl := time.Until(nextMonthStart(now).Add(24 * time.Hour))
-		if ttl < time.Minute {
-			ttl = time.Minute
-		}
-		if err := rdb.Set(ctx, rkey, used, ttl).Err(); err != nil {
-			slog.Warn("quota cache repopulate", "client_id", clientID, "err", err)
-		}
+		used, _ = v.(int)
 	}
 
 	remaining := limit - used

@@ -234,11 +234,13 @@ func main() {
 		slog.Error("project features registered without project.json; refusing boot", "project", slug)
 		os.Exit(1)
 	}
+	toolsStart := time.Now()
 	projects, badTenants, err := agentstools.LoadProjectsSnapshot(projectCfgs, badProjects, agentstools.AllTools(pool))
 	if err != nil {
 		slog.Error("agent project config unloadable", "err", err)
 		os.Exit(1)
 	}
+	phase("tools_snapshot", toolsStart)
 	if len(projects) == 0 {
 		slog.Error("agent project config: zero healthy tenants")
 		os.Exit(1)
