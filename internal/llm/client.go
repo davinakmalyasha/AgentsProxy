@@ -2,6 +2,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -80,11 +81,17 @@ func New(baseURL, apiKey, model string, maxTokens int) *Client {
 }
 
 type chatRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	MaxTokens       int       `json:"max_tokens"`
-	ReasoningEffort *string   `json:"reasoning_effort,omitempty"`
-	Thinking        *thinking `json:"thinking,omitempty"`
+	Model           string         `json:"model"`
+	Messages        []Message      `json:"messages"`
+	MaxTokens       int            `json:"max_tokens"`
+	ReasoningEffort *string        `json:"reasoning_effort,omitempty"`
+	Thinking        *thinking      `json:"thinking,omitempty"`
+	Stream          bool           `json:"stream,omitempty"`
+	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type thinking struct {
@@ -202,6 +209,164 @@ func (c *Client) Complete(
 		comp.CompletionTok = len(comp.Content)/4 + len(choice0.Message.ToolCalls)*16
 	}
 	return comp, nil
+}
+
+// streamChunk is the minimal OpenAI-compatible SSE chunk parsed here:
+// a content delta per choice, and optionally usage on the final chunk
+// (sent when stream_options.include_usage is true).
+type streamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage,omitempty"`
+}
+
+// maxStreamLine bounds one SSE line. Deltas are words, not documents;
+// 1MB is far above any real chunk and stops a malicious provider from
+// growing the scanner buffer without bound.
+const maxStreamLine = 1 << 20
+
+// Stream posts like Complete but with stream:true and calls onDelta for
+// each content delta as it arrives, returning the accumulated text plus
+// token counts. It mirrors Complete's shaping (low-effort first try,
+// thinking flag) and its "Invalid option" retry for providers that want
+// the other shape. An onDelta error aborts the read: the handler treats
+// a dead client as done and still meters what accumulated, so a
+// disconnect mid-stream never loses metering. A truncated provider
+// stream returns the partial text with fallback tokens and a wrapped
+// ErrProvider so the handler meters the partial and reports the error.
+func (c *Client) Stream(ctx context.Context, messages []Message, modelOverride string, onDelta func(string) error) (string, int, int, error) {
+	build := func(reason string) chatRequest {
+		model := c.DefaultModel
+		if modelOverride != "" {
+			model = modelOverride
+		}
+		payload := chatRequest{
+			Model:         model,
+			Messages:      messages,
+			MaxTokens:     c.MaxTokens,
+			Stream:        true,
+			StreamOptions: &streamOptions{IncludeUsage: true},
+		}
+		payload.ReasoningEffort = &reason
+		if IsReasoningModel(model) {
+			payload.Thinking = &thinking{Type: "disabled"}
+		}
+		return payload
+	}
+	reasonLow := "low"
+	full, inTok, outTok, retryable, err := c.streamOnce(ctx, build(reasonLow), onDelta)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if retryable {
+		// Same retry as Complete: no deltas were delivered (the error
+		// body is not SSE), so the second attempt cannot double-send.
+		reasonNone := "none"
+		full, inTok, outTok, _, err = c.streamOnce(ctx, build(reasonNone), onDelta)
+		if err != nil {
+			return "", 0, 0, err
+		}
+	}
+	return full, inTok, outTok, nil
+}
+
+func (c *Client) streamOnce(ctx context.Context, payload chatRequest, onDelta func(string) error) (full string, inTok, outTok int, retryable bool, err error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", 0, 0, false, fmt.Errorf("marshal: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatURL, bytes.NewReader(body))
+	if err != nil {
+		return "", 0, 0, false, fmt.Errorf("new request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", c.bearer)
+	if c.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", c.SessionID)
+	}
+
+	// Same 60s total budget as post(): streaming improves time-to-first-
+	// token, not the deadline. A stall past the budget ends the stream.
+	resp, err := c.HTTP.Do(httpReq)
+	if err != nil {
+		return "", 0, 0, false, fmt.Errorf("%w: %v", ErrProvider, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Error bodies are small JSON, never SSE: bound the read like
+		// Complete does before scanning for the retry shape.
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if len(raw) < 512 && bytes.Contains(raw, []byte("Invalid option")) {
+			return "", 0, 0, true, nil
+		}
+		return "", 0, 0, false, fmt.Errorf("%w: status %d", ErrProvider, resp.StatusCode)
+	}
+
+	var sb strings.Builder
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64*1024), maxStreamLine)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue // ": keep-alive", "event:", blank lines
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			break
+		}
+		var ch streamChunk
+		if err := json.Unmarshal([]byte(data), &ch); err != nil {
+			return sb.String(), inTok, outTok, false, fmt.Errorf("%w: decode chunk", ErrProvider)
+		}
+		if ch.Usage != nil {
+			inTok = ch.Usage.PromptTokens
+			outTok = ch.Usage.CompletionTokens
+		}
+		for _, choice := range ch.Choices {
+			if choice.Delta.Content == "" {
+				continue
+			}
+			sb.WriteString(choice.Delta.Content)
+			if onDelta != nil {
+				if derr := onDelta(choice.Delta.Content); derr != nil {
+					full := sb.String()
+					if outTok == 0 {
+						outTok = len(full) / 4
+					}
+					return full, inTok, outTok, false, nil
+				}
+			}
+		}
+	}
+	if serr := sc.Err(); serr != nil {
+		full := sb.String()
+		if outTok == 0 {
+			outTok = len(full) / 4
+		}
+		if errors.Is(serr, context.Canceled) || errors.Is(serr, context.DeadlineExceeded) {
+			// Client or deadline went away mid-stream: keep what
+			// accumulated so metering still records it.
+			return full, inTok, outTok, false, nil
+		}
+		return full, inTok, outTok, false, fmt.Errorf("%w: truncated stream", ErrProvider)
+	}
+	full = sb.String()
+	if inTok == 0 && outTok == 0 {
+		// Provider sent no usage chunk: same character fallback as
+		// Complete (chat carries no tool calls, so no per-call term).
+		outTok = len(full) / 4
+	}
+	return full, inTok, outTok, false, nil
 }
 
 // IsReasoningModel reports whether the model thinks unless told not to,
